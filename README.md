@@ -30,8 +30,20 @@ planning and review and a free opencode model for coding. The reviewers run
 read-only, and **Autopilot never commits or pushes**: when the mission is done,
 the changes wait in your working tree for you to review and commit.
 
+## Install
+
+Needs Node.js 18+, Git and at least one signed-in agent CLI
+([details](#get-started)).
+
+```bash
+npm install -g github:mmetwally-dev/project-autopilot
+cd your-project && ap setup
+ap run "your request"
+```
+
 ## Contents
 
+- [Install](#install)
 - [Choose how to use it](#choose-how-to-use-it)
 - [Get started](#get-started)
 - [How a mission works](#how-a-mission-works)
