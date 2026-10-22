@@ -41,6 +41,12 @@ cd your-project && ap setup
 ap run "your request"
 ```
 
+`ap` is installed **once per machine**; each project is set up **once with
+`ap setup`** (its own settings, slash commands and missions in `.autopilot/`).
+If you forget, the first `ap run` in a project starts the setup by itself.
+To update to a new version, run the same `npm install -g` command again; your
+projects keep their settings.
+
 ## Contents
 
 - [Install](#install)
