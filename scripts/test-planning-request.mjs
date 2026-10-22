@@ -1,0 +1,13 @@
+import assert from "node:assert/strict";
+import { classifyPlanningRequest } from "./planning-request.mjs";
+assert.deepEqual(classifyPlanningRequest({request:"new dashboard",currentRequest:"old login",stateStatus:"complete"}),{kind:"new",reason:"explicit request differs from active planning request"});
+assert.deepEqual(classifyPlanningRequest({request:"same task",currentRequest:"same task",stateStatus:"complete"}),{kind:"resume",reason:"request matches active planning request"});
+assert.deepEqual(classifyPlanningRequest({request:"sprint 9",currentRequest:"",stateStatus:"complete"}),{kind:"new",reason:"no prior active request"});
+assert.deepEqual(classifyPlanningRequest({request:"",currentRequest:"active",stateStatus:"complete"}),{kind:"resume",reason:"no explicit request"});
+console.log("planning request intent: PASS");
+import fs from "node:fs";
+const autopilotSource = fs.readFileSync(new URL("./autopilot.mjs", import.meta.url), "utf8");
+assert.match(autopilotSource, /function relay\(roleName,task,c,s,options=\{\}\)/);
+assert.match(autopilotSource, /persistState=true[^\n]*requirements=\[\]/);
+assert.match(autopilotSource, /if\s*\(\s*alwaysSave\s*\|\|\s*persistState\s*\)\s*saveState\(s\);/);
+console.log("relay state persistence regression: PASS");

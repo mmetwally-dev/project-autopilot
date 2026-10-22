@@ -1,0 +1,61 @@
+{
+  "source": "https://code.claude.com/docs/en/model-config",
+  "last_verified": "2026-08-15",
+  "note": "Documented Claude Code aliases; not a live check of account or organization availability.",
+  "models": [
+    {
+      "id": "default",
+      "label": "default — recommended model for your account",
+      "kind": "alias",
+      "reasoning": []
+    },
+    {
+      "id": "best",
+      "label": "best — Fable 5 when available, otherwise latest Opus",
+      "kind": "alias",
+      "reasoning": ["low", "medium", "high", "xhigh", "max"]
+    },
+    {
+      "id": "fable",
+      "label": "fable — Fable 5",
+      "kind": "alias",
+      "reasoning": ["low", "medium", "high", "xhigh", "max"]
+    },
+    {
+      "id": "sonnet",
+      "label": "sonnet — latest Sonnet",
+      "kind": "alias",
+      "reasoning": ["low", "medium", "high", "xhigh", "max"]
+    },
+    {
+      "id": "opus",
+      "label": "opus — latest Opus",
+      "kind": "alias",
+      "reasoning": ["low", "medium", "high", "xhigh", "max"]
+    },
+    {
+      "id": "haiku",
+      "label": "haiku — fast Haiku",
+      "kind": "alias",
+      "reasoning": []
+    },
+    {
+      "id": "sonnet[1m]",
+      "label": "sonnet[1m] — Sonnet with 1M context",
+      "kind": "alias",
+      "reasoning": ["low", "medium", "high", "xhigh", "max"]
+    },
+    {
+      "id": "opus[1m]",
+      "label": "opus[1m] — Opus with 1M context",
+      "kind": "alias",
+      "reasoning": ["low", "medium", "high", "xhigh", "max"]
+    },
+    {
+      "id": "opusplan",
+      "label": "opusplan — Opus for plan, Sonnet for execution",
+      "kind": "alias",
+      "reasoning": ["low", "medium", "high", "xhigh", "max"]
+    }
+  ]
+}

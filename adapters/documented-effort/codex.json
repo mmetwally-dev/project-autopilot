@@ -1,0 +1,6 @@
+{
+  "source": "https://developers.openai.com/api/docs/guides/reasoning",
+  "last_verified": "2026-09-11",
+  "note": "Documented reasoning.effort values for OpenAI models exposed via the Codex CLI. The full documented set is larger and varies per model (e.g. some models also support \"none\" and \"minimal\"); this is the fixed subset offered here. Not a live check of what the specific model you selected actually supports.",
+  "levels": ["low", "medium", "high", "xhigh", "max"]
+}

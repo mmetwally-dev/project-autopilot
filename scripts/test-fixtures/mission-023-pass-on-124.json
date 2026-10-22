@@ -1,0 +1,33 @@
+{
+  "provenance": "backlog #28 evidence (.autopilot/tasks/backlog.md:686-699): mission-023 final code review 47-code_reviewer-78bf30c9 ran three integration suites in parallel, each under `timeout 420`, all killed with exit=124, then returned PASS",
+  "verdict": {
+    "decision": "PASS",
+    "findings": []
+  },
+  "linkedResults": [
+    {
+      "command": "node scripts/test-review-feedback-persistence.mjs",
+      "status": 124,
+      "exitCode": 124,
+      "signal": null,
+      "timedOut": false,
+      "ok": false
+    },
+    {
+      "command": "node scripts/test-speckit-planning-review-resume.mjs",
+      "status": 124,
+      "exitCode": 124,
+      "signal": null,
+      "timedOut": false,
+      "ok": false
+    },
+    {
+      "command": "node scripts/test-cap-breach-rollover.mjs",
+      "status": 124,
+      "exitCode": 124,
+      "signal": null,
+      "timedOut": false,
+      "ok": false
+    }
+  ]
+}

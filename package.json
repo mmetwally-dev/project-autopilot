@@ -1,0 +1,39 @@
+{
+  "name": "project-autopilot",
+  "version": "12.0.0",
+  "private": false,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mmetwally-dev/project-autopilot.git"
+  },
+  "homepage": "https://github.com/mmetwally-dev/project-autopilot#readme",
+  "description": "Configurable multi-agent delivery orchestrator (Planning -> Plan Review -> Implementation -> Code Review -> Verification) for SpecKit, GSD, and standalone projects. Runs directly with Node; no installer, signing, or certification step required.",
+  "type": "module",
+  "bin": {
+    "ap": "bin/ap.cjs"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "!scripts/test-*.mjs",
+    "!scripts/test-fixtures/",
+    "adapters/",
+    "references/",
+    "SKILL.md",
+    "README.md",
+    "THIRD-PARTY-NOTICES.md",
+    "config.example.json",
+    "config.schema.json"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "playwright": "1.61.1"
+  },
+  "scripts": {
+    "test": "node scripts/test-all.mjs",
+    "playwright:install": "playwright install chromium"
+  }
+}

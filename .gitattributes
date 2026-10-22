@@ -1,0 +1,7 @@
+# Store and check out text as LF on every OS, so edits made from Windows
+# (or through \\wsl.localhost) do not turn whole files into CRLF diffs.
+* text=auto eol=lf
+
+# Windows batch launchers are committed with CRLF; keep them byte-for-byte.
+*.cmd -text
+*.bat -text

@@ -1,0 +1,1850 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://project-autopilot.dev/config.schema.json",
+  "title": "project-autopilot config",
+  "description": "The v4 `.autopilot/config.json` layout: settings grouped by what you decide, with units in the names.",
+  "type": "object",
+  "additionalProperties": false,
+  "patternProperties": {
+    "^_": {}
+  },
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Relative path to this schema file.",
+      "default": "./config.schema.json"
+    },
+    "schema_version": {
+      "type": "string",
+      "description": "On-disk config format version; always 4.0 for this layout.",
+      "const": "4.0",
+      "default": "4.0"
+    },
+    "project": {
+      "type": "object",
+      "description": "Project identity and which planning framework drives it.",
+      "default": {
+        "repo": ".",
+        "planning_framework": "standalone"
+      },
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "Repository root the mission runs in.",
+          "default": "."
+        },
+        "planning_framework": {
+          "type": "string",
+          "description": "Which planning framework to drive (auto, standalone, speckit or gsd).",
+          "default": "standalone",
+          "enum": [
+            "auto",
+            "standalone",
+            "speckit",
+            "gsd"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      }
+    },
+    "roles": {
+      "type": "object",
+      "description": "The agent CLI, model and session settings for each role.",
+      "default": {
+        "planner": {
+          "cli": "",
+          "model": "",
+          "reasoning": "",
+          "variant": "",
+          "resume_session": true,
+          "fallbacks": []
+        },
+        "plan_reviewer": {
+          "cli": "",
+          "model": "",
+          "reasoning": "",
+          "variant": "",
+          "resume_session": true,
+          "fallbacks": []
+        },
+        "implementer": {
+          "cli": "",
+          "model": "",
+          "reasoning": "",
+          "variant": "",
+          "resume_session": false,
+          "fallbacks": []
+        },
+        "code_reviewer": {
+          "cli": "",
+          "model": "",
+          "reasoning": "",
+          "variant": "",
+          "resume_session": true,
+          "fallbacks": []
+        },
+        "verifier": {
+          "cli": "",
+          "model": "",
+          "reasoning": "",
+          "variant": "",
+          "resume_session": true,
+          "fallbacks": []
+        },
+        "free_models": {
+          "auto_fallback": true,
+          "max_turns": 45
+        }
+      },
+      "properties": {
+        "planner": {
+          "type": "object",
+          "description": "Role settings for the planner.",
+          "default": {
+            "cli": "",
+            "model": "",
+            "reasoning": "",
+            "variant": "",
+            "resume_session": true,
+            "fallbacks": []
+          },
+          "properties": {
+            "cli": {
+              "type": "string",
+              "description": "Agent CLI adapter for this role (claude, opencode, codex, ...).",
+              "default": "",
+              "enum": [
+                "",
+                "claude",
+                "codex",
+                "opencode",
+                "cursor",
+                "antigravity"
+              ]
+            },
+            "model": {
+              "type": "string",
+              "description": "Model id for this role; empty means the adapter default.",
+              "default": ""
+            },
+            "reasoning": {
+              "type": "string",
+              "description": "Reasoning effort for this role; empty means the adapter default.",
+              "default": "",
+              "enum": [
+                "",
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            },
+            "variant": {
+              "type": "string",
+              "description": "Adapter-specific model variant; empty means none.",
+              "default": ""
+            },
+            "resume_session": {
+              "type": "boolean",
+              "description": "Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true.",
+              "default": true
+            },
+            "fallbacks": {
+              "type": "array",
+              "description": "Ordered fallback role entries tried when the primary adapter/model fails.",
+              "default": [],
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "patternProperties": {
+                  "^_": {}
+                },
+                "properties": {
+                  "cli": {
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "claude",
+                      "codex",
+                      "opencode",
+                      "cursor",
+                      "antigravity"
+                    ],
+                    "description": "Fallback adapter CLI."
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "Fallback model id."
+                  },
+                  "reasoning": {
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "none",
+                      "minimal",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max"
+                    ],
+                    "description": "Fallback reasoning effort."
+                  },
+                  "variant": {
+                    "type": "string",
+                    "description": "Fallback model variant."
+                  }
+                }
+              }
+            },
+            "escalation_model": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "Stronger model used for the next fix round after retries.escalate_after_not_fixed not-fixed reports; null or absent turns escalation off.",
+              "additionalProperties": false,
+              "patternProperties": {
+                "^_": {}
+              },
+              "properties": {
+                "cli": {
+                  "type": "string",
+                  "enum": [
+                    "",
+                    "claude",
+                    "codex",
+                    "opencode",
+                    "cursor",
+                    "antigravity"
+                  ],
+                  "description": "Agent CLI adapter for the escalation model; empty means the role's adapter."
+                },
+                "model": {
+                  "type": "string",
+                  "description": "Model id for the escalation model; empty means the role's model."
+                },
+                "reasoning": {
+                  "type": "string",
+                  "enum": [
+                    "",
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ],
+                  "description": "Reasoning effort for the escalation model; empty means the role's effort."
+                },
+                "variant": {
+                  "type": "string",
+                  "description": "Adapter-specific model variant for the escalation model; empty means none."
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        },
+        "plan_reviewer": {
+          "type": "object",
+          "description": "Role settings for the plan reviewer.",
+          "default": {
+            "cli": "",
+            "model": "",
+            "reasoning": "",
+            "variant": "",
+            "resume_session": true,
+            "fallbacks": []
+          },
+          "properties": {
+            "cli": {
+              "type": "string",
+              "description": "Agent CLI adapter for this role (claude, opencode, codex, ...).",
+              "default": "",
+              "enum": [
+                "",
+                "claude",
+                "codex",
+                "opencode",
+                "cursor",
+                "antigravity"
+              ]
+            },
+            "model": {
+              "type": "string",
+              "description": "Model id for this role; empty means the adapter default.",
+              "default": ""
+            },
+            "reasoning": {
+              "type": "string",
+              "description": "Reasoning effort for this role; empty means the adapter default.",
+              "default": "",
+              "enum": [
+                "",
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            },
+            "variant": {
+              "type": "string",
+              "description": "Adapter-specific model variant; empty means none.",
+              "default": ""
+            },
+            "resume_session": {
+              "type": "boolean",
+              "description": "Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true.",
+              "default": true
+            },
+            "fallbacks": {
+              "type": "array",
+              "description": "Ordered fallback role entries tried when the primary adapter/model fails.",
+              "default": [],
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "patternProperties": {
+                  "^_": {}
+                },
+                "properties": {
+                  "cli": {
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "claude",
+                      "codex",
+                      "opencode",
+                      "cursor",
+                      "antigravity"
+                    ],
+                    "description": "Fallback adapter CLI."
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "Fallback model id."
+                  },
+                  "reasoning": {
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "none",
+                      "minimal",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max"
+                    ],
+                    "description": "Fallback reasoning effort."
+                  },
+                  "variant": {
+                    "type": "string",
+                    "description": "Fallback model variant."
+                  }
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        },
+        "implementer": {
+          "type": "object",
+          "description": "Role settings for the implementer.",
+          "default": {
+            "cli": "",
+            "model": "",
+            "reasoning": "",
+            "variant": "",
+            "resume_session": false,
+            "fallbacks": []
+          },
+          "properties": {
+            "cli": {
+              "type": "string",
+              "description": "Agent CLI adapter for this role (claude, opencode, codex, ...).",
+              "default": "",
+              "enum": [
+                "",
+                "claude",
+                "codex",
+                "opencode",
+                "cursor",
+                "antigravity"
+              ]
+            },
+            "model": {
+              "type": "string",
+              "description": "Model id for this role; empty means the adapter default.",
+              "default": ""
+            },
+            "reasoning": {
+              "type": "string",
+              "description": "Reasoning effort for this role; empty means the adapter default.",
+              "default": "",
+              "enum": [
+                "",
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            },
+            "variant": {
+              "type": "string",
+              "description": "Adapter-specific model variant; empty means none.",
+              "default": ""
+            },
+            "resume_session": {
+              "type": "boolean",
+              "description": "Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true.",
+              "default": false
+            },
+            "fallbacks": {
+              "type": "array",
+              "description": "Ordered fallback role entries tried when the primary adapter/model fails.",
+              "default": [],
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "patternProperties": {
+                  "^_": {}
+                },
+                "properties": {
+                  "cli": {
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "claude",
+                      "codex",
+                      "opencode",
+                      "cursor",
+                      "antigravity"
+                    ],
+                    "description": "Fallback adapter CLI."
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "Fallback model id."
+                  },
+                  "reasoning": {
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "none",
+                      "minimal",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max"
+                    ],
+                    "description": "Fallback reasoning effort."
+                  },
+                  "variant": {
+                    "type": "string",
+                    "description": "Fallback model variant."
+                  }
+                }
+              }
+            },
+            "escalation_model": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "Stronger model used for the next fix round after retries.escalate_after_not_fixed not-fixed reports; null or absent turns escalation off.",
+              "additionalProperties": false,
+              "patternProperties": {
+                "^_": {}
+              },
+              "properties": {
+                "cli": {
+                  "type": "string",
+                  "enum": [
+                    "",
+                    "claude",
+                    "codex",
+                    "opencode",
+                    "cursor",
+                    "antigravity"
+                  ],
+                  "description": "Agent CLI adapter for the escalation model; empty means the role's adapter."
+                },
+                "model": {
+                  "type": "string",
+                  "description": "Model id for the escalation model; empty means the role's model."
+                },
+                "reasoning": {
+                  "type": "string",
+                  "enum": [
+                    "",
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ],
+                  "description": "Reasoning effort for the escalation model; empty means the role's effort."
+                },
+                "variant": {
+                  "type": "string",
+                  "description": "Adapter-specific model variant for the escalation model; empty means none."
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        },
+        "code_reviewer": {
+          "type": "object",
+          "description": "Role settings for the code reviewer.",
+          "default": {
+            "cli": "",
+            "model": "",
+            "reasoning": "",
+            "variant": "",
+            "resume_session": true,
+            "fallbacks": []
+          },
+          "properties": {
+            "cli": {
+              "type": "string",
+              "description": "Agent CLI adapter for this role (claude, opencode, codex, ...).",
+              "default": "",
+              "enum": [
+                "",
+                "claude",
+                "codex",
+                "opencode",
+                "cursor",
+                "antigravity"
+              ]
+            },
+            "model": {
+              "type": "string",
+              "description": "Model id for this role; empty means the adapter default.",
+              "default": ""
+            },
+            "reasoning": {
+              "type": "string",
+              "description": "Reasoning effort for this role; empty means the adapter default.",
+              "default": "",
+              "enum": [
+                "",
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            },
+            "variant": {
+              "type": "string",
+              "description": "Adapter-specific model variant; empty means none.",
+              "default": ""
+            },
+            "resume_session": {
+              "type": "boolean",
+              "description": "Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true.",
+              "default": true
+            },
+            "fallbacks": {
+              "type": "array",
+              "description": "Ordered fallback role entries tried when the primary adapter/model fails.",
+              "default": [],
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "patternProperties": {
+                  "^_": {}
+                },
+                "properties": {
+                  "cli": {
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "claude",
+                      "codex",
+                      "opencode",
+                      "cursor",
+                      "antigravity"
+                    ],
+                    "description": "Fallback adapter CLI."
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "Fallback model id."
+                  },
+                  "reasoning": {
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "none",
+                      "minimal",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max"
+                    ],
+                    "description": "Fallback reasoning effort."
+                  },
+                  "variant": {
+                    "type": "string",
+                    "description": "Fallback model variant."
+                  }
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        },
+        "verifier": {
+          "type": "object",
+          "description": "Role settings for the verifier.",
+          "default": {
+            "cli": "",
+            "model": "",
+            "reasoning": "",
+            "variant": "",
+            "resume_session": true,
+            "fallbacks": []
+          },
+          "properties": {
+            "cli": {
+              "type": "string",
+              "description": "Agent CLI adapter for this role (claude, opencode, codex, ...).",
+              "default": "",
+              "enum": [
+                "",
+                "claude",
+                "codex",
+                "opencode",
+                "cursor",
+                "antigravity"
+              ]
+            },
+            "model": {
+              "type": "string",
+              "description": "Model id for this role; empty means the adapter default.",
+              "default": ""
+            },
+            "reasoning": {
+              "type": "string",
+              "description": "Reasoning effort for this role; empty means the adapter default.",
+              "default": "",
+              "enum": [
+                "",
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            },
+            "variant": {
+              "type": "string",
+              "description": "Adapter-specific model variant; empty means none.",
+              "default": ""
+            },
+            "resume_session": {
+              "type": "boolean",
+              "description": "Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true.",
+              "default": true
+            },
+            "fallbacks": {
+              "type": "array",
+              "description": "Ordered fallback role entries tried when the primary adapter/model fails.",
+              "default": [],
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "patternProperties": {
+                  "^_": {}
+                },
+                "properties": {
+                  "cli": {
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "claude",
+                      "codex",
+                      "opencode",
+                      "cursor",
+                      "antigravity"
+                    ],
+                    "description": "Fallback adapter CLI."
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "Fallback model id."
+                  },
+                  "reasoning": {
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "none",
+                      "minimal",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max"
+                    ],
+                    "description": "Fallback reasoning effort."
+                  },
+                  "variant": {
+                    "type": "string",
+                    "description": "Fallback model variant."
+                  }
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        },
+        "free_models": {
+          "type": "object",
+          "description": "The free-model fallback pool.",
+          "default": {
+            "auto_fallback": true,
+            "max_turns": 45
+          },
+          "properties": {
+            "auto_fallback": {
+              "type": "boolean",
+              "description": "Automatically fall back to a free model when the primary is unavailable.",
+              "default": true
+            },
+            "max_turns": {
+              "type": "number",
+              "description": "Maximum turns allowed on a free-model fallback before giving up.",
+              "default": 45,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      }
+    },
+    "caps": {
+      "type": "object",
+      "description": "Per-role turn, token and session caps plus the mission token backstop.",
+      "default": {
+        "task_size_target_turns": 30,
+        "planner": {
+          "max_turns": 30,
+          "max_tokens": 200000,
+          "extra_sessions": 2,
+          "wrap_up_at_tokens": 180000
+        },
+        "plan_reviewer": {
+          "max_turns": 30,
+          "max_tokens": 150000,
+          "extra_sessions": 2,
+          "wrap_up_at_tokens": 135000
+        },
+        "implementer": {
+          "max_turns": 40,
+          "max_tokens": 180000,
+          "extra_sessions": 5,
+          "wrap_up_at_tokens": 160000
+        },
+        "code_reviewer": {
+          "max_turns": 22,
+          "max_tokens": 150000,
+          "extra_sessions": 2,
+          "wrap_up_at_tokens": 135000
+        },
+        "verifier": {
+          "max_turns": 30,
+          "max_tokens": 150000,
+          "extra_sessions": 2,
+          "wrap_up_at_tokens": 135000
+        },
+        "mission_token_backstop": 6000000
+      },
+      "properties": {
+        "task_size_target_turns": {
+          "type": "number",
+          "description": "Target turns per task used when splitting oversized work.",
+          "default": 30,
+          "minimum": 1
+        },
+        "planner": {
+          "type": "object",
+          "description": "Caps for the planner role.",
+          "default": {
+            "max_turns": 30,
+            "max_tokens": 200000,
+            "extra_sessions": 2,
+            "wrap_up_at_tokens": 180000
+          },
+          "properties": {
+            "max_turns": {
+              "type": "number",
+              "description": "Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "default": 30,
+              "minimum": 1
+            },
+            "max_tokens": {
+              "type": "number",
+              "description": "Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "default": 200000,
+              "minimum": 1
+            },
+            "extra_sessions": {
+              "type": "number",
+              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap.",
+              "default": 2,
+              "minimum": 0
+            },
+            "wrap_up_at_tokens": {
+              "type": "number",
+              "description": "Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops.",
+              "default": 180000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        },
+        "plan_reviewer": {
+          "type": "object",
+          "description": "Caps for the plan reviewer role.",
+          "default": {
+            "max_turns": 30,
+            "max_tokens": 150000,
+            "extra_sessions": 2,
+            "wrap_up_at_tokens": 135000
+          },
+          "properties": {
+            "max_turns": {
+              "type": "number",
+              "description": "Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "default": 30,
+              "minimum": 1
+            },
+            "max_tokens": {
+              "type": "number",
+              "description": "Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "default": 150000,
+              "minimum": 1
+            },
+            "extra_sessions": {
+              "type": "number",
+              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap.",
+              "default": 2,
+              "minimum": 0
+            },
+            "wrap_up_at_tokens": {
+              "type": "number",
+              "description": "Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops.",
+              "default": 135000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        },
+        "implementer": {
+          "type": "object",
+          "description": "Caps for the implementer role.",
+          "default": {
+            "max_turns": 40,
+            "max_tokens": 180000,
+            "extra_sessions": 5,
+            "wrap_up_at_tokens": 160000
+          },
+          "properties": {
+            "max_turns": {
+              "type": "number",
+              "description": "Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "default": 40,
+              "minimum": 1
+            },
+            "max_tokens": {
+              "type": "number",
+              "description": "Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "default": 180000,
+              "minimum": 1
+            },
+            "extra_sessions": {
+              "type": "number",
+              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap.",
+              "default": 5,
+              "minimum": 0
+            },
+            "wrap_up_at_tokens": {
+              "type": "number",
+              "description": "Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops.",
+              "default": 160000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        },
+        "code_reviewer": {
+          "type": "object",
+          "description": "Caps for the code reviewer role.",
+          "default": {
+            "max_turns": 22,
+            "max_tokens": 150000,
+            "extra_sessions": 2,
+            "wrap_up_at_tokens": 135000
+          },
+          "properties": {
+            "max_turns": {
+              "type": "number",
+              "description": "Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "default": 22,
+              "minimum": 1
+            },
+            "max_tokens": {
+              "type": "number",
+              "description": "Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "default": 150000,
+              "minimum": 1
+            },
+            "extra_sessions": {
+              "type": "number",
+              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap.",
+              "default": 2,
+              "minimum": 0
+            },
+            "wrap_up_at_tokens": {
+              "type": "number",
+              "description": "Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops.",
+              "default": 135000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        },
+        "verifier": {
+          "type": "object",
+          "description": "Caps for the verifier role.",
+          "default": {
+            "max_turns": 30,
+            "max_tokens": 150000,
+            "extra_sessions": 2,
+            "wrap_up_at_tokens": 135000
+          },
+          "properties": {
+            "max_turns": {
+              "type": "number",
+              "description": "Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "default": 30,
+              "minimum": 1
+            },
+            "max_tokens": {
+              "type": "number",
+              "description": "Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "default": 150000,
+              "minimum": 1
+            },
+            "extra_sessions": {
+              "type": "number",
+              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap.",
+              "default": 2,
+              "minimum": 0
+            },
+            "wrap_up_at_tokens": {
+              "type": "number",
+              "description": "Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops.",
+              "default": 135000,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        },
+        "mission_token_backstop": {
+          "type": "number",
+          "description": "Raw-token backstop for a whole mission before it is stopped.",
+          "default": 6000000,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      }
+    },
+    "retries": {
+      "type": "object",
+      "description": "Retry and revision budgets for each stage.",
+      "default": {
+        "plan_revisions": 8,
+        "implementation": 4,
+        "verification": 4,
+        "final_review_fix_rounds": 2,
+        "cli_errors": 3,
+        "infrastructure": 3,
+        "no_progress_sessions": 2,
+        "extra_sessions_per_task": 5,
+        "escalate_after_not_fixed": 2
+      },
+      "properties": {
+        "plan_revisions": {
+          "type": "number",
+          "description": "Maximum plan revision rounds before plan review gives up.",
+          "default": 8,
+          "minimum": 0
+        },
+        "implementation": {
+          "type": "number",
+          "description": "Failure budget for the implementation phase.",
+          "default": 4,
+          "minimum": 0
+        },
+        "verification": {
+          "type": "number",
+          "description": "Failure budget for the verification phase.",
+          "default": 4,
+          "minimum": 0
+        },
+        "final_review_fix_rounds": {
+          "type": "number",
+          "description": "Maximum final-review fix rounds before stopping.",
+          "default": 2,
+          "minimum": 1
+        },
+        "cli_errors": {
+          "type": "number",
+          "description": "Adapter retry budget for transient CLI errors.",
+          "default": 3,
+          "minimum": 0
+        },
+        "infrastructure": {
+          "type": "number",
+          "description": "Retry budget for infrastructure failures.",
+          "default": 3,
+          "minimum": 0
+        },
+        "no_progress_sessions": {
+          "type": "number",
+          "description": "Consecutive no-progress generations before a mission is stopped.",
+          "default": 2,
+          "minimum": 1
+        },
+        "extra_sessions_per_task": {
+          "type": "number",
+          "description": "Continuation sessions allowed per task (mirrors caps.implementer.extra_sessions).",
+          "default": 5,
+          "minimum": 0
+        },
+        "escalate_after_not_fixed": {
+          "type": "number",
+          "description": "Consecutive reviews that must report the same finding not fixed before the escalation model is used (1 = escalate on the first not-fixed report).",
+          "default": 2,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      }
+    },
+    "time_limits": {
+      "type": "object",
+      "description": "Wall-clock limits and waits, with the unit in each name.",
+      "default": {
+        "role_timeout_minutes": {
+          "default": 60,
+          "verifier": 180
+        },
+        "call_backstop_minutes": 200,
+        "role_timeout_floor_minutes": null,
+        "silent_run_minutes": 10,
+        "no_first_output_minutes": 3,
+        "read_only_max_silence_minutes": 15,
+        "retry_wait_seconds": 60
+      },
+      "properties": {
+        "role_timeout_minutes": {
+          "type": [
+            "object",
+            "number",
+            "null"
+          ],
+          "description": "Per-role session timeout overrides, in minutes.",
+          "default": {
+            "default": 60,
+            "verifier": 180
+          },
+          "properties": {
+            "default": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "Default wall-clock limit per role session, in minutes.",
+              "default": 60,
+              "minimum": 0
+            },
+            "verifier": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "Wall-clock limit for the verifier role session, in minutes.",
+              "default": 180,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          },
+          "minimum": 0
+        },
+        "call_backstop_minutes": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Hard wall-clock backstop for ONE role call, in minutes (not a mission limit): a call that runs past it is stopped. The old name mission_timeout_minutes is still read and migrated.",
+          "default": 200,
+          "minimum": 0
+        },
+        "role_timeout_floor_minutes": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Minimum per-role timeout floor in minutes; null disables the floor.",
+          "default": null,
+          "minimum": 0
+        },
+        "silent_run_minutes": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Minutes of silence before an active run is treated as hung.",
+          "default": 10,
+          "minimum": 0
+        },
+        "no_first_output_minutes": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Minutes allowed before a session must produce its first output.",
+          "default": 3,
+          "minimum": 0
+        },
+        "read_only_max_silence_minutes": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Maximum silence for read-only roles, in minutes.",
+          "default": 15,
+          "minimum": 0
+        },
+        "retry_wait_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Seconds to wait between retries.",
+          "default": 60,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "description": "Which review and approval stages run, and how work is committed.",
+      "default": {
+        "plan_review": true,
+        "plan_review_rounds_converge": true,
+        "gsd_planning_review": false,
+        "spec_review": true,
+        "code_review_per_phase": true,
+        "final_review": true,
+        "analysis_after_tasks": true,
+        "approve_spec_myself": false,
+        "approve_plan_myself": false,
+        "parallel_independent_tasks": false,
+        "use_worktrees": true,
+        "commit_by_human": true
+      },
+      "properties": {
+        "plan_review": {
+          "type": "boolean",
+          "description": "Run a plan review stage before implementation.",
+          "default": true
+        },
+        "plan_review_rounds_converge": {
+          "type": "boolean",
+          "description": "Iterate plan review rounds until the plan converges.",
+          "default": true
+        },
+        "gsd_planning_review": {
+          "type": "boolean",
+          "description": "Use the GSD planning-review stages.",
+          "default": false
+        },
+        "spec_review": {
+          "type": "boolean",
+          "description": "Run a spec review stage.",
+          "default": true
+        },
+        "code_review_per_phase": {
+          "type": "boolean",
+          "description": "Run code review after each implementation phase.",
+          "default": true
+        },
+        "final_review": {
+          "type": "boolean",
+          "description": "Run a final review at the end of the mission.",
+          "default": true
+        },
+        "analysis_after_tasks": {
+          "type": "boolean",
+          "description": "Run an analysis pass after all tasks complete.",
+          "default": true
+        },
+        "approve_spec_myself": {
+          "type": "boolean",
+          "description": "Auto-approve the spec without asking the operator.",
+          "default": false
+        },
+        "approve_plan_myself": {
+          "type": "boolean",
+          "description": "Auto-approve the plan without asking the operator.",
+          "default": false
+        },
+        "parallel_independent_tasks": {
+          "type": "boolean",
+          "description": "Run independent tasks in parallel.",
+          "default": false
+        },
+        "use_worktrees": {
+          "type": "boolean",
+          "description": "Use git worktrees to isolate parallel work.",
+          "default": true
+        },
+        "commit_by_human": {
+          "type": "boolean",
+          "description": "Only a human may commit; roles never run git commit.",
+          "default": true
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      }
+    },
+    "tests": {
+      "type": "object",
+      "description": "Gate commands, reviewer requirement and verification policy.",
+      "default": {
+        "gate_commands": [],
+        "gate_network": false,
+        "gate_env_allowlist": [],
+        "require_reviewer": true,
+        "browser": "native",
+        "require_browser": "when-task-requires",
+        "verify_denylist": []
+      },
+      "properties": {
+        "gate_commands": {
+          "type": "array",
+          "description": "Commands run as the phase/mission gate.",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "gate_network": {
+          "type": "boolean",
+          "description": "Allow the gate commands to use the network (false keeps them network-isolated).",
+          "default": false
+        },
+        "gate_env_allowlist": {
+          "type": "array",
+          "description": "Environment variables allowed through to gate commands.",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "require_reviewer": {
+          "type": "boolean",
+          "description": "Require a reviewer role to sign off before completion.",
+          "default": true
+        },
+        "browser": {
+          "type": "string",
+          "description": "Browser capability mode used for verification (native, playwright or both).",
+          "default": "native",
+          "enum": [
+            "native",
+            "playwright",
+            "both"
+          ]
+        },
+        "require_browser": {
+          "type": "string",
+          "description": "When browser verification is required (always, when-task-requires or never).",
+          "default": "when-task-requires",
+          "enum": [
+            "always",
+            "when-task-requires",
+            "never"
+          ]
+        },
+        "verify_denylist": {
+          "type": "array",
+          "description": "Commands or paths never allowed in verification.",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      }
+    },
+    "safety": {
+      "type": "object",
+      "description": "What roles may do and which safety checks are enforced.",
+      "default": {
+        "allow_git_commit": false,
+        "allow_git_push": false,
+        "allow_destructive_operations": false,
+        "stop_on_sandbox_violation": true,
+        "block_git_in_roles": true,
+        "check_read_only_roles": true,
+        "record_touched_files": true,
+        "keep_role_sessions": true
+      },
+      "properties": {
+        "allow_git_commit": {
+          "type": "boolean",
+          "description": "Permit roles to run git commit.",
+          "default": false
+        },
+        "allow_git_push": {
+          "type": "boolean",
+          "description": "Permit roles to run git push.",
+          "default": false
+        },
+        "allow_destructive_operations": {
+          "type": "boolean",
+          "description": "Permit destructive filesystem or git operations.",
+          "default": false
+        },
+        "stop_on_sandbox_violation": {
+          "type": "boolean",
+          "description": "Stop the mission when a sandbox/relay violation is detected.",
+          "default": true
+        },
+        "block_git_in_roles": {
+          "type": "boolean",
+          "description": "Block git commit/push inside role sessions.",
+          "default": true
+        },
+        "check_read_only_roles": {
+          "type": "boolean",
+          "description": "Verify read-only roles by comparing snapshots.",
+          "default": true
+        },
+        "record_touched_files": {
+          "type": "boolean",
+          "description": "Capture the files each role touches.",
+          "default": true
+        },
+        "keep_role_sessions": {
+          "type": "boolean",
+          "description": "Persist role sessions so they can be resumed.",
+          "default": true
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "description": "Containment mode and, for WSL2, the distribution to use.",
+      "default": {
+        "mode": "linux-strong",
+        "wsl_distro": null
+      },
+      "properties": {
+        "mode": {
+          "type": "string",
+          "description": "Runtime containment mode (auto, linux-strong, wsl2-strong or windows-compatibility).",
+          "default": "linux-strong",
+          "enum": [
+            "auto",
+            "linux-strong",
+            "wsl2-strong",
+            "windows-compatibility"
+          ]
+        },
+        "wsl_distro": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "WSL2 distribution to use for wsl2-strong mode; null means auto-detect.",
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      }
+    },
+    "frameworks": {
+      "type": "object",
+      "description": "Per-framework planning settings for SpecKit and GSD.",
+      "default": {
+        "speckit": {
+          "workflow_file": ".specify/workflows/speckit/workflow.yml",
+          "task_files": [
+            ".specify/tasks.md",
+            "specs/*/tasks.md",
+            "specs/*/tasks/*.md"
+          ]
+        },
+        "gsd": {
+          "phase_root": ".planning/phases",
+          "run_plan_verify": true,
+          "run_state_validate": true,
+          "write_summary_artifacts": true,
+          "write_verification_artifacts": true,
+          "write_uat_artifact": true,
+          "use_gsd_tools_when_available": true,
+          "planning_review": {
+            "enabled": false,
+            "review_after_each_stage": true,
+            "stages": [
+              "discuss",
+              "research",
+              "plan",
+              "plan-check"
+            ],
+            "max_revisions": 3,
+            "read_only_reviewer": true
+          },
+          "parallel": {
+            "enabled": false,
+            "plan_level": false,
+            "task_level": false,
+            "max_concurrent_agents": 3,
+            "min_plans_for_parallel": 2
+          }
+        }
+      },
+      "properties": {
+        "speckit": {
+          "type": "object",
+          "description": "SpecKit workflow and task-file settings.",
+          "default": {
+            "workflow_file": ".specify/workflows/speckit/workflow.yml",
+            "task_files": [
+              ".specify/tasks.md",
+              "specs/*/tasks.md",
+              "specs/*/tasks/*.md"
+            ]
+          },
+          "properties": {
+            "workflow_file": {
+              "type": "string",
+              "description": "Path to the SpecKit workflow definition.",
+              "default": ".specify/workflows/speckit/workflow.yml"
+            },
+            "task_files": {
+              "type": "array",
+              "description": "Glob patterns that identify SpecKit task files.",
+              "default": [
+                ".specify/tasks.md",
+                "specs/*/tasks.md",
+                "specs/*/tasks/*.md"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        },
+        "gsd": {
+          "type": "object",
+          "description": "GSD phase, artifact and parallelism settings.",
+          "default": {
+            "phase_root": ".planning/phases",
+            "run_plan_verify": true,
+            "run_state_validate": true,
+            "write_summary_artifacts": true,
+            "write_verification_artifacts": true,
+            "write_uat_artifact": true,
+            "use_gsd_tools_when_available": true,
+            "planning_review": {
+              "enabled": false,
+              "review_after_each_stage": true,
+              "stages": [
+                "discuss",
+                "research",
+                "plan",
+                "plan-check"
+              ],
+              "max_revisions": 3,
+              "read_only_reviewer": true
+            },
+            "parallel": {
+              "enabled": false,
+              "plan_level": false,
+              "task_level": false,
+              "max_concurrent_agents": 3,
+              "min_plans_for_parallel": 2
+            }
+          },
+          "properties": {
+            "phase_root": {
+              "type": "string",
+              "description": "Root directory holding GSD phase folders.",
+              "default": ".planning/phases"
+            },
+            "run_plan_verify": {
+              "type": "boolean",
+              "description": "Run GSD plan verification.",
+              "default": true
+            },
+            "run_state_validate": {
+              "type": "boolean",
+              "description": "Run GSD state validation.",
+              "default": true
+            },
+            "write_summary_artifacts": {
+              "type": "boolean",
+              "description": "Write GSD summary artifacts.",
+              "default": true
+            },
+            "write_verification_artifacts": {
+              "type": "boolean",
+              "description": "Write GSD verification artifacts.",
+              "default": true
+            },
+            "write_uat_artifact": {
+              "type": "boolean",
+              "description": "Write the GSD UAT artifact.",
+              "default": true
+            },
+            "use_gsd_tools_when_available": {
+              "type": "boolean",
+              "description": "Use GSD helper tools when they are available.",
+              "default": true
+            },
+            "planning_review": {
+              "type": "object",
+              "description": "GSD planning-review stage settings.",
+              "default": {
+                "enabled": false,
+                "review_after_each_stage": true,
+                "stages": [
+                  "discuss",
+                  "research",
+                  "plan",
+                  "plan-check"
+                ],
+                "max_revisions": 3,
+                "read_only_reviewer": true
+              },
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Enable the GSD planning-review stages.",
+                  "default": false
+                },
+                "review_after_each_stage": {
+                  "type": "boolean",
+                  "description": "Review after every GSD planning stage.",
+                  "default": true
+                },
+                "stages": {
+                  "type": "array",
+                  "description": "GSD planning stages to review.",
+                  "default": [
+                    "discuss",
+                    "research",
+                    "plan",
+                    "plan-check"
+                  ],
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "max_revisions": {
+                  "type": "number",
+                  "description": "Maximum GSD planning-review revisions.",
+                  "default": 3,
+                  "minimum": 0
+                },
+                "read_only_reviewer": {
+                  "type": "boolean",
+                  "description": "Use a read-only reviewer for GSD planning review.",
+                  "default": true
+                }
+              },
+              "additionalProperties": false,
+              "patternProperties": {
+                "^_": {}
+              }
+            },
+            "parallel": {
+              "type": "object",
+              "description": "Parallel GSD execution settings.",
+              "default": {
+                "enabled": false,
+                "plan_level": false,
+                "task_level": false,
+                "max_concurrent_agents": 3,
+                "min_plans_for_parallel": 2
+              },
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Enable parallel GSD execution.",
+                  "default": false
+                },
+                "plan_level": {
+                  "type": "boolean",
+                  "description": "Allow plan-level GSD parallelism.",
+                  "default": false
+                },
+                "task_level": {
+                  "type": "boolean",
+                  "description": "Allow task-level GSD parallelism.",
+                  "default": false
+                },
+                "max_concurrent_agents": {
+                  "type": "number",
+                  "description": "Maximum concurrent GSD agents.",
+                  "default": 3,
+                  "minimum": 1
+                },
+                "min_plans_for_parallel": {
+                  "type": "number",
+                  "description": "Minimum plans before parallel GSD execution starts.",
+                  "default": 2,
+                  "minimum": 1
+                }
+              },
+              "additionalProperties": false,
+              "patternProperties": {
+                "^_": {}
+              }
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      }
+    },
+    "advanced": {
+      "type": "object",
+      "description": "Paths, hand-off limits and capability defaults.",
+      "default": {
+        "state_file": ".autopilot/state.json",
+        "runs_dir": ".autopilot/runs",
+        "handoff_max_chars": 2000,
+        "handoff_note_max_chars": 4000,
+        "handoff_wrapup_tokens": 160000,
+        "fallback_retry_primary_minutes": 60,
+        "checkpoint_after_task": true,
+        "checkpoint_after_phase": true,
+        "capabilities": {
+          "project_defaults": [],
+          "role_requirements": {},
+          "safety_denied": [],
+          "legacy_text_inference": false
+        }
+      },
+      "properties": {
+        "state_file": {
+          "type": "string",
+          "description": "Path to the mission state file.",
+          "default": ".autopilot/state.json"
+        },
+        "runs_dir": {
+          "type": "string",
+          "description": "Directory holding run records.",
+          "default": ".autopilot/runs"
+        },
+        "handoff_max_chars": {
+          "type": "number",
+          "description": "Maximum characters in a role hand-off document.",
+          "default": 2000,
+          "minimum": 500
+        },
+        "handoff_note_max_chars": {
+          "type": "number",
+          "description": "Maximum characters in a hand-off note.",
+          "default": 4000,
+          "minimum": 1000
+        },
+        "handoff_wrapup_tokens": {
+          "type": "number",
+          "description": "Token count at which a role is told to wrap up its hand-off.",
+          "default": 160000,
+          "minimum": 1
+        },
+        "fallback_retry_primary_minutes": {
+          "type": "number",
+          "description": "Minutes to wait before retrying the primary model after a fallback took over.",
+          "default": 60,
+          "minimum": 0
+        },
+        "checkpoint_after_task": {
+          "type": "boolean",
+          "description": "Write a checkpoint after each task.",
+          "default": true
+        },
+        "checkpoint_after_phase": {
+          "type": "boolean",
+          "description": "Write a checkpoint after each phase.",
+          "default": true
+        },
+        "capabilities": {
+          "type": "object",
+          "description": "Project-level capability defaults and denials.",
+          "default": {
+            "project_defaults": [],
+            "role_requirements": {},
+            "safety_denied": [],
+            "legacy_text_inference": false
+          },
+          "properties": {
+            "project_defaults": {
+              "type": "array",
+              "description": "Capabilities assumed present for this project.",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "role_requirements": {
+              "type": "object",
+              "description": "Per-role capability requirements.",
+              "default": {},
+              "properties": {},
+              "additionalProperties": false,
+              "patternProperties": {
+                "^_": {},
+                "^(planner|plan_reviewer|implementer|code_reviewer|verifier)$": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "safety_denied": {
+              "type": "array",
+              "description": "Capabilities explicitly denied for safety.",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "legacy_text_inference": {
+              "type": "boolean",
+              "description": "Infer capabilities from task text (legacy behaviour).",
+              "default": false
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      }
+    }
+  },
+  "required": [
+    "schema_version"
+  ]
+}

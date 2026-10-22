@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+const file=fs.readFileSync(new URL('./agent-process.mjs',import.meta.url),'utf8');
+assert.match(file,/process\.platform==='win32'/);
+assert.match(file,/where\.exe/);
+assert.match(file,/\.cmd|\.bat/);
+assert.match(file,/ComSpec/);
+assert.match(file,/shell:false/);
+console.log('agent-process Windows shim logic checks passed');

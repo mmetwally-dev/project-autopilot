@@ -1,0 +1,73 @@
+#!/bin/sh
+# Project Autopilot - POSIX (WSL2 / Linux) convenience launcher.
+#
+# OPTIONAL CONVENIENCE ONLY. `node bin/ap.cjs <command>` remains the
+# authoritative entrypoint and is always supported. Nothing here duplicates
+# command dispatch: every argument is forwarded verbatim to the sibling
+# bin/ap.cjs, which owns all command handling.
+#
+# Design notes:
+#   * The launcher resolves its own physical directory (following symlinks),
+#     so ap.cjs is found relative to this file and never relative to the
+#     caller's current directory.
+#   * The current directory is never changed (`cd` only happens inside a
+#     command substitution subshell), so ap.cjs observes the caller's
+#     original working directory.
+#   * "$@" forwards every argument verbatim, preserving order, embedded
+#     spaces and empty arguments.
+#   * `exec` replaces this shell with Node, so the child's exit code and
+#     signal disposition are the launcher's own - nothing is swallowed and
+#     no failure is converted into success.
+#   * Node is resolved from this shell's PATH. Under WSL2 that is the Linux
+#     Node inside the distro: a Windows `node.exe` reached through interop is
+#     rejected rather than used, and wsl.exe is never invoked.
+#   * Directory splitting uses shell parameter expansion instead of
+#     dirname(1) so the launcher still produces its Node-missing diagnostic
+#     on a stripped-down PATH.
+
+ap_self="$0"
+while [ -L "$ap_self" ]; do
+  ap_link="$(readlink "$ap_self")"
+  case "$ap_link" in
+    /*) ap_self="$ap_link" ;;
+    *)
+      case "$ap_self" in
+        */*) ap_self="${ap_self%/*}/$ap_link" ;;
+        *) ap_self="./$ap_link" ;;
+      esac
+      ;;
+  esac
+done
+
+case "$ap_self" in
+  */*) ap_parent="${ap_self%/*}" ;;
+  *) ap_parent="." ;;
+esac
+[ -n "$ap_parent" ] || ap_parent="/"
+
+ap_dir="$(cd -P -- "$ap_parent" && pwd -P)" || exit 1
+
+ap_node="$(command -v node 2>/dev/null)"
+
+ap_require_node() {
+  echo "ERROR: Node.js is required to run Project Autopilot, but a usable 'node' was not found on PATH." >&2
+  echo "$1" >&2
+  echo "Install Node.js 18 or newer, ensure 'node' is on your PATH, then run this command again." >&2
+  echo "This launcher never downloads, installs or modifies anything on your system." >&2
+  exit 127
+}
+
+[ -n "$ap_node" ] || ap_require_node "No 'node' executable is on PATH."
+
+# WSL2 requirement: use the Linux Node inside the distro. A Windows node.exe
+# reached through binfmt interop is not a valid runtime for this launcher.
+case "$ap_node" in
+  *.exe|*.EXE) ap_require_node "Refusing to run the Windows executable '$ap_node' from the POSIX launcher. Use bin\ap.cmd on Native Windows." ;;
+esac
+if [ -n "${WSL_DISTRO_NAME:-}" ] || [ -e /proc/sys/fs/binfmt_misc/WSLInterop ]; then
+  case "$ap_node" in
+    /mnt/*) ap_require_node "Refusing to run '$ap_node' - that is a Windows-drive Node reached through WSL interop, not the Linux Node inside this distro." ;;
+  esac
+fi
+
+exec "$ap_node" "$ap_dir/ap.cjs" "$@"

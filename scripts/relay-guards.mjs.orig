@@ -1,0 +1,808 @@
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import crypto from "node:crypto";
+import {spawnSync} from "node:child_process";
+
+function run(bin,args,{cwd,encoding="utf8",input,env}={}){
+  return spawnSync(bin,args,{cwd,encoding,input,env,stdio:"pipe",shell:false,maxBuffer:256*1024*1024});
+}
+
+export function gitExecutable(){
+  const probe=process.platform==="win32"
+    ? run("where.exe",["git"],{cwd:process.cwd()})
+    : run("which",["git"],{cwd:process.cwd()});
+  const first=(probe.stdout||"").split(/\r?\n/).map(x=>x.trim()).find(Boolean);
+  return first||"git";
+}
+
+function hashBytes(data){return crypto.createHash("sha256").update(data).digest("hex");}
+
+function gitOut(cwd,args){
+  const r=run("git",args,{cwd});
+  if(r.status!==0) throw new Error((r.stderr||r.stdout||"git failed").toString().trim());
+  return r.stdout||Buffer.alloc(0);
+}
+
+// Same fail-closed contract as gitOut (a spawn error or an exit code outside
+// allowedStatuses throws), but lets a caller name specific non-zero exits
+// that are a legitimate, documented state rather than a failure — e.g. `git
+// symbolic-ref -q HEAD` exiting 1 on a detached HEAD, or `git config --system
+// --list` exiting 1 when no system config file exists.
+function gitOutAllowing(cwd,args,allowedStatuses){
+  const r=run("git",args,{cwd});
+  if(!allowedStatuses.includes(r.status)) throw new Error((r.stderr||r.stdout||"git failed").toString().trim());
+  return {status:r.status,stdout:r.stdout||Buffer.alloc(0)};
+}
+
+function reflogFilesDigest(gitDir){
+  const entries=[];
+  const record=(label,file)=>{
+    try{entries.push(`${label}:${hashBytes(fs.readFileSync(file))}`);}
+    catch(error){
+      if(error.code==="ENOENT"){entries.push(`${label}:ABSENT`);return;}
+      throw error;
+    }
+  };
+  record("HEAD",path.join(gitDir,"logs","HEAD"));
+  const refsLogRoot=path.join(gitDir,"logs","refs");
+  for(const relative of walkFilesRelative(refsLogRoot)) record(`refs/${relative}`,path.join(refsLogRoot,relative));
+  return entries.sort().join("\n");
+}
+
+function walkFilesRelative(root){
+  const results=[];
+  const stack=[""];
+  while(stack.length){
+    const relativeDir=stack.pop();
+    let entries;
+    try{entries=fs.readdirSync(path.join(root,relativeDir),{withFileTypes:true});}catch{continue;}
+    for(const entry of entries){
+      const relative=relativeDir?path.join(relativeDir,entry.name):entry.name;
+      if(entry.isDirectory())stack.push(relative);
+      else results.push(relative);
+    }
+  }
+  return results;
+}
+
+function expandTilde(p){
+  if(p.startsWith("~/")||p==="~") return path.join(os.homedir(),p.slice(1));
+  return p;
+}
+
+// Resolve a core.hooksPath value using Git's own pathname expansion.
+// `git config --path <key>` handles ~, ~/..., and ~user/... expansion plus
+// normalisation, which avoids reimplementing Git's user-database lookup.
+// Falls back to expandTilde + path.resolve when --path is unavailable
+// (Git < 2.31) or when the command fails for an unexpected reason.
+function resolveGitPath(cwd,key){
+  const r=run("git",["config","--path",key],{cwd});
+  if(r.status===0){
+    const resolved=(r.stdout||"").toString().trim();
+    if(resolved) return resolved;
+  }
+  return null;
+}
+
+function fileHash(file){
+  try{return hashBytes(fs.readFileSync(file));}catch{return "MISSING";}
+}
+
+// Gap 3: this snapshot supports exactly one topology — a single, non-bare
+// working tree, with no linked worktrees and no submodules. Each
+// alternative silently degrades what the snapshot can see rather than
+// erroring: a bare repository has no working tree for status/index
+// observation; a linked worktree shares refs through a common dir this
+// snapshot does not resolve (and a SIBLING linked worktree of the same
+// repository could mutate a shared ref without ever touching this cwd at
+// all); a submodule carries its own independent Git directory this
+// snapshot never inspects. Fail closed (throw, matching gitOut's contract)
+// on any of them rather than silently proving less than a caller assumes.
+function assertSupportedTopology(cwd){
+  const bare=gitOut(cwd,["rev-parse","--is-bare-repository"]).toString().trim();
+  if(bare!=="false") throw new Error(`Unsupported Git topology: bare repository at ${cwd}.`);
+  const gitDir=path.resolve(cwd,gitOut(cwd,["rev-parse","--absolute-git-dir"]).toString().trim());
+  const commonDir=path.resolve(cwd,gitOut(cwd,["rev-parse","--git-common-dir"]).toString().trim());
+  if(commonDir!==gitDir) throw new Error(`Unsupported Git topology: linked worktree at ${cwd} (git-dir ${gitDir} != common-dir ${commonDir}).`);
+  const worktreeCount=gitOut(cwd,["worktree","list","--porcelain"]).toString("utf8").split(/\r?\n/).filter(line=>line.startsWith("worktree ")).length;
+  if(worktreeCount!==1) throw new Error(`Unsupported Git topology: ${worktreeCount} worktrees registered for ${cwd}.`);
+  const submodules=gitOut(cwd,["submodule","status"]).toString("utf8").trim();
+  if(submodules!=="") throw new Error(`Unsupported Git topology: submodule(s) present at ${cwd}.`);
+}
+
+export function gitSnapshot(cwd){
+  assertSupportedTopology(cwd);
+  // `-q --verify` exits 1 (silently) on an unborn HEAD (no commits yet) —
+  // a legitimate repository state, not a failure.
+  const headRev=gitOutAllowing(cwd,["rev-parse","-q","--verify","HEAD"],[0,1]);
+  const head=headRev.status===0?headRev.stdout.toString().trim():"UNBORN";
+  // HEAD's symbolic target: for-each-ref never emits HEAD (it is not under
+  // refs/), so without this a `git checkout --detach <same-commit>` is
+  // invisible even though `head` above is unchanged. `-q` exits 1 (silently)
+  // when HEAD is detached.
+  const symbolicRef=gitOutAllowing(cwd,["symbolic-ref","-q","HEAD"],[0,1]);
+  const headSymbolic=symbolicRef.status===0?symbolicRef.stdout.toString().trim():"DETACHED";
+  const refs=gitOut(cwd,["for-each-ref","--format=%(refname)%00%(objectname)%00%(symref)"]).toString("utf8");
+  // Config across every scope a mutation could land in: --local alone misses
+  // a --worktree write and, more importantly, a --global/--system write
+  // (e.g. a core.hooksPath override) — a direct guard-evasion path that
+  // never touches this repository's own .git/config at all.
+  // --local/--worktree always resolve inside a real repository. A --global
+  // or --system config file routinely does not exist at all (a bare
+  // CI/sandbox HOME, no /etc/gitconfig) — Git reports that as exit 128
+  // ("fatal: unable to read config file ... No such file or directory"),
+  // not as some parseable "empty" signal. Both a genuinely absent file (128)
+  // and an empty-but-present one (older Git: 1, empty stdout) are legitimate
+  // states here, not failures — the exit status itself is folded into the
+  // captured value so a file coming into/out of existence is still visible
+  // even when its content is identically empty either way.
+  const configAllowedStatuses={"--local":[0],"--worktree":[0,1],"--global":[0,1,128],"--system":[0,1,128]};
+  const config={};
+  for(const scope of ["--local","--worktree","--global","--system"]){
+    const cfg=gitOutAllowing(cwd,["config",scope,"--list"],configAllowedStatuses[scope]);
+    config[scope]=`${cfg.status}:${cfg.stdout.toString("utf8")}`;
+  }
+  const gitDir=gitOut(cwd,["rev-parse","--absolute-git-dir"]).toString().trim();
+  // In-progress sequencer state (merge/cherry-pick/revert/rebase). Porcelain
+  // status carries no header line for any of this.
+  const sequencerMarkers=["MERGE_HEAD","CHERRY_PICK_HEAD","REVERT_HEAD","REBASE_HEAD","BISECT_LOG","rebase-merge","rebase-apply"];
+  const sequencer=sequencerMarkers.map(name=>`${name}=${fs.existsSync(path.join(gitDir,name))?"1":"0"}`).join(",");
+  // Administrative/pseudo-refs that for-each-ref does not include. These
+  // are created by operations like `git merge` (ORIG_HEAD, AUTO_MERGE),
+  // `git fetch` (FETCH_HEAD), and sequencer operations. Content matters:
+  // `git update-ref ORIG_HEAD HEAD` succeeds silently but changes the repo.
+  // Recursively digest rebase-merge/rebase-apply directories because they
+  // contain state files (msgnum, onto, head-name, etc.) that matter.
+  const pseudoRefs=["ORIG_HEAD","FETCH_HEAD","AUTO_MERGE","MERGE_HEAD","CHERRY_PICK_HEAD","REVERT_HEAD","REBASE_HEAD","BISECT_HEAD","BISECT_LOG"];
+  const pseudoRefEntries=pseudoRefs.map(name=>{
+    const full=path.join(gitDir,name);
+    try{
+      const st=fs.lstatSync(full);
+      if(st.isDirectory()){
+        // Recursively digest directory contents
+        const files=walkFilesRelative(full);
+        const digests=files.map(f=>`${f}:${hashBytes(fs.readFileSync(path.join(full,f)))}`);
+        return `${name}:dir:${digests.sort().join(",")}`;
+      }
+      return `${name}:file:${hashBytes(fs.readFileSync(full))}:mode=${st.mode}`;
+    }catch(error){
+      if(error.code==="ENOENT") return `${name}:ABSENT`;
+      return `${name}:ERROR:${error.code}`;
+    }
+  }).join("\n");
+  // Also recursively digest rebase-merge and rebase-apply directories
+  const rebaseDirs=["rebase-merge","rebase-apply"];
+  const rebaseDirDigests=rebaseDirs.map(dirName=>{
+    const dirPath=path.join(gitDir,dirName);
+    try{
+      const st=fs.lstatSync(dirPath);
+      if(!st.isDirectory()) return `${dirName}:NOT_DIR`;
+      const files=walkFilesRelative(dirPath);
+      const digests=files.map(f=>`${f}:${hashBytes(fs.readFileSync(path.join(dirPath,f)))}`);
+      return `${dirName}:${digests.sort().join(",")}`;
+    }catch(error){
+      if(error.code==="ENOENT") return `${dirName}:ABSENT`;
+      return `${dirName}:ERROR:${error.code}`;
+    }
+  }).join("\n");
+  const administrativeDigest=[pseudoRefEntries,rebaseDirDigests].filter(Boolean).join("\n");
+  // Reflogs: the primary record of ref mutation — a move-and-restore leaves
+  // refs identical but always appends a new entry. Read the log files
+  // directly rather than shelling out to `git reflog show` once per ref
+  // (whose exit-code/format semantics differ across Git versions and across
+  // "ref exists with no reflog yet" vs "ref does not exist").
+  const reflogs=reflogFilesDigest(gitDir);
+  // Object database: `git commit-tree` / `git hash-object -w` can create an
+  // object with no ref ever pointing at it. count-objects is the cheap,
+  // standard way to see the store grew even when refs/config/worktree did not.
+  const objects=gitOut(cwd,["count-objects","-v"]).toString("utf8");
+
+  // Index state: `git update-index --assume-unchanged` and `--skip-worktree`
+  // modify per-file index flags without creating objects or changing refs.
+  // `ls-files -v` outputs a status prefix per line: lowercase `h` = assume-
+  // unchanged, lowercase `s` = skip-worktree, uppercase `H` = tracked normally,
+  // `S` = skip-worktree (unmerged), `?` = untracked. This is the cheapest way
+  // to see the index flags without parsing the index file binary format.
+  const indexState=gitOut(cwd,["ls-files","-v"]).toString("utf8");
+  // Hook contents: `.git/hooks/post-commit` (or any other hook) is never
+  // visible through refs, config, status, or diff. A malicious or accidental
+  // hook can run arbitrary code on every Git operation. Hash every hook file
+  // including its mode (executable bit) so chmod +x changes the snapshot.
+  // Symlinks are included because a symlinked hook is a valid and common
+  // deployment pattern (e.g. from a package manager or shared config).
+  const hookEntries=[];
+  // Each entry: {dir: resolvedPath, label: stableIdentityForDigest}
+  const hookDirs=[{dir:path.join(gitDir,"hooks"),label:"default"}];
+  // core.hooksPath is a guard-evasion path: it redirects hook resolution to
+  // an arbitrary directory that may be outside .git/hooks entirely. It can
+  // be set at any config scope — local, worktree, global, or system — so
+  // all four must be checked. A --global or --system hooksPath is
+  // especially dangerous because it affects every repository and never
+  // touches the repository's own .git/config.
+  // Use `git config --path` to let Git perform pathname expansion (~, ~/...,
+  // ~user/...) rather than reimplementing tilde/user-database resolution.
+  const effectiveHooksPath=resolveGitPath(cwd,"core.hooksPath");
+  if(effectiveHooksPath){
+    // The effective path is what Git actually uses; label it with the raw
+    // config value so the digest is stable across repository copies.
+    // We'll refine the label below if we find a matching per-scope value.
+    hookDirs.push({dir:effectiveHooksPath,label:"configured:effective"});
+  }
+  const hooksPathAllowedStatuses={"--local":[0,1,128],"--worktree":[0,1,128],"--global":[0,1,128],"--system":[0,1,128]};
+  for(const scope of ["--local","--worktree","--global","--system"]){
+    try{
+      const hooksPathResult=gitOutAllowing(cwd,["config",scope,"core.hooksPath"],hooksPathAllowedStatuses[scope]);
+      if(hooksPathResult.status===0){
+        const configured=hooksPathResult.stdout.toString().trim();
+        if(configured){
+          const resolved=path.resolve(cwd,expandTilde(configured));
+          // If this matches the effective path, upgrade its label to include
+          // the scope and raw value (more informative for digest).
+          const existing=hookDirs.find(h=>h.dir===resolved);
+          if(existing){
+            existing.label=`configured:${scope}:${configured}`;
+          }else{
+            hookDirs.push({dir:resolved,label:`configured:${scope}:${configured}`});
+          }
+        }
+      }
+    }catch{}
+  }
+  for(const {dir:hookDir,label:dirLabel} of hookDirs){
+    try{
+      for(const entry of fs.readdirSync(hookDir,{withFileTypes:true})){
+        if(entry.isFile()||entry.isSymbolicLink()){
+          const fullPath=path.join(hookDir,entry.name);
+          try{
+            const st=fs.lstatSync(fullPath);
+            const isSymlink=st.isSymbolicLink();
+            let targetMode=st.mode;
+            let targetHash;
+            let symlinkTarget=null;
+            try{
+              const realPath=fs.realpathSync(fullPath);
+              targetHash=fileHash(realPath);
+              const realStat=fs.statSync(realPath);
+              targetMode=realStat.mode;
+              if(isSymlink) symlinkTarget=realPath;
+            }catch{
+              targetHash=fileHash(fullPath);
+              if(isSymlink){
+                try{symlinkTarget=fs.readlinkSync(fullPath);}catch{}
+              }
+            }
+            const targetPart=symlinkTarget!==null?`:target=${symlinkTarget}`:"";
+            hookEntries.push(`${dirLabel}:${entry.name}:${targetHash}:mode=${targetMode}:symlink=${isSymlink}${targetPart}`);
+          }catch{}
+        }
+      }
+    }catch{}
+  }
+  const hooksDigest=hookEntries.sort().join("\n");
+  const rawStatus=gitOut(cwd,["status","--porcelain=v1","-z","--untracked-files=all"]);
+  const statusText=rawStatus.toString("utf8");
+  const statusFiltered=Buffer.from(statusText.split("\0").filter(x=>!x.includes(".autopilot/")).join("\0"));
+  const diff=gitOut(cwd,["diff","--no-ext-diff","--binary","HEAD","--", ".", ":!(.autopilot/**)"]);
+
+  const fileSet=new Set();
+  for(const rel of gitOut(cwd,["diff","--name-only","-z","HEAD"]).toString().split("\0").filter(Boolean)){
+    if(!rel.startsWith(".autopilot/"))fileSet.add(rel);
+  }
+  for(const rel of gitOut(cwd,["ls-files","--others","-z","--exclude-standard"]).toString().split("\0").filter(Boolean)){
+    if(!rel.startsWith(".autopilot/"))fileSet.add(rel);
+  }
+  for(const rel of gitOut(cwd,["ls-files","--others","--ignored","-z","--exclude-standard"]).toString().split("\0").filter(Boolean)){
+    if(!rel.startsWith(".autopilot/")&&!rel.startsWith("node_modules/"))fileSet.add(rel);
+  }
+  const files={};
+  for(const rel of [...fileSet].sort()){
+    const full=path.join(cwd,rel);
+    try{
+      const st=fs.lstatSync(full);
+      if(st.isDirectory()) continue;
+      files[rel]={hash:fileHash(full),mode:st.mode,type:st.isSymbolicLink()?"symlink":"file"};
+    }catch{files[rel]={hash:"MISSING",mode:0,type:"missing"};}
+  }
+
+  const fingerprint=hashBytes(Buffer.from(JSON.stringify({
+    head,headSymbolic,refs,config,sequencer,reflogs,objects,
+    indexState,hooksDigest,administrativeDigest,
+    status:statusFiltered.toString("utf8"),
+    diff:diff.toString("utf8"),
+    files
+  })));
+  return {head,headSymbolic,refs,config,sequencer,reflogs,objects,indexState,hooksDigest,administrativeDigest,status:statusFiltered,diff,files,fingerprint};
+}
+export function touchedFilesBetween(before,after,cwd){
+  const set=new Set();
+  const beforeFiles=before.files||{};
+  const afterFiles=after.files||{};
+  for(const rel of new Set([...Object.keys(beforeFiles),...Object.keys(afterFiles)])){
+    if(rel.startsWith(".autopilot/"))continue;
+    if(JSON.stringify(beforeFiles[rel]||null)!==JSON.stringify(afterFiles[rel]||null)) set.add(rel);
+  }
+  if(before.head!==after.head && before.head){
+    try{
+      for(const p of gitOut(cwd,["diff","--name-only","-z",`${before.head}..${after.head}`]).toString().split("\0").filter(Boolean)){
+        if(!p.startsWith(".autopilot/"))set.add(p);
+      }
+    }catch{}
+  }
+  return [...set].sort();
+}
+// Ref/history-mutating subcommands. Deliberately broader than {commit, push}:
+// commit-tree + update-ref can create a commit object and move a branch without
+// ever calling "git commit", so the old two-entry blocklist was bypassable.
+const BLOCKED_SUBCOMMANDS = new Set([
+  "commit","commit-tree","push","update-ref","symbolic-ref","replace",
+  "filter-branch","fast-import","reset","merge","rebase","cherry-pick",
+  "revert","tag","branch","notes"
+]);
+
+export function createGitMutationGuard(runDir,repositoryRoot=null){
+  const guardDir=path.join(runDir,"git-guard");
+  fs.mkdirSync(guardDir,{recursive:true});
+  const logFile=path.join(guardDir,"blocked.log");
+  const realGit=gitExecutable();
+
+  // --- Layer 1: PATH shim -----------------------------------------------
+  // Catches the common case (agent invokes plain "git ..." and relies on PATH).
+  // Known gap: if the agent resolves an absolute git path itself, this layer
+  // is skipped entirely. Layer 2 below does not depend on PATH at all.
+  //
+  // TASK 15.6J exception: the exact read-only `symbolic-ref` HEAD query is
+  // structurally exempted (see isSafeSymbolicRefQuery in the generated
+  // wrapper). symbolic-ref STAYS in BLOCKED_SUBCOMMANDS — the exemption is a
+  // narrow allow-after-parse, never a reclassification.
+  const wrapper=path.join(guardDir,"git-guard.mjs");
+  const blockedList=JSON.stringify([...BLOCKED_SUBCOMMANDS]);
+  fs.writeFileSync(wrapper,`import fs from "node:fs"; import {spawnSync} from "node:child_process";\nconst args=process.argv.slice(2);\nconst blocked=new Set(${blockedList});\nconst GLOBAL_VALUE_FLAGS=new Set(["-C","-c","--git-dir","--work-tree","--namespace","--super-prefix","--config-env"]);\nconst GLOBAL_VALUE_PREFIXES=[\"--git-dir=\",\"--work-tree=\",\"--namespace=\",\"--super-prefix=\",\"--config-env=\"];\nconst SAFE_SYMBOLIC_REF_OPTIONS=new Set([\"--quiet\",\"-q\",\"--short\",\"--no-recurse\"]);\nfunction isSafeSymbolicRefQuery(argumentList,commandIndex){\nlet operand=null;\nfor(let i=commandIndex+1;i<argumentList.length;i+=1){\nconst token=argumentList[i];\nif(token.startsWith(\"-\")){if(!SAFE_SYMBOLIC_REF_OPTIONS.has(token))return false;continue;}\nif(operand!==null)return false;\noperand=token;\n}\nreturn operand===\"HEAD\";\n}\nconst MUTATING_BRANCH=new Set(["-d","-D","-m","-M","-c","-C","-f","--force","--delete","--move","--copy","--set-upstream-to","-u","--unset-upstream"]);\nconst READONLY_BRANCH_QUERY=new Set(["--list","-l","--show-current","--contains","--no-contains","--merged","--no-merged","--points-at","--format","-v","--verbose","-a","--all","-r","--remotes","--column","--sort"]);\nlet subcommandIndex=-1;\nfor(let index=0;index<args.length;index+=1){\n  const argument=args[index];\n  if(GLOBAL_VALUE_FLAGS.has(argument)){index+=1;continue;}\n  if(GLOBAL_VALUE_PREFIXES.some(prefix=>argument.startsWith(prefix)))continue;\n  if(argument.startsWith("-"))continue;\n  subcommandIndex=index;\n  break;\n}\nconst subcommand=subcommandIndex>=0?args[subcommandIndex]:null;\nlet readOnlyBranch=false;\nif(subcommand==="branch"){\n  const rest=args.slice(subcommandIndex+1);\n  readOnlyBranch=rest.some(a=>READONLY_BRANCH_QUERY.has(a.split("=")[0]))||(rest.every(a=>a.startsWith("-"))&&rest.every(a=>!MUTATING_BRANCH.has(a.split("=")[0])));\n}\nconst safeSymbolicRefQuery=subcommand===\"symbolic-ref\"&&subcommandIndex>=0&&isSafeSymbolicRefQuery(args,subcommandIndex);\nif(subcommand && blocked.has(subcommand) && !(subcommand===\"branch\"&&readOnlyBranch) && !safeSymbolicRefQuery){\n  fs.appendFileSync(process.env.AUTOPILOT_GIT_GUARD_LOG||"${logFile.replace(/\\/g,"\\\\")}",JSON.stringify({time:new Date().toISOString(),args,layer:"path-shim",subcommand})+"\\n");\n  console.error("AUTOPILOT GIT GUARD: '"+subcommand+"' is forbidden (history/ref mutation).");\n  process.exit(97);\n}\nconst env={...process.env};\nconst result=spawnSync(process.env.AUTOPILOT_REAL_GIT||"git",args,{stdio:"inherit",shell:false,env});\nif(result.error){console.error(result.error.message);process.exit(127);}\nprocess.exit(result.status??1);\n`);
+  if(process.platform!=="win32"){
+    const unixShim=path.join(guardDir,"git");
+    fs.writeFileSync(unixShim,`#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/git-guard.mjs" "$@"\n`);
+    fs.chmodSync(unixShim,0o755);
+  } else {
+    fs.writeFileSync(path.join(guardDir,"git.cmd"),`@echo off\n"${process.execPath}" "${wrapper}" %*\nexit /b %errorlevel%\n`);
+  }
+  const explicitWrapper=path.join(guardDir,"git-guard-explicit.mjs");
+  fs.writeFileSync(explicitWrapper,explicitWrapperSource(wrapper));
+
+  // --- Layer 2: git hooks via env-scoped core.hooksPath ------------------
+  // GIT_CONFIG_COUNT/KEY/VALUE (git >= 2.31) override repo config for this
+  // process tree only, without touching .git/config. Any "git" binary the
+  // agent calls (PATH-resolved or absolute path) will honor these hooks,
+  // because hooks fire based on git's own config resolution, not on how the
+  // binary was located. reference-transaction is the catch-all: it fires for
+  // *any* ref update (branch move, tag, commit-tree+update-ref combo, merge,
+  // rebase, cherry-pick, ...), not just plain "commit"/"push".
+  //
+  // SCOPE (TASK 15.6I): reference-transaction enforcement protects ONLY the
+  // official repository identities recorded in git-scope.conf (canonical
+  // worktree root, per-worktree git dir, common git dir, linked-worktree
+  // metadata). A transaction whose git directory resolves conclusively
+  // outside every protected identity is allowed silently (this is what lets
+  // an external tool's `git init` with an outside GIT_DIR succeed). Every
+  // other hook (pre-commit, pre-push, pre-rebase, pre-merge-commit) and the
+  // Layer-1 subcommand blocklist keep their previous global behavior.
+  const hooksDir=path.join(guardDir,"hooks");
+  fs.mkdirSync(hooksDir,{recursive:true});
+  const trustedHookLog=shellLiteral(logFile);
+  for(const hook of ["pre-commit","pre-push","pre-rebase","pre-merge-commit"]){
+    const p=path.join(hooksDir,hook);
+    fs.writeFileSync(p,denyHook(hook,trustedHookLog));
+    fs.chmodSync(p,0o755);
+  }
+  // Protected identity comes from trusted guard-creation data (resolved here
+  // via git itself, stored in a guard-dir file the hook reads path-relatively
+  // like blocked.log). It is NEVER taken from process environment, so a
+  // child/model cannot relocate or shrink it with GIT_DIR, GIT_WORK_TREE,
+  // GIT_CONFIG_* or AUTOPILOT_* overrides. repositoryRoot==null — or a root
+  // whose identity cannot be resolved (not a repository, unreadable git dir)
+  // — leaves no identity file behind, and the hook fails closed (denies every
+  // prepared transaction with reason missing-identity) when the file is
+  // missing, unreadable or malformed. Failing closed at ENFORCEMENT time
+  // (rather than throwing here) preserves the long-standing contract that
+  // guard creation itself never validates the repository: callers that only
+  // need the guard's filesystem shape / environment (e.g. envelope path
+  // mapping tests over non-repo fixtures) keep working, while no ref
+  // transaction can ever slip through unidentified.
+  let scopeFile=null;
+  let protectedIdentity=null;
+  if(repositoryRoot){
+    try{
+      protectedIdentity=resolveProtectedGitIdentity(repositoryRoot);
+      scopeFile=path.join(guardDir,"git-scope.conf");
+      fs.writeFileSync(scopeFile,renderGitScopeFile(protectedIdentity));
+    }catch{
+      scopeFile=null;
+      protectedIdentity=null;
+    }
+  }
+  const refTxnHook=path.join(hooksDir,"reference-transaction");
+  fs.writeFileSync(refTxnHook,referenceTransactionHookSource());
+  fs.chmodSync(refTxnHook,0o755);
+
+  return {
+    guardDir,logFile,realGit,hooksDir,wrapper:explicitWrapper,pathShimWrapper:wrapper,
+    repositoryRoot:repositoryRoot?path.resolve(repositoryRoot):null,
+    scopeFile,protectedIdentity,
+    prependPath:(process.env.PATH?guardDir+path.delimiter+process.env.PATH:guardDir)
+  };
+}
+
+function explicitWrapperSource(pathShimWrapper){
+  const pathShimTarget=JSON.stringify(pathShimWrapper);
+  return `import {spawnSync} from "node:child_process";\nconst childEnvironment={...process.env,AUTOPILOT_GIT_GUARD_LOG:process.platform==="win32"?"NUL":"/dev/null"};\nconst guardProcess=spawnSync(process.execPath,[${pathShimTarget},...process.argv.slice(2)],{stdio:"inherit",shell:false,env:childEnvironment});\nif(guardProcess.error){console.error(guardProcess.error.message);process.exit(127);}\nprocess.exit(guardProcess.status??1);\n`;
+}
+
+function denyHook(hook,trustedHookLog){
+  // Path-relative to the hook: <guard>/hooks/<hook> -> <guard>/blocked.log.
+  // Works on the host and when the guard dir is bind-mounted into the
+  // bubblewrap envelope; never redirectable via child environment.
+  return `#!/bin/sh\nLOG="$(dirname "$0")/../blocked.log"\necho '{"layer":"hook","hook":"${hook}"}' >> "$LOG"\necho "AUTOPILOT GIT GUARD: blocked by ${hook} hook" >&2\nexit 1\n`;
+}
+
+// Canonical form shared by the Node side (scope-file writer) and the shell
+// side (reference-transaction hook, which reimplements the same steps — see
+// referenceTransactionHookSource). Both sides MUST agree byte-for-byte:
+// backslashes become forward slashes, a leading MSYS-style "/c/..." drive
+// becomes "c:/...", drive letters fold to lowercase, trailing slashes are
+// stripped, and on case-insensitive platforms (win32/darwin, decided at
+// guard creation and stored as foldCase) the whole string folds to lowercase.
+export function normalizeGuardPath(candidate,foldCase){
+  let s=String(candidate).replace(/\\/g,"/");
+  const msys=s.match(/^\/([A-Za-z])\/(.*)$/);
+  if(msys) s=`${msys[1].toLowerCase()}:/${msys[2]}`;
+  else {
+    const drive=s.match(/^([A-Za-z]):(\/.*)?$/);
+    if(drive) s=`${drive[1].toLowerCase()}:${drive[2]||"/"}`;
+  }
+  while(s.length>1&&s.endsWith("/")) s=s.slice(0,-1);
+  if(s==="") s="/";
+  if(foldCase) s=s.toLowerCase();
+  return s;
+}
+
+// Resolve the protected git identities for the official repository. Throws
+// (fail closed at guard creation) when any identity cannot be resolved — a
+// guard that cannot name what it protects must not exist. Returned paths are
+// realpath-resolved (symlinks/junctions eliminated at creation time; the
+// hook re-resolves at enforcement time) and pre-normalized with
+// normalizeGuardPath so the shell hook only has to repeat normalization,
+// never invent it.
+export function resolveProtectedGitIdentity(repositoryRoot){
+  const cwd=path.resolve(repositoryRoot);
+  const fail=(what,detail)=>{throw new Error(`Git guard: cannot resolve protected repository identity at ${cwd} (${what}${detail?`: ${detail}`:""}). Failing closed.`);};
+  let gitDirRaw;
+  try{gitDirRaw=gitOut(cwd,["rev-parse","--absolute-git-dir"]).toString().trim();}
+  catch(error){fail("git-dir",error?.message);}
+  if(!gitDirRaw) fail("git-dir","empty rev-parse output");
+  let commonRaw=null;
+  try{commonRaw=gitOut(cwd,["rev-parse","--path-format=absolute","--git-common-dir"]).toString().trim();}
+  catch{commonRaw=null;}
+  if(!commonRaw){
+    try{commonRaw=path.resolve(cwd,gitOut(cwd,["rev-parse","--git-common-dir"]).toString().trim());}
+    catch(error){fail("common-dir",error?.message);}
+  }
+  // --show-toplevel legitimately fails for bare repositories (no worktree);
+  // null root simply means "no worktree identity to protect", not an error.
+  let topRaw=null;
+  try{
+    const top=gitOutAllowing(cwd,["rev-parse","--show-toplevel"],[0,1,128]);
+    if(top.status===0&&top.stdout.toString().trim()) topRaw=top.stdout.toString().trim();
+  }catch(error){fail("worktree-root",error?.message);}
+  const foldCase=(process.platform==="win32"||process.platform==="darwin")?1:0;
+  const real=(p,what)=>{
+    try{return normalizeGuardPath(fs.realpathSync(p),foldCase);}
+    catch(error){fail(what,`${p}: ${error?.message}`);}
+  };
+  const identity={version:1,foldCase,root:topRaw?real(topRaw,"worktree-root"):null,gitDir:real(gitDirRaw,"git-dir"),commonDir:real(commonRaw,"common-dir"),worktrees:[]};
+  // Linked-worktree metadata: every registered worktree contributes its
+  // worktree path and its per-worktree git dir. Worktrees added AFTER guard
+  // creation are still covered because their git dirs always live under the
+  // protected common dir (<common>/worktrees/<name>), which the hook checks
+  // by containment.
+  let porcelain;
+  try{porcelain=gitOut(cwd,["worktree","list","--porcelain"]).toString("utf8");}
+  catch(error){fail("worktree-list",error?.message);}
+  const seen=new Set([identity.root,identity.gitDir].filter(Boolean));
+  for(const line of porcelain.split(/\r?\n/)){
+    if(!line.startsWith("worktree ")) continue;
+    const wtPath=line.slice("worktree ".length).trim();
+    if(!wtPath) continue;
+    let wtGit;
+    try{wtGit=gitOut(wtPath,["rev-parse","--absolute-git-dir"]).toString().trim();}
+    catch{fail("linked-worktree-git-dir",wtPath);}
+    const normPath=real(wtPath,"linked-worktree-path");
+    const normGit=real(wtGit,"linked-worktree-git-dir");
+    if(seen.has(normPath+":"+normGit)) continue;
+    seen.add(normPath+":"+normGit);
+    identity.worktrees.push({path:normPath,gitDir:normGit});
+  }
+  if(!identity.gitDir||!identity.commonDir) fail("empty-identity","gitdir/common missing after canonicalization");
+  return identity;
+}
+
+export function renderGitScopeFile(identity){
+  if(!identity||identity.version!==1||!identity.gitDir||!identity.commonDir) throw new Error("Git guard: refusing to render an incomplete protected identity. Failing closed.");
+  const lines=[`v1 fold=${identity.foldCase?1:0}`];
+  if(identity.root) lines.push(`root=${identity.root}`);
+  lines.push(`gitdir=${identity.gitDir}`);
+  lines.push(`common=${identity.commonDir}`);
+  for(const wt of identity.worktrees||[]){
+    if(!wt.path||!wt.gitDir) throw new Error("Git guard: refusing to render an incomplete linked-worktree identity. Failing closed.");
+    lines.push(`wtpath=${wt.path}`);
+    lines.push(`wtgit=${wt.gitDir}`);
+  }
+  return lines.join("\n")+"\n";
+}
+
+// POSIX-sh source for the repository-scoped reference-transaction hook.
+// Embedded as an array join (never a JS template literal) so shell `$`
+// sequences pass through untouched. Runs under /bin/sh (dash) on Linux and
+// Git-for-Windows sh on native Windows: no bashisms, no jq, no node.
+//
+// Decision (prepared state only; committed/aborted always exit 0):
+//  1. Load git-scope.conf via the hook's own directory (trusted, path-
+//     relative — never from environment). Missing/unreadable/malformed ->
+//     deny (fail closed).
+//  2. Fast path: `git rev-parse` resolves the transaction's git dir, common
+//     dir and (unless bare) worktree. Each is canonicalized (symlinks,
+//     junctions, `..`, MSYS/Windows spelling) and normalized exactly like
+//     normalizeGuardPath. Git-dir/common-dir overlap with any protected
+//     identity always denies. When both are external, a protected worktree
+//     denies only a transaction that actually supplied ref input; an empty
+//     prepared transaction is administrative bookkeeping in the external
+//     repository and must not be reclassified by GIT_WORK_TREE.
+//  3. Init path: rev-parse FAILS while `git init` creates a repository
+//     (no HEAD exists yet at the prepared instant — verified empirically).
+//     Then only an EXPLICIT external GIT_DIR (env or --git-dir flag, which
+//     git exports as GIT_DIR to hooks) naming a git dir conclusively
+//     outside every protected identity may proceed — this is precisely the
+//     external-snapshot `git init` mechanism. No GIT_DIR, unresolvable
+//     GIT_DIR, or overlap -> deny. A plain `git init` inside the official
+//     worktree (nested repository) therefore stays blocked.
+// A ref transaction mutates refs inside a GIT DIR, so scoping is git-dir
+// centric: the ambient cwd/worktree of an explicit-external-GIT_DIR init is
+// deliberately NOT consulted (the tool's cwd is routinely inside the
+// official worktree and git writes no refs there). For an already-resolved
+// repository, ref input distinguishes an external empty administrative
+// transaction from a ref update whose worktree identity must still protect
+// the official repository.
+function referenceTransactionHookSource(){
+  const sh=[
+    "#!/bin/sh",
+    "# AUTOPILOT GIT GUARD — reference-transaction, scoped to the official",
+    "# repository identities in git-scope.conf. Fail closed on anything",
+    "# unresolved, malformed, ambiguous or overlapping. See relay-guards.mjs.",
+    "if [ \"$1\" != \"prepared\" ]; then",
+    "  exit 0",
+    "fi",
+    "HOOK_DIR=$(dirname \"$0\")",
+    "IDENT=\"$HOOK_DIR/../git-scope.conf\"",
+    "LOG=\"$HOOK_DIR/../blocked.log\"",
+    "clean() {",
+    "  printf '%s' \"$1\" | tr -d '\\n\"' 2>/dev/null",
+    "}",
+    "deny() {",
+    "  R=$(clean \"$1\")",
+    "  C=$(clean \"$2\")",
+    "  M=$(clean \"$3\")",
+    "  printf '%s\\n' \"{\\\"layer\\\":\\\"hook\\\",\\\"hook\\\":\\\"reference-transaction\\\",\\\"scope\\\":\\\"official\\\",\\\"reason\\\":\\\"$R\\\",\\\"gitDir\\\":\\\"$C\\\",\\\"match\\\":\\\"$M\\\"}\" >> \"$LOG\"",
+    "  echo \"AUTOPILOT GIT GUARD: ref update blocked (reference-transaction)\" >&2",
+    "  exit 1",
+    "}",
+    "norm() {",
+    "  N=$(printf '%s' \"$1\" | tr '\\\\' '/')",
+    "  case \"$N\" in",
+    "    /[A-Za-z]/*)",
+    "      D=$(printf '%s' \"$N\" | cut -c2 | tr 'A-Z' 'a-z')",
+    "      R=$(printf '%s' \"$N\" | cut -c3-)",
+    "      N=\"$D:/$R\"",
+    "      ;;",
+    "  esac",
+    "  case \"$N\" in",
+    "    [A-Za-z]:/*)",
+    "      D=$(printf '%s' \"$N\" | cut -c1 | tr 'A-Z' 'a-z')",
+    "      R=$(printf '%s' \"$N\" | cut -c2-)",
+    "      N=\"$D$R\"",
+    "      ;;",
+    "  esac",
+    "  while :; do",
+    "    case \"$N\" in",
+    "      */) N=${N%/};;",
+    "      *) break;;",
+    "    esac",
+    "  done",
+    "  if [ -z \"$N\" ]; then N=\"/\"; fi",
+    "  if [ \"$FOLD\" = \"1\" ]; then N=$(printf '%s' \"$N\" | tr 'A-Z' 'a-z'); fi",
+    "  printf '%s' \"$N\"",
+    "}",
+    "canon() {",
+    "  P=\"$1\"",
+    "  if command -v realpath >/dev/null 2>&1; then",
+    "    R=$(realpath \"$P\" 2>/dev/null) && { printf '%s' \"$R\"; return 0; }",
+    "  fi",
+    "  if command -v readlink >/dev/null 2>&1; then",
+    "    R=$(readlink -f \"$P\" 2>/dev/null) && { printf '%s' \"$R\"; return 0; }",
+    "  fi",
+    "  if R=$(cd \"$P\" 2>/dev/null && pwd -P 2>/dev/null); then",
+    "    printf '%s' \"$R\"; return 0",
+    "  fi",
+    "  return 1",
+    "}",
+    "protected_hit() {",
+    "  C=\"$1\"",
+    "  HIT=\"\"",
+    "  while IFS= read -r P || [ -n \"$P\" ]; do",
+    "    if [ -z \"$P\" ]; then continue; fi",
+    "    THIS=\"\"",
+    "    if [ \"$C\" = \"$P\" ]; then THIS=\"$P\";",
+    "    else",
+    "      case \"$C\" in \"$P\"/*) THIS=\"$P\";; esac",
+    "      if [ -z \"$THIS\" ]; then",
+    "        case \"$P\" in \"$C\"/*) THIS=\"$P\";; esac",
+    "      fi",
+    "    fi",
+    "    if [ -n \"$THIS\" ]; then HIT=\"$THIS\"; break; fi",
+    "  done <<AUTOPILOT_SCOPE_EOF",
+    "$PROTECTED",
+    "AUTOPILOT_SCOPE_EOF",
+    "  printf '%s' \"$HIT\"",
+    "}",
+    "check_candidate() {",
+    "  M=$(protected_hit \"$1\")",
+    "  if [ -n \"$M\" ]; then deny \"protected-ref\" \"$1\" \"$M\"; fi",
+    "}",
+    "if [ ! -f \"$IDENT\" ]; then",
+    "  deny \"missing-identity\"",
+    "fi",
+    "FOLD=\"\"",
+    "PROOT=\"\"",
+    "PGIT=\"\"",
+    "PCOMMON=\"\"",
+    "PROTECTED=\"\"",
+    "FIRST=1",
+    "while IFS= read -r line || [ -n \"$line\" ]; do",
+    "  case \"$line\" in ''|\\#*) continue;; esac",
+    "  if [ \"$FIRST\" = \"1\" ]; then",
+    "    FIRST=0",
+    "    case \"$line\" in",
+    "      \"v1 fold=0\") FOLD=\"0\";;",
+    "      \"v1 fold=1\") FOLD=\"1\";;",
+    "      *) deny \"malformed-identity\";;",
+    "    esac",
+    "    continue",
+    "  fi",
+    "  key=${line%%=*}",
+    "  val=${line#*=}",
+    "  case \"$key\" in",
+    "    root|gitdir|common|wtpath|wtgit) ;;",
+    "    *) deny \"malformed-identity\";;",
+    "  esac",
+    "  if [ -z \"$val\" ]; then deny \"malformed-identity\"; fi",
+    "  case \"$val\" in",
+    "    /*|[A-Za-z]:/*) ;;",
+    "    *) deny \"malformed-identity\";;",
+    "  esac",
+    "  case \"$key\" in",
+    "    root) PROOT=\"$val\";;",
+    "    gitdir) PGIT=\"$val\";;",
+    "    common) PCOMMON=\"$val\";;",
+    "  esac",
+    "  PROTECTED=\"$PROTECTED$val",
+    "\"",
+    "done < \"$IDENT\"",
+    "if [ \"$FIRST\" = \"1\" ]; then deny \"malformed-identity\"; fi",
+    "if [ -z \"$PGIT\" ] || [ -z \"$PCOMMON\" ]; then deny \"malformed-identity\"; fi",
+    "if RGIT_RAW=$(git rev-parse --path-format=absolute --absolute-git-dir 2>/dev/null); then",
+    "  RCOMMON_RAW=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || deny \"unresolved-common\"",
+    "  RTOP_RAW=$(git rev-parse --show-toplevel 2>/dev/null || true)",
+    "  CGIT=$(canon \"$RGIT_RAW\") || deny \"unresolved-gitdir\"",
+    "  CGIT=$(norm \"$CGIT\")",
+    "  CCOMMON=$(canon \"$RCOMMON_RAW\") || deny \"unresolved-common\"",
+    "  CCOMMON=$(norm \"$CCOMMON\")",
+    "  CTOP=\"\"",
+    "  if [ -n \"$RTOP_RAW\" ]; then",
+    "    CTOP=$(canon \"$RTOP_RAW\") || deny \"unresolved-top\"",
+    "    CTOP=$(norm \"$CTOP\")",
+    "  fi",
+    "  if [ -z \"$CGIT\" ] || [ -z \"$CCOMMON\" ]; then deny \"unresolved-gitdir\"; fi",
+    "  check_candidate \"$CGIT\"",
+    "  check_candidate \"$CCOMMON\"",
+    "  if [ -n \"$CTOP\" ]; then check_candidate \"$CTOP\"; fi",
+    "  exit 0",
+    "fi",
+    "if [ -z \"${GIT_DIR:-}\" ]; then",
+    "  deny \"unresolved-gitdir\"",
+    "fi",
+    "ORIG=\"$PWD\"",
+    "if [ -n \"${GIT_PREFIX:-}\" ]; then ORIG=\"$ORIG/$GIT_PREFIX\"; fi",
+    "case \"$GIT_DIR\" in",
+    "  /*|[A-Za-z]:/*) ABS_G=\"$GIT_DIR\";;",
+    "  *) ABS_G=\"$ORIG/$GIT_DIR\";;",
+    "esac",
+    "CG=$(canon \"$ABS_G\") || deny \"unresolved-gitdir\"",
+    "CG=$(norm \"$CG\")",
+    "if [ -z \"$CG\" ]; then deny \"unresolved-gitdir\"; fi",
+    "check_candidate \"$CG\"",
+    "exit 0",
+    ""
+  ];
+  return sh.join("\n");
+}
+
+function shellLiteral(candidate){
+  return "'" + String(candidate).replace(/\\/g,"/").replace(/'/g,"'\"'\"'") + "'";
+}
+
+export function readGuardLog(logFile){
+  if(!fs.existsSync(logFile)) return [];
+  return fs.readFileSync(logFile,"utf8").split(/\r?\n/).filter(Boolean).map(line=>{try{return JSON.parse(line);}catch{return {raw:line};}});
+}
+
+export function sessionFromOutput(output){
+  const text=String(output||"");
+  const jsonKeys=[/"session[_-]?id"\s*:\s*"([^"]+)"/gi,/"sessionId"\s*:\s*"([^"]+)"/gi];
+  for(const re of jsonKeys){let m; let last=""; while((m=re.exec(text))) last=m[1]; if(last)return last;}
+  const patterns=[/session(?:[_ -]?id)?\s*[:=]\s*([A-Za-z0-9._:-]{8,})/gi,/conversation(?:[_ -]?id)?\s*[:=]\s*([A-Za-z0-9._:-]{8,})/gi];
+  for(const re of patterns){let m; let last=""; while((m=re.exec(text))) last=m[1]; if(last)return last;}
+  return null;
+}
+
+export function roleSession(state,roleName){
+  state.sessions=state.sessions||{};
+  return state.sessions[roleName]?.sessionId||null;
+}
+
+export function saveRoleSession(state,roleName,sessionId,meta={}){
+  state.sessions=state.sessions||{};
+  if(sessionId) state.sessions[roleName]={sessionId,...meta,updatedAt:new Date().toISOString()};
+}
+
+export function clearRoleSession(state,roleName){
+  state.sessions=state.sessions||{};
+  delete state.sessions[roleName];
+}
+
+export const SAFE_ENV_NAMES = new Set([
+  "PATH","Path","PATHEXT","HOME","USER","USERNAME","USERPROFILE","HOMEDRIVE","HOMEPATH",
+  "TEMP","TMP","TMPDIR","PWD","INIT_CWD","NODE_ENV","CI","LANG","LC_ALL","LC_CTYPE",
+  "SHELL","COMSPEC","SystemRoot","WINDIR","APPDATA","LOCALAPPDATA","TERM","TERM_PROGRAM",
+  "PORT","HOST","HOSTNAME","DISPLAY","CI","FORCE_COLOR","NO_COLOR"
+]);
+
+export function filteredProcessEnv(allowlist=[]){
+  const out={};
+  const allowed=new Set([...SAFE_ENV_NAMES,...allowlist.map(String)]);
+  for(const [key,value] of Object.entries(process.env)){
+    if(allowed.has(key)) out[key]=value;
+  }
+  return out;
+}
+
+export function guardedEnv(guard,extra={},allowlist=[]){
+  const environment={
+    ...filteredProcessEnv(allowlist),
+    ...extra,
+    AUTOPILOT_GIT_GUARD_LOG:guard.logFile,
+    AUTOPILOT_REAL_GIT:guard.realGit,
+    AUTOPILOT_NO_GIT_MUTATIONS:"1",
+    GIT_TERMINAL_PROMPT:"0",
+    GIT_CONFIG_COUNT:guard.repositoryRoot?"2":"1",
+    GIT_CONFIG_KEY_0:"core.hooksPath",
+    GIT_CONFIG_VALUE_0:guard.hooksDir,
+    ...(guard.repositoryRoot?{GIT_CONFIG_KEY_1:"safe.directory",GIT_CONFIG_VALUE_1:guard.repositoryRoot}:{})
+  };
+  return withGuardedPath(environment,guard.prependPath);
+}
+
+function withGuardedPath(environment,prependPath){
+  const withoutPath=Object.fromEntries(Object.entries(environment).filter(([name])=>name.toLowerCase()!=="path"));
+  return {...withoutPath,[process.platform==="win32"?"Path":"PATH"]:prependPath};
+}
+
+export function guardedCommandEnv(guard,extra={},allowlist=[]){
+  return guardedEnv(guard,extra,allowlist);
+}

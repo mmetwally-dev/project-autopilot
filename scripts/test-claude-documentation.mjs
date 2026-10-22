@@ -1,0 +1,12 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { skillRoot } from './paths.mjs';
+const file = path.join(skillRoot,'adapters','documented-models','claude.json');
+const x = JSON.parse(fs.readFileSync(file,'utf8'));
+if (x.source !== 'https://code.claude.com/docs/en/model-config') throw new Error('Claude docs source mismatch');
+if (!x.models.some(m => m.id === 'fable')) throw new Error('Claude fable alias missing');
+if (!x.models.some(m => m.id === 'opusplan')) throw new Error('Claude opusplan alias missing');
+if (!x.models.some(m => m.id === 'sonnet[1m]')) throw new Error('Claude sonnet[1m] alias missing');
+if (!x.models.some(m => m.id === 'opus[1m]')) throw new Error('Claude opus[1m] alias missing');
+if (String(x.note).length > 140) throw new Error('Claude catalog note is too verbose');
+console.log('Claude documentation catalog test passed');

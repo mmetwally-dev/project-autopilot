@@ -1,0 +1,326 @@
+{
+  "schema_version": "2.0",
+  "adapters": {
+    "claude": {
+      "contract_version": 2,
+      "driver": "claude",
+      "binary": "claude",
+      "probe": [
+        "--version"
+      ],
+      "write": [
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--input-format",
+        "text",
+        "--allowedTools",
+        "Bash",
+        "--disallowedTools",
+        "Monitor",
+        "TaskStop",
+        "--settings",
+        "{\"env\":{\"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS\":\"1\"}}",
+        "--permission-mode",
+        "acceptEdits"
+      ],
+      "read_only": [
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--input-format",
+        "text",
+        "--verbose",
+        "--permission-mode",
+        "plan"
+      ],
+      "model_flag": "--model",
+      "effort_flag": "--effort",
+      "variant_flag": null,
+      "permission_files": [
+        "~/.claude/settings.json",
+        "~/.claude/.credentials.json",
+        "~/.claude.json",
+        "~/.config/claude/settings.json",
+        "~/CLAUDE.md",
+        ".claude/settings.json",
+        "CLAUDE.md"
+      ],
+      "provider_egress": {
+        "default_profile": "anthropic-api",
+        "profiles_by_model_prefix": {
+          "claude/": "anthropic-api"
+        },
+        "profiles": {
+          "anthropic-api": {
+            "destinations": [
+              {"host": "api.anthropic.com", "port": 443},
+              {"host": "console.anthropic.com", "port": 443}
+            ]
+          }
+        }
+      },
+      "resume_last": [
+        "--continue"
+      ],
+      "session": [
+        "--session-id"
+      ],
+      "resume_session": [
+        "--resume"
+      ],
+      "model_discovery": "manual",
+      "declared_capabilities": {
+        "cli.discovery": true,
+        "selection.model": true,
+        "selection.effort": true,
+        "repository.read": true,
+        "repository.write": true,
+        "commands.execute": true,
+        "output.structuredReview": true,
+        "output.structuredTransport": "event-stream",
+        "headless.nonInteractive": true,
+        "paths.spaces": true,
+        "paths.unicode": true,
+        "paths.wsl": true
+      }
+    },
+    "codex": {
+      "contract_version": 2,
+      "driver": "codex",
+      "binary": "codex",
+      "probe": [
+        "--version"
+      ],
+      "write": [
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--sandbox",
+        "workspace-write"
+      ],
+      "read_only": [
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--sandbox",
+        "read-only"
+      ],
+      "model_flag": "--model",
+      "effort_flag": null,
+      "effort_mode": "config",
+      "effort_config_key": "model_reasoning_effort",
+      "variant_flag": null,
+      "permission_files": [
+        "~/.codex/config.toml",
+        "~/.codex/auth.json"
+      ],
+      "runtime_siblings": [
+        "codex-code-mode-host"
+      ],
+      "provider_egress": {
+        "default_profile": "chatgpt",
+        "profiles": {
+          "chatgpt": {"destinations": [{"host": "chatgpt.com", "port": 443}]},
+          "openai-api": {"destinations": [{"host": "api.openai.com", "port": 443}]}
+        }
+      },
+      "declared_capabilities": {
+        "cli.discovery": true,
+        "selection.model": true,
+        "selection.effort": true,
+        "repository.read": true,
+        "repository.write": true,
+        "commands.execute": true,
+        "commands.timeoutTermination": true,
+        "commands.childTermination": true,
+        "output.structuredReview": true,
+        "output.structuredTransport": "event-stream",
+        "headless.nonInteractive": true,
+        "headless.permissionDenialObservable": true,
+        "paths.windows": true,
+        "paths.wsl": true,
+        "paths.unc": true,
+        "paths.spaces": true,
+        "paths.unicode": true,
+        "browser.native.supported": false,
+        "browser.native.headless": false,
+        "browser.native.navigate": false,
+        "browser.native.snapshot": false,
+        "browser.native.click": false,
+        "browser.native.requiresPrestartedServer": false,
+        "browser.native.originScopedPermission": false,
+        "browser.native.permissionScope": "none",
+        "browser.playwright.agentDriven": true,
+        "browser.playwright.deterministic": true,
+        "browser.server.prestartTrusted": true
+      },
+      "resume_last": [
+        "exec",
+        "resume",
+        "--last"
+      ],
+      "model_discovery": "codex_app_server"
+    },
+    "opencode": {
+      "contract_version": 2,
+      "driver": "opencode",
+      "free_model_pattern": "-free$",
+      "binary": "opencode",
+      "probe": [
+        "--version"
+      ],
+      "write": [
+        "run",
+        "--print-logs",
+        "--format",
+        "json",
+        "--auto"
+      ],
+      "read_only": [
+        "run",
+        "--print-logs",
+        "--format",
+        "json",
+        "--agent",
+        "autopilot_readonly"
+      ],
+      "model_flag": "--model",
+      "effort_flag": "--variant",
+      "variant_flag": null,
+      "help_args": [
+        "run",
+        "--help"
+      ],
+      "permission_files": [
+        "~/.config/opencode/config.json",
+        "~/.config/opencode/opencode.json",
+        "~/.config/opencode/opencode.jsonc",
+        "~/.local/share/opencode/auth.json"
+      ],
+      "provider_egress": {
+        "default_profile": "opencode-zen",
+        "profiles_by_model_prefix": {
+          "opencode/": "opencode-zen",
+          "deepseek/": "deepseek"
+        },
+        "profiles": {
+          "opencode-zen": {
+            "destinations": [
+              {"host": "opencode.ai", "port": 443},
+              {"host": "models.opencode.ai", "port": 443}
+            ]
+          },
+          "deepseek": {
+            "destinations": [
+              {"host": "api.deepseek.com", "port": 443}
+            ]
+          }
+        }
+      },
+      "resume_last": [
+        "--continue"
+      ],
+      "session": [
+        "--session"
+      ],
+      "resume_session": [
+        "--session"
+      ],
+      "model_discovery": "opencode_models",
+      "declared_capabilities": {
+        "cli.discovery": true,
+        "selection.model": true,
+        "selection.effort": true,
+        "repository.read": true,
+        "repository.write": true,
+        "commands.execute": true,
+        "output.structuredReview": true,
+        "output.structuredTransport": "sentinel",
+        "headless.nonInteractive": true,
+        "paths.spaces": true,
+        "paths.unicode": true,
+        "paths.wsl": true
+      }
+    },
+    "cursor": {
+      "binary": "cursor-agent",
+      "probe": [
+        "--version"
+      ],
+      "write": [
+        "-p",
+        "--force"
+      ],
+      "read_only": [
+        "-p",
+        "--read-only"
+      ],
+      "model_flag": "--model",
+      "effort_flag": null,
+      "variant_flag": null,
+      "resume_last": [
+        "--resume-last"
+      ],
+      "session": [
+        "--session"
+      ],
+      "resume_session": [
+        "--session"
+      ],
+      "model_discovery": "cursor_models"
+    },
+    "antigravity": {
+      "contract_version": 2,
+      "driver": "antigravity",
+      "binary": "agy",
+      "probe": [
+        "--version"
+      ],
+      "write": [
+        "--mode",
+        "accept-edits",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "-p",
+        "",
+        "--print-timeout",
+        "45m0s"
+      ],
+      "read_only": [
+        "--mode",
+        "plan",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "-p",
+        "",
+        "--print-timeout",
+        "45m0s"
+      ],
+      "model_flag": "--model",
+      "effort_flag": "--effort",
+      "variant_flag": null,
+      "resume_last": [
+        "--continue"
+      ],
+      "session": [
+        "--conversation"
+      ],
+      "resume_session": [
+        "--conversation"
+      ],
+      "model_discovery": "antigravity_models",
+      "declared_capabilities": {
+        "cli.discovery": true,
+        "selection.model": true,
+        "selection.effort": true,
+        "output.structuredTransport": "event-stream"
+      }
+    }
+  }
+}

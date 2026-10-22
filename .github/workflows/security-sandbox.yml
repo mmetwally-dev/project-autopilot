@@ -1,0 +1,41 @@
+name: security-sandbox
+
+# Manual only for now: hosted runners lack the agent CLIs and may block
+# bubblewrap, so the suite is not yet verified there.
+on:
+  workflow_dispatch:
+
+jobs:
+  sandbox:
+    runs-on: ubuntu-latest
+    env:
+      # Explicit CI browser-cache location, shared by the Chromium
+      # installation steps and the test run below. Uses the workflow
+      # workspace (not a machine-specific absolute path, not /tmp/pw-install,
+      # not any pre-existing user browser cache).
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw-browsers
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Fixed Node version (satisfies package.json engines >=18).
+          node-version: "22.22.1"
+      - name: Install dependencies from lockfile (no browser download)
+        env:
+          # Explicit guard: npm ci must never implicitly download browsers.
+          # (The pinned playwright package ships no install hooks either.)
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci
+      - name: Install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Show bubblewrap capability
+        run: bwrap --version
+      - name: Install Chromium Linux system dependencies (pinned local Playwright)
+        # Uses the pinned skill-local playwright package (never a global
+        # install). install-deps elevates via sudo itself on Linux CI runners.
+        run: npx --no-install playwright install-deps chromium
+      - name: Install Chromium (pinned local Playwright)
+        run: npx --no-install playwright install chromium
+      - name: Run full test suite
+        run: npm test

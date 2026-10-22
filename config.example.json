@@ -1,0 +1,190 @@
+{
+  "$schema": "./config.schema.json",
+  "schema_version": "4.0",
+  "project": {
+    "repo": ".",
+    "planning_framework": "standalone"
+  },
+  "roles": {
+    "planner": {
+      "cli": "",
+      "model": "",
+      "reasoning": "",
+      "variant": "",
+      "resume_session": true,
+      "fallbacks": []
+    },
+    "plan_reviewer": {
+      "cli": "",
+      "model": "",
+      "reasoning": "",
+      "variant": "",
+      "resume_session": true,
+      "fallbacks": []
+    },
+    "implementer": {
+      "cli": "",
+      "model": "",
+      "reasoning": "",
+      "variant": "",
+      "resume_session": false,
+      "fallbacks": []
+    },
+    "code_reviewer": {
+      "cli": "",
+      "model": "",
+      "reasoning": "",
+      "variant": "",
+      "resume_session": true,
+      "fallbacks": []
+    },
+    "verifier": {
+      "cli": "",
+      "model": "",
+      "reasoning": "",
+      "variant": "",
+      "resume_session": true,
+      "fallbacks": []
+    },
+    "free_models": {
+      "auto_fallback": true,
+      "max_turns": 45
+    }
+  },
+  "caps": {
+    "task_size_target_turns": 30,
+    "planner": {
+      "max_turns": 30,
+      "max_tokens": 200000,
+      "extra_sessions": 2,
+      "wrap_up_at_tokens": 180000
+    },
+    "plan_reviewer": {
+      "max_turns": 30,
+      "max_tokens": 150000,
+      "extra_sessions": 2,
+      "wrap_up_at_tokens": 135000
+    },
+    "implementer": {
+      "max_turns": 40,
+      "max_tokens": 180000,
+      "extra_sessions": 5,
+      "wrap_up_at_tokens": 160000
+    },
+    "code_reviewer": {
+      "max_turns": 22,
+      "max_tokens": 150000,
+      "extra_sessions": 2,
+      "wrap_up_at_tokens": 135000
+    },
+    "verifier": {
+      "max_turns": 30,
+      "max_tokens": 150000,
+      "extra_sessions": 2,
+      "wrap_up_at_tokens": 135000
+    },
+    "mission_token_backstop": 6000000
+  },
+  "retries": {
+    "plan_revisions": 8,
+    "implementation": 4,
+    "verification": 4,
+    "final_review_fix_rounds": 2,
+    "cli_errors": 3,
+    "infrastructure": 3,
+    "no_progress_sessions": 2,
+    "extra_sessions_per_task": 5,
+    "escalate_after_not_fixed": 2
+  },
+  "time_limits": {
+    "role_timeout_minutes": { "default": 60, "verifier": 180 },
+    "call_backstop_minutes": 200,
+    "role_timeout_floor_minutes": null,
+    "silent_run_minutes": 10,
+    "no_first_output_minutes": 3,
+    "read_only_max_silence_minutes": 15,
+    "retry_wait_seconds": 60
+  },
+  "workflow": {
+    "plan_review": true,
+    "plan_review_rounds_converge": true,
+    "gsd_planning_review": false,
+    "spec_review": true,
+    "code_review_per_phase": true,
+    "final_review": true,
+    "analysis_after_tasks": true,
+    "approve_spec_myself": false,
+    "approve_plan_myself": false,
+    "parallel_independent_tasks": false,
+    "use_worktrees": true,
+    "commit_by_human": true
+  },
+  "tests": {
+    "gate_commands": [],
+    "gate_network": false,
+    "gate_env_allowlist": [],
+    "require_reviewer": true,
+    "browser": "native",
+    "require_browser": "when-task-requires",
+    "verify_denylist": []
+  },
+  "safety": {
+    "allow_git_commit": false,
+    "allow_git_push": false,
+    "allow_destructive_operations": false,
+    "stop_on_sandbox_violation": true,
+    "block_git_in_roles": true,
+    "check_read_only_roles": true,
+    "record_touched_files": true,
+    "keep_role_sessions": true
+  },
+  "runtime": {
+    "mode": "linux-strong",
+    "wsl_distro": null
+  },
+  "frameworks": {
+    "speckit": {
+      "workflow_file": ".specify/workflows/speckit/workflow.yml",
+      "task_files": [".specify/tasks.md", "specs/*/tasks.md", "specs/*/tasks/*.md"]
+    },
+    "gsd": {
+      "phase_root": ".planning/phases",
+      "run_plan_verify": true,
+      "run_state_validate": true,
+      "write_summary_artifacts": true,
+      "write_verification_artifacts": true,
+      "write_uat_artifact": true,
+      "use_gsd_tools_when_available": true,
+      "planning_review": {
+        "enabled": false,
+        "review_after_each_stage": true,
+        "stages": ["discuss", "research", "plan", "plan-check"],
+        "max_revisions": 3,
+        "read_only_reviewer": true
+      },
+      "parallel": {
+        "enabled": false,
+        "plan_level": false,
+        "task_level": false,
+        "max_concurrent_agents": 3,
+        "min_plans_for_parallel": 2
+      }
+    }
+  },
+  "advanced": {
+    "state_file": ".autopilot/state.json",
+    "runs_dir": ".autopilot/runs",
+    "handoff_max_chars": 2000,
+    "handoff_note_max_chars": 4000,
+    "handoff_wrapup_tokens": 160000,
+    "fallback_retry_primary_minutes": 60,
+    "checkpoint_after_task": true,
+    "checkpoint_after_phase": true,
+    "capabilities": {
+      "project_defaults": [],
+      "role_requirements": {},
+      "safety_denied": [],
+      "legacy_text_inference": false
+    }
+  }
+}
