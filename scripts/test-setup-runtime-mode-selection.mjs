@@ -180,7 +180,7 @@ function wsl1Caps() {
   check("pure no-WSL fresh requires explicit choice (no silent auto)", result.status === "need-choice" && !("execution" in result && result.execution), result);
   const text = (result.messages || []).join("\n");
   check("pure no-WSL reports unavailable", text.includes("WSL2 Strong is unavailable") && text.includes("wsl_not_installed"), text);
-  check("pure no-WSL warns weaker + confirmation", text.includes("weaker") && /Explicit confirmation is required/i.test(text), text);
+  check("pure no-WSL has no confirmation wording (setup prints the weaker warning)", !/Explicit confirmation is required/i.test(text) && /not OS-enforced/.test(text), text);
 }
 {
   const dual = windowsDualCaps("Ubuntu");
@@ -277,7 +277,7 @@ function wsl1Caps() {
   check("pure setup imports selection helpers", /from ["']\.\/runtime-mode-selection\.mjs["']/.test(setupSource) && /resolveRuntimeExecution/.test(setupSource));
   check("pure tests import selection not setup", !/import\s+\{[^}]*\}\s+from\s+["']\.\/setup\.mjs["']/.test(fs.readFileSync(new URL(import.meta.url), "utf8")));
   check("pure selection integrates discovery ids", /RUNTIME_MODE_IDS/.test(selectionSource));
-  check("pure setup requires compat confirmation", /Save Windows Compatibility execution mode/.test(setupSource) && /yesNo\(/.test(setupSource));
+  check("pure setup no longer asks to confirm compat", !/Save Windows Compatibility execution mode/.test(setupSource) && /Windows Compatibility is weaker: reviewers work on a throwaway copy/.test(setupSource));
   check("pure WSL1 fails", resolveRuntimeExecution({capabilities: wsl1Caps(), framework: "speckit", savedExecution: undefined}).status === "error");
 }
 
@@ -399,11 +399,25 @@ function isSetupPromptWaiting(text) {
 // (spawn failure, timeout, output overflow, assertion failure, exception).
 // Rejects nothing: the runner resolves lifecycle details and the caller
 // asserts on status/timedOut/outputLimitExceeded/terminationFailed.
-async function runSetupSubprocess({skillCopy, repo, setupArgs, rules = [], defaultAnswer = "", timeoutMs = 60000, maxOutputBytes = SETUP_MAX_OUTPUT_BYTES}) {
+async function runSetupSubprocess({skillCopy, repo, setupArgs, rules = [], defaultAnswer = "", timeoutMs = 60000, maxOutputBytes = SETUP_MAX_OUTPUT_BYTES, fakePlatform = null, withoutUnshare = false}) {
   const binDir = makeFakeCliDir();
   const toolsDir = makeHermeticToolsDir();
+  if (withoutUnshare) {
+    // Hide the network-namespace tool so no Linux isolation is detected.
+    try { fs.rmSync(path.join(toolsDir, "unshare"), {force: true}); } catch { /* already absent */ }
+  }
   const pathValue = hermeticPath(binDir, toolsDir);
   const env = {...process.env, PATH: pathValue};
+  if (fakePlatform) {
+    // Platform injection: pin the platform the network question is decided
+    // for in the disposable skill copy of setup.mjs (everything else keeps the
+    // real platform, so CLI discovery and the fixtures still work).
+    const setupCopy = path.join(skillCopy, "scripts", "setup.mjs");
+    const src = fs.readFileSync(setupCopy, "utf8");
+    const pinned = src.replace("const NETWORK_PLATFORM = process.platform;", `const NETWORK_PLATFORM = ${JSON.stringify(fakePlatform)};`);
+    if (pinned === src) throw new Error("NETWORK_PLATFORM seam not found in setup.mjs");
+    fs.writeFileSync(setupCopy, pinned);
+  }
   const fired = new Set();
   let lastAnsweredLen = 0;
   const onOutput = ({stdout, writeLine}) => {
@@ -538,8 +552,7 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
     skillCopy, repo,
     setupArgs: ["--wizard", "--repo", repo],
     rules: [
-      {pattern: /Runtime execution mode — choose one/, answer: "2"},
-      {pattern: /Save Windows Compatibility execution mode/, answer: "y"}
+      {pattern: /Runtime execution mode — choose one/, answer: "2"}
     ],
     defaultAnswer: "",
     timeoutMs: 60000
@@ -549,6 +562,8 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
   check("sub dual exits 0", r.status === 0 && !r.timedOut, {status: r.status, tail: combined.slice(-2000)});
   const saved = JSON.parse(readRepoConfigRaw(repo));
   check("sub dual explicit compat saved", saved?.runtime?.mode === "windows-compatibility" && saved?.runtime?.wsl_distro === null, {saved: saved?.runtime, answers: r.answersSent, timedOut: r.timedOut, overflow: r.outputLimitExceeded, termFail: r.terminationFailed, tail: combined.slice(-1500)});
+  check("sub dual compat asks no confirmation", !/Save Windows Compatibility/.test(combined), combined.slice(-2000));
+  check("sub dual compat prints the weaker warning", combined.includes("⚠ Windows Compatibility is weaker: reviewers work on a throwaway copy,\n  not OS-enforced containment. SpecKit and standalone projects only."), combined.slice(-2000));
   check("sub dual exact distro not stored for compat", saved?.runtime?.wsl_distro === null, saved?.runtime);
 });
 
@@ -576,44 +591,20 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
   const r = await runSetupSubprocess({
     skillCopy, repo,
     setupArgs: ["--wizard", "--repo", repo],
-    rules: [{pattern: /Save Windows Compatibility execution mode/, answer: "y"}],
+    rules: [],
     defaultAnswer: "",
     timeoutMs: 60000
   });
   const combined = `${r.stdout}\n${r.stderr}`;
   check("sub no-WSL warns unavailable", /WSL2 Strong is unavailable/.test(combined) && /wsl_not_installed/.test(combined), combined.slice(-3000));
-  check("sub no-WSL warns weaker SpecKit not-enforced", /weaker/.test(combined) && /SpecKit-and-standalone/.test(combined) && /not OS-enforced/.test(combined), combined.slice(-3000));
+  check("sub no-WSL warns weaker SpecKit not-enforced", /weaker/.test(combined) && /SpecKit and standalone/.test(combined) && /not OS-enforced/.test(combined), combined.slice(-3000));
+  check("sub no-WSL asks no confirmation", !/Save Windows Compatibility/.test(combined), combined.slice(-2000));
   check("sub no-WSL confirm exits 0", r.status === 0, {status: r.status, tail: combined.slice(-2000)});
   const saved = JSON.parse(readRepoConfigRaw(repo));
   check("sub no-WSL confirm saves compat", saved?.runtime?.mode === "windows-compatibility", {saved: saved?.runtime, answers: r.answersSent, timedOut: r.timedOut, overflow: r.outputLimitExceeded, termFail: r.terminationFailed, tail: combined.slice(-1500)});
 });
 
-// S5+S6: Declining compat leaves prior config byte-identical (Strong becoming unavailable not silent).
-await withFixtures(async ({skillCopy, trackRepo}) => {
-  stubCapabilities(skillCopy, windowsNoWslCaps("wsl_not_installed"));
-  const repo = trackRepo(makeRepo("speckit"));
-  const prior = baseConfig({framework: "speckit", execution: {runtime_mode: "wsl2-strong", wsl_distro: "Ubuntu"}});
-  prior.custom_top_level = {keep: true};
-  writeRepoConfig(repo, prior);
-  const before = readRepoConfigRaw(repo);
-  const r = await runSetupSubprocess({
-    skillCopy, repo,
-    setupArgs: ["--edit", "--repo", repo],
-    rules: [
-      {pattern: /Configuration scope:/, answer: "1"},
-      {pattern: /Save Windows Compatibility execution mode/, answer: "n"}
-    ],
-    defaultAnswer: "",
-    timeoutMs: 60000
-  });
-  const combined = `${r.stdout}\n${r.stderr}`;
-  const after = readRepoConfigRaw(repo);
-  check("sub decline leaves byte-identical", after === before, {before: before?.slice(-500), after: after?.slice(-500)});
-  check("sub decline mentions not saved", /Configuration not saved/.test(combined), combined.slice(-2000));
-  check("sub decline not silently replaced", JSON.parse(after)?.execution?.runtime_mode === "wsl2-strong", JSON.parse(after)?.execution);
-});
-
-// S6b: Confirming after Strong-unavailable explicitly switches (not silent).
+// S6b: Strong-unavailable with a saved Strong mode switches to Compatibility with a warning, no confirm.
 await withFixtures(async ({skillCopy, trackRepo}) => {
   stubCapabilities(skillCopy, windowsNoWslCaps("wsl_not_installed"));
   const repo = trackRepo(makeRepo("speckit"));
@@ -622,37 +613,70 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
     skillCopy, repo,
     setupArgs: ["--edit", "--repo", repo],
     rules: [
-      {pattern: /Configuration scope:/, answer: "1"},
-      {pattern: /Save Windows Compatibility execution mode/, answer: "y"}
+      {pattern: /Configuration scope:/, answer: "1"}
     ],
     defaultAnswer: "",
     timeoutMs: 60000
   });
   check("sub confirm switches explicitly", r.status === 0, {status: r.status});
+  check("sub switch asks no compat confirmation", !/Save Windows Compatibility|Configuration not saved/.test(`${r.stdout}\n${r.stderr}`), `${r.stdout}`.slice(-2000));
+  check("sub switch prints weaker warning", /⚠ Windows Compatibility is weaker/.test(r.stdout), `${r.stdout}`.slice(-2000));
   const saved = JSON.parse(readRepoConfigRaw(repo));
   check("sub confirm saves compat explicitly", saved?.runtime?.mode === "windows-compatibility", saved?.runtime);
 });
 
-// S7: Saved Compat becoming unavailable requires explicit choice (decline preserves, confirm switches).
+// S6c: Native Windows (fake platform): no network question; network_isolation follows the mode.
+async function winNetworkScenario(caps, repoKind, rules) {
+  return withFixtures(async ({skillCopy, trackRepo}) => {
+    stubCapabilities(skillCopy, caps);
+    const repo = trackRepo(makeRepo(repoKind));
+    const r = await runSetupSubprocess({
+      skillCopy, repo,
+      setupArgs: ["--wizard", "--repo", repo],
+      rules, defaultAnswer: "", timeoutMs: 60000, fakePlatform: "win32"
+    });
+    const combined = `${r.stdout}\n${r.stderr}`;
+    const raw = readRepoConfigRaw(repo);
+    return {r, combined, saved: raw ? JSON.parse(raw) : null};
+  });
+}
+{
+  const strong = await winNetworkScenario(windowsDualCaps("Ubuntu"), "speckit", [{pattern: /Runtime execution mode — choose one/, answer: "1"}]);
+  check("win32 strong exits 0", strong.r.status === 0, {status: strong.r.status, tail: strong.combined.slice(-2000)});
+  check("win32 strong asks no network question", !/without network isolation/.test(strong.combined), strong.combined.slice(-2000));
+  check("win32 strong isolation true", strong.saved?.runtime?.mode === "wsl2-strong" && strong.saved?.tests?.gate_network === false, strong.saved);
+  check("win32 strong prints line", strong.combined.includes("✓ Tests (gate) will run without network access inside WSL.\n  Change later: tests.gate_network in .autopilot/config.json"), strong.combined.slice(-2000));
+
+  const compat = await winNetworkScenario(windowsDualCaps("Ubuntu"), "speckit", [{pattern: /Runtime execution mode — choose one/, answer: "2"}]);
+  check("win32 compat exits 0", compat.r.status === 0, {status: compat.r.status, tail: compat.combined.slice(-2000)});
+  check("win32 compat asks no network question", !/without network isolation/.test(compat.combined), compat.combined.slice(-2000));
+  check("win32 compat isolation false", compat.saved?.runtime?.mode === "windows-compatibility" && compat.saved?.tests?.gate_network === true, compat.saved);
+  check("win32 compat prints line", compat.combined.includes("✓ Tests (gate) will run with network access (Windows cannot isolate them).\n  Change later: tests.gate_network in .autopilot/config.json"), compat.combined.slice(-2000));
+
+  const only = await winNetworkScenario(windowsNoWslCaps("wsl_not_installed"), "speckit", []);
+  check("win32 compat-only asks no question", only.r.status === 0 && !/without network isolation|Save Windows Compatibility/.test(only.combined) && only.saved?.tests?.gate_network === true, {status: only.r.status, saved: only.saved, tail: only.combined.slice(-1500)});
+}
+
+// S6d: non-Windows without namespace isolation still asks the network question.
 await withFixtures(async ({skillCopy, trackRepo}) => {
-  stubCapabilities(skillCopy, linuxUsableCaps());
+  stubCapabilities(skillCopy, windowsDualCaps("Ubuntu"));
   const repo = trackRepo(makeRepo("speckit"));
-  writeRepoConfig(repo, baseConfig({framework: "speckit", execution: {runtime_mode: "windows-compatibility", wsl_distro: null}}));
-  const before = readRepoConfigRaw(repo);
   const r = await runSetupSubprocess({
     skillCopy, repo,
-    setupArgs: ["--edit", "--repo", repo],
+    setupArgs: ["--wizard", "--repo", repo],
     rules: [
-      {pattern: /Configuration scope:/, answer: "1"},
-      {pattern: /Save linux-strong execution mode/, answer: "n"}
+      {pattern: /Runtime execution mode — choose one/, answer: "1"},
+      {pattern: /without network isolation/, answer: "y"}
     ],
-    defaultAnswer: "",
-    timeoutMs: 60000
+    defaultAnswer: "", timeoutMs: 60000, fakePlatform: "darwin", withoutUnshare: true
   });
-  const after = readRepoConfigRaw(repo);
-  check("sub compat-unavailable decline preserves", after === before, {before: before?.slice(-500), after: after?.slice(-500)});
-  check("sub compat-unavailable explains", /Saved runtime mode is (unavailable|invalid)/.test(`${r.stdout}\n${r.stderr}`), `${r.stdout}`.slice(-2000));
+  const combined = `${r.stdout}\n${r.stderr}`;
+  check("darwin still asks network question", /Allow verify\/gates execution without network isolation\?/.test(combined), combined.slice(-2000));
+  const saved = JSON.parse(readRepoConfigRaw(repo) || "null");
+  check("darwin answer y turns gate isolation off", saved?.tests?.gate_network === true, saved);
 });
+
+// S7: Saved Compat becoming unavailable, Strong is the only mode: saved without a question, one line printed.
 await withFixtures(async ({skillCopy, trackRepo}) => {
   stubCapabilities(skillCopy, linuxUsableCaps());
   const repo = trackRepo(makeRepo("speckit"));
@@ -660,16 +684,17 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
   const r = await runSetupSubprocess({
     skillCopy, repo,
     setupArgs: ["--edit", "--repo", repo],
-    rules: [
-      {pattern: /Configuration scope:/, answer: "1"},
-      {pattern: /Save linux-strong execution mode/, answer: "y"}
-    ],
+    rules: [{pattern: /Configuration scope:/, answer: "1"}],
     defaultAnswer: "",
     timeoutMs: 60000
   });
-  check("sub compat-unavailable confirm switches", r.status === 0, {status: r.status});
+  const combined = `${r.stdout}\n${r.stderr}`;
+  check("sub compat-unavailable explains", /Saved runtime mode is (unavailable|invalid)/.test(combined), `${r.stdout}`.slice(-2000));
+  check("sub strong-only exits 0", r.status === 0, {status: r.status});
+  check("sub strong-only asks no confirmation", !/execution mode \(OS-enforced|Configuration not saved/.test(combined), combined.slice(-2000));
+  check("sub strong-only prints the one line", combined.includes("✓ Runtime: linux-strong (OS-enforced bubblewrap containment) — the only usable mode here."), combined.slice(-2000));
   const saved = JSON.parse(readRepoConfigRaw(repo));
-  check("sub compat-unavailable confirm saves strong", saved?.runtime?.mode === "linux-strong", saved?.runtime);
+  check("sub strong-only saves strong", saved?.runtime?.mode === "linux-strong", saved?.runtime);
 });
 
 // S8: ap config preserves still-valid saved selection (real subprocess).

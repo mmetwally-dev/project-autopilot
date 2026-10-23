@@ -225,9 +225,6 @@ export function resolveRuntimeExecution({capabilities, framework, savedExecution
       }
       messages.push("WSL2 Strong (Recommended) uses OS-enforced bubblewrap containment.");
       messages.push("Windows Compatibility is SpecKit-and-standalone disposable-copy isolation. This is not OS-enforced containment.");
-      if (selectable.length === 1 && selectable[0].id === RUNTIME_MODE_IDS.windowsCompatibility) {
-        messages.push("Warning: Windows Compatibility is weaker, SpecKit-and-standalone only, and not OS-enforced containment. Explicit confirmation is required before saving.");
-      }
     }
     return {status: "need-choice", selectable, messages};
   }

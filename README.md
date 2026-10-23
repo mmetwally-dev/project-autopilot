@@ -666,8 +666,10 @@ for all of them with their defaults.
   git-ignored. A write there during a read-only stage stops the run.
 - **Gates without network.** Gate commands run without network
   (`unshare --net`) on Linux unless `tests.gate_network: true`; only the
-  environment variables in `tests.gate_env_allowlist` are passed. On Windows and
-  macOS setup asks once whether gates may run without this isolation.
+  environment variables in `tests.gate_env_allowlist` are passed. On Windows,
+  setup decides this from the runtime mode (no network inside WSL; with network
+  in Windows Compatibility, which cannot isolate it) and prints its choice; on
+  macOS it asks once whether gates may run without this isolation.
 - **Only one guarded way to run shell commands.** A static test
   (`scripts/test-no-unguarded-shell.mjs`) fails the build if code runs a shell
   command outside the single guarded executor.
@@ -681,7 +683,11 @@ protection. Writable roles are checked after the fact (detection, not prevention
 
 ## Platforms and runtime modes
 
-`runtime.mode` decides how the read-only roles are contained. `ap setup` picks it:
+`runtime.mode` decides how the read-only roles are contained. `ap setup`
+detects what the machine can do: on Native Windows it asks only when both WSL2
+and Windows Compatibility are usable (WSL2 Strong needs node, bubblewrap and your
+agent CLIs signed in inside WSL); with one usable mode it picks that mode and
+says so.
 
 | Mode | Where | Reviewers |
 | --- | --- | --- |

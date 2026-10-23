@@ -88,9 +88,9 @@ async function main() {
       schema_version: "4.0",
       project: {repo: ".", planning_framework: "gsd"},
       roles: {
-        planner: {cli: "claude", model: "opus", reasoning: "high", variant: "", resume_session: true},
+        planner: {cli: "claude", model: "", reasoning: "", variant: "", resume_session: true},
         plan_reviewer: {cli: "claude", model: "", reasoning: "", variant: "", resume_session: true},
-        implementer: {cli: "opencode", model: "", reasoning: "", variant: "", resume_session: true},
+        implementer: {cli: "claude", model: "", reasoning: "", variant: "", resume_session: true},
         code_reviewer: {cli: "claude", model: "", reasoning: "", variant: "", resume_session: true},
         verifier: {cli: "claude", model: "", reasoning: "", variant: "", resume_session: true},
         free_models: {auto_fallback: false, max_turns: 30}
@@ -215,7 +215,7 @@ async function main() {
       '',   // Reasoning: keep current
       '',   // Variant: keep current
       '',   // Gate test command: accept detected
-      '1',  // Runtime mode: keep current
+      // Runtime mode: the only usable mode is saved without a question
       'n',  // Network isolation: keep current (don't allow without)
       '1',  // Escalation for planner: Skip (off)
       '1',  // Escalation for code_reviewer: Skip (off)
@@ -304,9 +304,9 @@ async function main() {
 
     // Verify some non-default values were preserved
     check('roles.planner.cli preserved', config.roles.planner.cli === 'claude');
-    check('roles.planner.model preserved', config.roles.planner.model === 'opus');
-    check('roles.planner.reasoning preserved', config.roles.planner.reasoning === 'high');
-    check('roles.implementer.cli preserved', config.roles.implementer.cli === 'opencode');
+    check('roles.planner.model preserved', config.roles.planner.model === '');
+    check('roles.planner.reasoning preserved', config.roles.planner.reasoning === '');
+    check('roles.implementer.cli preserved', config.roles.implementer.cli === 'claude');
     check('roles.free_models.auto_fallback preserved', config.roles.free_models.auto_fallback === false);
     check('roles.free_models.max_turns preserved', config.roles.free_models.max_turns === 30);
     check('caps.planner.max_turns preserved', config.caps.planner.max_turns === 40);

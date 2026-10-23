@@ -281,7 +281,9 @@ aliases) marked non-live, else manual entry.
 `cursor-agent`), SpecKit/GSD, Playwright and bubblewrap, then configures each
 role, fallbacks, escalation models, gate commands (it suggests `npm test`,
 `pytest`, `go test ./...`, `cargo test` or `make test` when found) and the
-runtime mode.
+runtime mode. On Native Windows the only question is WSL2 Strong vs Windows
+Compatibility, asked when both are usable; the gate network setting follows the
+mode (isolated in WSL, network allowed in Compatibility).
 
 `.autopilot/config.json` uses schema 4.0 (`schema_version: "4.0"`) with the
 sections `project`, `roles`, `caps`, `retries`, `time_limits`, `workflow`,

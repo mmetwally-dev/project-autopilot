@@ -877,20 +877,41 @@ function detectPlanningFrameworks(repo) {
   return detected;
 }
 
-async function networkSetting(current) {
+// Platform the network question is decided for (single line so tests can pin it in a disposable copy).
+const NETWORK_PLATFORM = process.platform;
+
+const COMPAT_WARNING =
+  "⚠ Windows Compatibility is weaker: reviewers work on a throwaway copy,\n" +
+  "  not OS-enforced containment. SpecKit and standalone projects only.";
+
+async function networkSetting(current, runtimeMode) {
   let networkIsolation =
     current?.gates?.network_isolation ??
     true;
+
+  if (NETWORK_PLATFORM === "win32") {
+    if (runtimeMode === RUNTIME_MODE_IDS.wsl2Strong) {
+      console.log("✓ Tests (gate) will run without network access inside WSL.");
+      console.log("  Change later: tests.gate_network in .autopilot/config.json");
+      return true;
+    }
+    if (runtimeMode === RUNTIME_MODE_IDS.windowsCompatibility) {
+      console.log("✓ Tests (gate) will run with network access (Windows cannot isolate them).");
+      console.log("  Change later: tests.gate_network in .autopilot/config.json");
+      return false;
+    }
+    return networkIsolation;
+  }
 
   const isolationAvailable = !!networkIsolationPrefix();
 
   if (!isolationAvailable) {
     const platformLabel =
-      process.platform === "win32"
+      NETWORK_PLATFORM === "win32"
         ? "Windows"
-        : process.platform === "darwin"
+        : NETWORK_PLATFORM === "darwin"
           ? "macOS"
-          : process.platform;
+          : NETWORK_PLATFORM;
 
     console.log(
       `\n⚠  ${platformLabel}: Linux network namespace isolation is unavailable.`
@@ -1611,23 +1632,13 @@ async function printExecutionEnvironmentBlock() {
             }
           }
           if (chosen.execution?.runtime_mode === RUNTIME_MODE_IDS.windowsCompatibility) {
-            console.log("Windows Compatibility is weaker, SpecKit-and-standalone only, and not OS-enforced containment.");
-            const confirmed = await yesNo("Save Windows Compatibility execution mode?", false);
-            if (!confirmed) {
-              console.log("Configuration not saved.");
-              return;
-            }
+            console.log(COMPAT_WARNING);
           }
           execution = chosen.execution;
         } else if (selectable.length === 1) {
           const only = selectable[0];
           if (only.id === RUNTIME_MODE_IDS.windowsCompatibility) {
-            console.log("Windows Compatibility is weaker, SpecKit-and-standalone only, and not OS-enforced containment.");
-            const confirmed = await yesNo("Save Windows Compatibility execution mode?", false);
-            if (!confirmed) {
-              console.log("Configuration not saved.");
-              return;
-            }
+            console.log(COMPAT_WARNING);
             const chosen = resolveRuntimeExecution({
               capabilities: runtimeCapabilities,
               framework,
@@ -1647,14 +1658,7 @@ async function printExecutionEnvironmentBlock() {
             }
             execution = chosen.execution;
           } else {
-            const confirmed = await yesNo(
-              `Save ${only.id} execution mode (OS-enforced bubblewrap containment)?`,
-              false
-            );
-            if (!confirmed) {
-              console.log("Configuration not saved.");
-              return;
-            }
+            console.log(`✓ Runtime: ${only.id} (OS-enforced bubblewrap containment) — the only usable mode here.`);
             const chosen = resolveRuntimeExecution({
               capabilities: runtimeCapabilities,
               framework,
@@ -1700,7 +1704,8 @@ async function printExecutionEnvironmentBlock() {
         !editMode
       )
         ? await networkSetting(
-          current
+          current,
+          execution?.runtime_mode
         )
         : (
           current?.gates
