@@ -1478,6 +1478,85 @@ async function printExecutionEnvironmentBlock() {
       }
     }
 
+    // Pending #22: optional "stronger model for one round when stuck" for the
+    // two roles that fix things. ONE question, asked right after the role loop
+    // (after the verifier's questions, before the planning framework) so the
+    // validation below covers the model too. Covers only the escalation roles
+    // configured in this run, only when interactive; default = keep the
+    // current value (off when none). Skip/Enter never forces a model.
+    if (interactive) {
+      const escRoles = ESCALATION_ROLES.filter(r => escalationAskRoles.has(r) && roles[r]);
+      if (escRoles.length) {
+        const who = escRoles.join(" and ");
+        const whoTag = escRoles.length > 1 ? "planner + implementer" : escRoles[0];
+        const priors = escRoles.map(r => normalizeEscalationModel(roles[r].escalation_model));
+        const prior = priors.find(Boolean) || null;
+        const n = Number(current?.policy?.escalate_after_not_fixed);
+        const times = n === 1 ? "once" : Number.isInteger(n) && n > 2 ? `${n} times` : "twice";
+        let currentText = "";
+        if (prior) {
+          const distinct = new Set(priors.map(p => (p ? formatFallbackEntry(p) : "off")));
+          currentText = distinct.size > 1
+            ? escRoles.map((r, i) => `${r}: ${priors[i] ? formatFallbackEntry(priors[i]) : "off"}`).join(" · ")
+            : formatFallbackEntry(prior);
+        }
+        const both = escRoles.length > 1 ? " (for both)" : "";
+        const action = prior
+          ? await choose(
+            `Stronger model for the ${who} when stuck: ${currentText}`,
+            ["Keep current", `Choose a different model${both}`, "Turn off"],
+            0
+          )
+          : await choose(
+            `Use a stronger model for the ${who} when ${escRoles.length > 1 ? "they get" : "it gets"} stuck\n(the reviewer reports the same finding as not fixed ${times})? It runs one fix round, then ${escRoles.length > 1 ? "they go" : "it goes"} back to ${escRoles.length > 1 ? "their" : "its"} normal model.`,
+            ["No (off)", escRoles.length > 1 ? "Yes — choose one model for both" : "Yes — choose a model"],
+            0
+          );
+        if (action === "Turn off") {
+          for (const r of escRoles) delete roles[r].escalation_model;
+        } else if (action !== "Keep current" && action !== "No (off)") {
+          const escLabel = escRoles.length > 1 ? "Planner + implementer escalation" : `${roleLabels[escRoles[0]]} escalation`;
+          const escAdapter = await choose(`${escLabel} CLI`, available, 0);
+          const escMeta = agents[escAdapter];
+          const escCaps = capabilityCache.get(escAdapter) || await discoverCapabilities(escMeta);
+          const escEffectiveMeta = {
+            ...escMeta,
+            model_flag: escCaps.model ? escCaps.model_flag : null,
+            effort_flag: escCaps.effort ? escCaps.effort_flag : null,
+            variant_flag: escCaps.variant ? escCaps.variant_flag : null,
+            variant_mode: escMeta.variant_mode || null
+          };
+          const escModelInfo = await pickModelAndCapabilities(
+            escLabel,
+            escEffectiveMeta,
+            null,
+            escAdapter
+          );
+          const escExtras = await pickReasoningAndVariant(
+            escLabel,
+            escEffectiveMeta,
+            escModelInfo,
+            { reasoning: roles[escRoles[0]]?.reasoning || "", variant: "" }
+          );
+          const candidate = normalizeEscalationModel({
+            adapter: escAdapter,
+            model: escModelInfo.model || "",
+            reasoning: escExtras.reasoning,
+            variant: escExtras.variant
+          });
+          if (candidate) {
+            for (const r of escRoles) roles[r] = { ...roles[r], escalation_model: { ...candidate } };
+            console.log(`  escalation model (${whoTag}): ${formatFallbackEntry(candidate)}`);
+          } else if (prior) {
+            console.log("  No model picked; keeping the current escalation model.");
+          } else {
+            console.log("  No model picked; escalation stays off.");
+            for (const r of escRoles) delete roles[r].escalation_model;
+          }
+        }
+      }
+    }
+
     if (wizardMode && scope === SCOPE.ALL) {
       const labels = frameworkChoices.map(x => x.label);
       const currentIndex = frameworkChoices.findIndex(x => x.id === framework);
@@ -1994,79 +2073,6 @@ async function printExecutionEnvironmentBlock() {
           )
       );
 
-      process.exitCode = 4;
-      return;
-    }
-
-    // Pending #22: optional "stronger model for one round when stuck" for the
-    // two roles that fix things. Asked LAST (after validation and its confirmation), only
-    // for roles configured in this run, only when interactive; default = keep
-    // the current value (off when none). Skip/Enter never forces a model.
-    if (interactive) {
-      for (const r of escalationAskRoles) {
-        if (!roles[r]) continue;
-        const prior = normalizeEscalationModel(roles[r].escalation_model);
-        const options = prior
-          ? [`Keep current (${formatFallbackEntry(prior)})`, "Choose a different model", "Turn off"]
-          : ["Skip (off)", "Choose a model"];
-        const action = await choose(
-          `Stronger model to use for one round when ${roleLabels[r]} is stuck on the same finding? (skip = off)`,
-          options,
-          0
-        );
-        if (action === "Turn off") {
-          delete roles[r].escalation_model;
-        } else if (action === "Choose a model" || action === "Choose a different model") {
-          const escAdapter = await choose(`${roleLabels[r]} escalation CLI`, available, 0);
-          const escMeta = agents[escAdapter];
-          const escCaps = capabilityCache.get(escAdapter) || await discoverCapabilities(escMeta);
-          const escEffectiveMeta = {
-            ...escMeta,
-            model_flag: escCaps.model ? escCaps.model_flag : null,
-            effort_flag: escCaps.effort ? escCaps.effort_flag : null,
-            variant_flag: escCaps.variant ? escCaps.variant_flag : null,
-            variant_mode: escMeta.variant_mode || null
-          };
-          const escModelInfo = await pickModelAndCapabilities(
-            `${roleLabels[r]} escalation`,
-            escEffectiveMeta,
-            null,
-            escAdapter
-          );
-          const escExtras = await pickReasoningAndVariant(
-            `${roleLabels[r]} escalation`,
-            escEffectiveMeta,
-            escModelInfo,
-            { reasoning: roles[r]?.reasoning || "", variant: "" }
-          );
-          const candidate = normalizeEscalationModel({
-            adapter: escAdapter,
-            model: escModelInfo.model || "",
-            reasoning: escExtras.reasoning,
-            variant: escExtras.variant
-          });
-          if (candidate) {
-            roles[r] = { ...roles[r], escalation_model: candidate };
-            console.log(`  escalation model: ${formatFallbackEntry(candidate)}`);
-          } else {
-            if (prior) {
-              console.log("  No model picked; keeping the current escalation model.");
-            } else {
-              console.log("  No model picked; escalation stays off.");
-              delete roles[r].escalation_model;
-            }
-          }
-        }
-      }
-    }
-
-    // The escalation answers above can add/replace a model too: re-validate
-    // the whole config (including the same in-place missing-model repair) so a
-    // vanished escalation model is offered a re-pick/drop instead of aborting.
-    validation = await repairMissingModels(await revalidate());
-    if (!validation.valid) {
-      console.error("\nConfiguration validation failed:");
-      validation.errors.forEach(e => console.error(`  ✖ ${e}`));
       process.exitCode = 4;
       return;
     }

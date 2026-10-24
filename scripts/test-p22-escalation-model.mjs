@@ -154,12 +154,18 @@ t("source wiring: autopilot.mjs triggers from all three sources, applies and con
   assert.match(src, /role\.escalation_model/);
 });
 
-t("setup: optional question for planner/implementer, default skip, asked last and interactive-only", () => {
+t("setup: optional question for planner/implementer, default skip, asked right after the role loop and interactive-only", () => {
   const src = fs.readFileSync(path.join(here, "setup.mjs"), "utf8");
-  assert.match(src, /Stronger model to use for one round when \$\{roleLabels\[r\]\} is stuck on the same finding\? \(skip = off\)/);
-  assert.match(src, /\["Skip \(off\)", "Choose a model"\]/);
+  assert.match(src, /Use a stronger model for the \$\{who\} when/);
+  assert.match(src, /Stronger model for the \$\{who\} when stuck: \$\{currentText\}/);
+  assert.match(src, /\["No \(off\)", escRoles\.length > 1 \? "Yes — choose one model for both"/);
+  assert.ok(!/Stronger model to use for one round/.test(src), "old per-role question is gone");
   const i = src.indexOf("Pending #22: optional \"stronger model");
-  assert.ok(i > src.indexOf("await validateConfigForSave(") && i < src.indexOf("roles[r].capabilities_verified_at ="), "asked after validation and its confirmation");
+  const fw = src.lastIndexOf("const labels = frameworkChoices.map(x => x.label);");
+  const loopEnd = src.lastIndexOf("fallbacks = addFallback(fallbacks, candidate);");
+  assert.ok(fw > 0 && loopEnd > 0 && i > loopEnd && i < fw, "asked after the last role's questions and before Planning framework");
+  assert.ok(i < src.indexOf("await validateConfigForSave("), "asked before the main validation so it covers the escalation models");
+  assert.ok(!src.includes("validation = await repairMissingModels(await revalidate());"), "no post-escalation revalidation left");
   assert.match(src.slice(i, i + 700), /if \(interactive\)/);
 });
 
