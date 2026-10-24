@@ -16,6 +16,13 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 const setupScript = path.join(here, 'setup.mjs');
 
+const tempDirs = new Set();
+process.on('exit', () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, {recursive: true, force: true}); } catch { /* best-effort */ }
+  }
+});
+
 let passed = 0;
 let failed = 0;
 
@@ -41,6 +48,7 @@ const systemDirs = process.platform === 'win32'
 
 function makeFakeCliDir() {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-full-config-fake-cli-'));
+  tempDirs.add(binDir);
   const fakeClaude = path.join(binDir, process.platform === 'win32' ? 'claude.cmd' : 'claude');
   if (process.platform === 'win32') {
     fs.writeFileSync(fakeClaude, '@echo off\nif "%1"=="--version" (echo claude-test & exit /b 0)\nif "%1"=="--help" (echo --model --effort --resume-last & exit /b 0)\nexit /b 0\n');
@@ -53,7 +61,9 @@ function makeFakeCliDir() {
 }
 
 function makeRepo() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-full-config-repo-'));
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-full-config-repo-'));
+  tempDirs.add(repo);
+  return repo;
 }
 
 function runSetupWizard({repo, binDir}) {

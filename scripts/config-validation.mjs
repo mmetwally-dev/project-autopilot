@@ -1266,3 +1266,60 @@ export function validateNewConfig(layout, {migrated = false} = {}) {
 
   return {valid: errors.length === 0, errors, warnings};
 }
+
+const NON_LIVE_CATALOG_WARNING =
+  /^([a-z_]+)(\.escalation_model|\.fallbacks\[(\d+)\])?: model '(.+)' is from a documented non-live catalog; account\/subscription availability was not verified\.$/;
+
+// Printed form only: every "documented non-live catalog" warning collapses
+// into one grouped entry per catalog adapter (roles in the normal order,
+// escalation last). The validator's warning list is not changed.
+export function formatValidationWarnings(warnings, roles = {}) {
+  const lines = [];
+  const groups = new Map();
+  const roleOrder = ["planner", "plan_reviewer", "implementer", "code_reviewer", "verifier"];
+  for (const w of warnings) {
+    const m = NON_LIVE_CATALOG_WARNING.exec(w);
+    if (!m) {
+      lines.push(`  ⚠ ${w}`);
+      continue;
+    }
+    const [, role, suffix, fbIndex, model] = m;
+    const cfg = roles?.[role] || {};
+    const adapter =
+      (suffix === ".escalation_model" ? cfg.escalation_model?.adapter
+        : fbIndex !== undefined ? cfg.fallbacks?.[Number(fbIndex)]?.adapter
+          : cfg.adapter) || cfg.adapter || "claude";
+    if (!groups.has(adapter)) groups.set(adapter, { roles: [], escalation: [] });
+    const g = groups.get(adapter);
+    if (suffix === ".escalation_model") g.escalation.push({ role, model });
+    else if (fbIndex !== undefined) g.roles.push({ role, order: 1, n: Number(fbIndex) + 1, label: `${role} fallback ${Number(fbIndex) + 1}`, model });
+    else g.roles.push({ role, order: 0, n: 0, label: role, model });
+  }
+  for (const [adapter, g] of groups) {
+    const name = adapter === "claude" ? "Claude" : adapter;
+    const tool = adapter === "claude" ? "Claude Code" : adapter;
+    g.roles.sort((a, b) =>
+      (roleOrder.indexOf(a.role) - roleOrder.indexOf(b.role)) || (a.order - b.order) || (a.n - b.n));
+    lines.push(
+      `  ⚠ ${name} models are taken from ${name}'s documented list and could not be checked`,
+      `    against your account (${tool} has no model-list command):`
+    );
+    if (g.roles.length) {
+      lines.push(`    ${g.roles.map(x => `${x.label}: ${x.model}`).join(" · ")}`);
+    }
+    const esc = g.escalation;
+    const p = esc.find(x => x.role === "planner");
+    const i = esc.find(x => x.role === "implementer");
+    const parts = [];
+    if (p && i && p.model === i.model) parts.push(`escalation (planner + implementer): ${p.model}`);
+    else {
+      if (p) parts.push(`escalation (planner): ${p.model}`);
+      if (i) parts.push(`escalation (implementer): ${i.model}`);
+    }
+    for (const x of esc) {
+      if (x.role !== "planner" && x.role !== "implementer") parts.push(`escalation (${x.role}): ${x.model}`);
+    }
+    if (parts.length) lines.push(`    ${parts.join(" · ")}`);
+  }
+  return lines;
+}

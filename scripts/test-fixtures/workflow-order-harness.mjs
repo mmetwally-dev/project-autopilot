@@ -16,6 +16,12 @@ import {runTreeUntilMarker} from "./posix-process-runner.mjs";
 import {CLAUDE_MD_MARKER_BEGIN, CLAUDE_MD_MARKER_END} from "../planning-boundary.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const tempDirs = new Set();
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, {recursive: true, force: true}); } catch { /* best-effort */ }
+  }
+});
 export const skillRoot = path.resolve(here, "..", "..");
 const stubSource = path.join(here, "fake-workflow-adapter.sh");
 const IS_WIN = process.platform === "win32";
@@ -34,6 +40,7 @@ const winStubSource = path.join(here, "fake-workflow-adapter-win.mjs");
 
 export function makeFixtureRepo(prefix) {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), `ap-wf-${prefix}-`));
+  tempDirs.add(repo);
   git(repo, ["init", "-q"]);
   git(repo, ["config", "user.email", "autopilot-workflow-test@example.invalid"]);
   git(repo, ["config", "user.name", "Autopilot Workflow Test"]);
@@ -355,6 +362,7 @@ function git(cwd, args) {
 
 export function makeFixtureBin(prefix) {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), `ap-wf-bin-${prefix}-`));
+  tempDirs.add(binDir);
   if (IS_WIN) {
     const scriptPath = path.join(binDir, "fake-workflow-adapter-win.mjs");
     fs.copyFileSync(winStubSource, scriptPath);

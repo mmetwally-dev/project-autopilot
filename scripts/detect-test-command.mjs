@@ -87,7 +87,25 @@ export function resolveGatesCommands({ existing, detected, answer, interactive }
   const previous = Array.isArray(existing) ? existing : [];
 
   if (previous.length > 0) {
-    return { commands: previous, warn: false, hint: interactive !== true };
+    // Non-interactive: never asks; keep the saved value and tell the operator
+    // where to change it by hand.
+    if (interactive !== true) {
+      return { commands: previous, warn: false, hint: true };
+    }
+    // Interactive: in `ap config` the saved value can be kept, replaced, or
+    // cleared. answer === null means the question was not actually asked (e.g.
+    // first-run wizard with no saved value), so keep the saved value.
+    if (answer === null || answer === undefined) {
+      return { commands: previous, warn: false, hint: false };
+    }
+    const typed = String(answer).trim();
+    if (typed === '-') {
+      return { commands: [], warn: false, hint: false };
+    }
+    if (!typed) {
+      return { commands: previous, warn: false, hint: false };
+    }
+    return { commands: [typed], warn: false, hint: false };
   }
 
   if (interactive !== true) {

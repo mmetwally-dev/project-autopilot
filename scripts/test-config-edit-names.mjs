@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {spawn} from 'node:child_process';
+import {spawn, execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {delimiter} from 'node:path';
 import {schemaReferenceFor, schemaReferenceResolves} from './config-schema-ref.mjs';
@@ -14,6 +14,13 @@ import {schemaReferenceFor, schemaReferenceResolves} from './config-schema-ref.m
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 const setupScript = path.join(here, 'setup.mjs');
+
+const tempDirs = new Set();
+process.on('exit', () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, {recursive: true, force: true}); } catch { /* best-effort */ }
+  }
+});
 
 let passed = 0;
 let failed = 0;
@@ -38,21 +45,115 @@ const systemDirs = process.platform === 'win32'
   ? [`${systemRoot}\\System32`, systemRoot, `${systemRoot}\\System32\\Wbem`]
   : ['/usr/bin', '/bin'];
 
+function findExecutable(name) {
+  for (const dir of String(process.env.PATH || '').split(delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, name);
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      if (fs.statSync(candidate).isFile()) return candidate;
+    } catch { /* not here */ }
+  }
+  return null;
+}
+
+const toolchain = process.platform === 'linux' && process.arch === 'x64' && process.env.AP_TEST_NO_ELF !== '1'
+  ? {as: findExecutable('as'), ld: findExecutable('ld')}
+  : {as: null, ld: null};
+const nativeFakes = Boolean(toolchain.as && toolchain.ld);
+
+const SKIP_LINE = 'SKIP: opus/high/opencode preservation checks need as+ld on linux x64 (fake native CLIs); running the remaining checks with the simple fixture';
+
+function fakeAssembly(flavor) {
+  const help = flavor === 'opencode' ? '--model --variant --session' : '--model --effort --resume';
+  const models = flavor === 'opencode' ? 'opencode/mimo-v2.6-flash-free' : 'claude';
+  return [
+    '.section .data',
+    'version_msg:',
+    '    .ascii "1.0.0\\n"',
+    'version_len = . - version_msg',
+    'help_msg:',
+    `    .ascii "${help}\\n"`,
+    'help_len = . - help_msg',
+    'models_msg:',
+    `    .ascii "${models}\\n"`,
+    'models_len = . - models_msg',
+    '',
+    '.section .text',
+    '.global _start',
+    '_start:',
+    '    mov (%rsp), %rax',
+    '    cmp $2, %rax',
+    '    jb help',
+    '    mov 16(%rsp), %rsi',
+    '    movzbl (%rsi), %eax',
+    '    cmp $109, %al',
+    '    je models',
+    '    cmp $114, %al',
+    '    je help',
+    '    cmp $45, %al',
+    '    jne help',
+    '    movzbl 2(%rsi), %eax',
+    '    cmp $118, %al',
+    '    je version',
+    '    jmp help',
+    'version:',
+    '    lea version_msg(%rip), %rsi',
+    '    mov $version_len, %rdx',
+    '    jmp write',
+    'models:',
+    '    lea models_msg(%rip), %rsi',
+    '    mov $models_len, %rdx',
+    '    jmp write',
+    'help:',
+    '    lea help_msg(%rip), %rsi',
+    '    mov $help_len, %rdx',
+    'write:',
+    '    mov $1, %rax',
+    '    mov $1, %rdi',
+    '    syscall',
+    '    mov $60, %rax',
+    '    xor %rdi, %rdi',
+    '    syscall',
+    ''
+  ].join('\n');
+}
+
+function buildNativeFake(binDir, name, flavor) {
+  const source = path.join(binDir, `${name}.s`);
+  const object = path.join(binDir, `${name}.o`);
+  const target = path.join(binDir, name);
+  fs.writeFileSync(source, fakeAssembly(flavor));
+  execFileSync(toolchain.as, ['--64', '-o', object, source], {stdio: 'pipe'});
+  execFileSync(toolchain.ld, ['-o', target, object], {stdio: 'pipe'});
+  fs.chmodSync(target, 0o755);
+  fs.rmSync(source, {force: true});
+  fs.rmSync(object, {force: true});
+}
+
 function makeFakeCliDir() {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-edit-names-fake-cli-'));
-  const fakeClaude = path.join(binDir, process.platform === 'win32' ? 'claude.cmd' : 'claude');
-  if (process.platform === 'win32') {
-    fs.writeFileSync(fakeClaude, '@echo off\nif "%1"=="--version" (echo claude-test & exit /b 0)\nif "%1"=="--help" (echo --model --effort --resume-last & exit /b 0)\nexit /b 0\n');
+  tempDirs.add(binDir);
+  if (nativeFakes) {
+    buildNativeFake(binDir, 'claude', 'claude');
+    buildNativeFake(binDir, 'opencode', 'opencode');
   } else {
-    const realTrue = fs.existsSync('/usr/bin/true') ? '/usr/bin/true' : '/bin/true';
-    fs.copyFileSync(realTrue, fakeClaude);
-    fs.chmodSync(fakeClaude, 0o755);
+    const fakeClaude = path.join(binDir, process.platform === 'win32' ? 'claude.cmd' : 'claude');
+    if (process.platform === 'win32') {
+      fs.writeFileSync(fakeClaude, '@echo off\nif "%1"=="--version" (echo claude-test & exit /b 0)\nif "%1"=="--help" (echo --model --effort --resume-last & exit /b 0)\nexit /b 0\n');
+    } else {
+      const realTrue = fs.existsSync('/usr/bin/true') ? '/usr/bin/true' : '/bin/true';
+      fs.copyFileSync(realTrue, fakeClaude);
+      fs.chmodSync(fakeClaude, 0o755);
+    }
   }
   return binDir;
 }
 
 function makeRepo() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-edit-names-repo-'));
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-edit-names-repo-'));
+  tempDirs.add(repo);
+  return repo;
 }
 
 function writeV4Config(repo, config) {
@@ -91,19 +192,31 @@ function runSetupEdit({repo, binDir, stdinInput}) {
 }
 
 async function main() {
-  const binDir = makeFakeCliDir();
-  const repo = makeRepo();
+  if (!nativeFakes) console.log(SKIP_LINE);
+  let binDir = null;
+  let repo = null;
 
   try {
+    try {
+      binDir = makeFakeCliDir();
+    } catch (error) {
+      check(`fake native CLI build failed: ${error instanceof Error ? error.message : String(error)}`, false);
+      process.exitCode = 1;
+      return;
+    }
+    repo = makeRepo();
+
     // Create a v4 config with some non-default values to verify they're preserved
     const initialConfig = {
       $schema: schemaReferenceFor(path.join(repo, '.autopilot', 'config.json')),
       schema_version: "4.0",
       project: {repo: ".", planning_framework: "gsd"},
       roles: {
-        planner: {cli: "claude", model: "", reasoning: "", variant: "", resume_session: true},
+        planner: {cli: "claude", model: nativeFakes ? "opus" : "", reasoning: nativeFakes ? "high" : "", variant: "", resume_session: true},
         plan_reviewer: {cli: "claude", model: "", reasoning: "", variant: "", resume_session: true},
-        implementer: {cli: "claude", model: "", reasoning: "", variant: "", resume_session: true},
+        implementer: nativeFakes
+          ? {cli: "opencode", model: "opencode/mimo-v2.6-flash-free", reasoning: "", variant: "", resume_session: true}
+          : {cli: "claude", model: "", reasoning: "", variant: "", resume_session: true},
         code_reviewer: {cli: "claude", model: "", reasoning: "", variant: "", resume_session: true},
         verifier: {cli: "claude", model: "", reasoning: "", variant: "", resume_session: true},
         free_models: {auto_fallback: false, max_turns: 30}
@@ -189,51 +302,24 @@ async function main() {
 
     writeV4Config(repo, initialConfig);
 
-    // Run setup --edit with scope "All configuration" (option 1), then for each role choose "Keep current" (option 1)
-    // Menu flow:
-    // 1. Configuration scope: "All configuration" (option 1)
-    // 2. Planning framework: keep the saved GSD value (option 1, current value)
-    // 3. For each of 5 roles: "Claude" (option 1) - keep current
-    // 4. Gate test command: accept detected (empty)
-    // 5. Runtime mode: keep current (option 1)
-    // 6. Network isolation: keep current (n for "Allow without isolation?")
-    // 7. Escalation models: "Skip (off)" for planner and code_reviewer (option 1 each)
-    // 8. Save confirmation: "y"
+    // Run setup --edit with scope "All configuration", then keep every saved
+    // value (Enter selects the current/default option). Each role asks for its
+    // CLI, model, reasoning and fallback list when the fake CLI advertises
+    // model/effort flags; the simple fixture (a `true` copy) advertises none,
+    // so it only asks for the CLI plus the fallback list.
+    const rolePromptCount = (nativeFakes || process.platform === 'win32') ? 4 : 2;
     const stdinInput = [
       '1',  // Configuration scope: All configuration
-      '1',  // Planning framework: keep current GSD (not yet reviewed)
-      // Role 1: planner
-      '1',  // CLI: claude (keep current)
-      '',   // Model: keep current (opus)
-      '1',  // Reasoning: high (keep current)
-      '',   // Variant: keep current
-      // Role 2: plan_reviewer
-      '1',  // CLI: claude (keep current)
-      '',   // Model: keep current
-      '',   // Reasoning: keep current
-      '',   // Variant: keep current
-      // Role 3: implementer
-      '1',  // CLI: claude (but current is opencode - wait, available only has claude)
-      '',   // Model: keep current
-      '',   // Reasoning: keep current
-      '',   // Variant: keep current
-      // Role 4: code_reviewer
-      '1',  // CLI: claude (keep current)
-      '',   // Model: keep current
-      '',   // Reasoning: keep current
-      '',   // Variant: keep current
-      // Role 5: verifier
-      '1',  // CLI: claude (keep current)
-      '',   // Model: keep current
-      '',   // Reasoning: keep current
-      '',   // Variant: keep current
-      '',   // Gate test command: accept detected
-      // Runtime mode: the only usable mode is saved without a question
-      'n',  // Network isolation: keep current (don't allow without)
-      '1',  // Escalation for planner: Skip (off)
-      '1',  // Escalation for code_reviewer: Skip (off)
-      'y'   // Save confirmation
+      ''    // Planning framework: Enter keeps the saved GSD (not yet reviewed)
     ];
+    for (let role = 0; role < 5; role++) {
+      for (let prompt = 0; prompt < rolePromptCount; prompt++) stdinInput.push('');
+    }
+    stdinInput.push(
+      '',   // Stronger model when stuck: No (off)
+      '',   // Test command: Enter keeps the saved command
+      'y'   // Save anyway if a model could not be live-verified
+    );
 
     const r = await runSetupEdit({repo, binDir, stdinInput});
     check('setup --edit exits 0', r.status === 0, `status=${r.status}\n${r.out.slice(-3000)}`);
@@ -331,9 +417,10 @@ async function main() {
 
     // Verify some non-default values were preserved
     check('roles.planner.cli preserved', config.roles.planner.cli === 'claude');
-    check('roles.planner.model preserved', config.roles.planner.model === '');
-    check('roles.planner.reasoning preserved', config.roles.planner.reasoning === '');
-    check('roles.implementer.cli preserved', config.roles.implementer.cli === 'claude');
+    check('roles.planner.model preserved', config.roles.planner.model === (nativeFakes ? 'opus' : ''));
+    check('roles.planner.reasoning preserved', config.roles.planner.reasoning === (nativeFakes ? 'high' : ''));
+    check('roles.implementer.cli preserved', config.roles.implementer.cli === (nativeFakes ? 'opencode' : 'claude'));
+    check('roles.implementer.model preserved', config.roles.implementer.model === (nativeFakes ? 'opencode/mimo-v2.6-flash-free' : ''));
     check('roles.free_models.auto_fallback preserved', config.roles.free_models.auto_fallback === false);
     check('roles.free_models.max_turns preserved', config.roles.free_models.max_turns === 30);
     check('caps.planner.max_turns preserved', config.caps.planner.max_turns === 40);
@@ -346,8 +433,8 @@ async function main() {
     console.log(`\nResults: ${passed} passed, ${failed} failed`);
     process.exit(failed ? 1 : 0);
   } finally {
-    try { fs.rmSync(binDir, {recursive: true, force: true}); } catch { }
-    try { fs.rmSync(repo, {recursive: true, force: true}); } catch { }
+    if (binDir) try { fs.rmSync(binDir, {recursive: true, force: true}); } catch { }
+    if (repo) try { fs.rmSync(repo, {recursive: true, force: true}); } catch { }
   }
 }
 

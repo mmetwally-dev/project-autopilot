@@ -20,6 +20,13 @@ import {fileURLToPath} from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skillRoot = path.resolve(here, "..");
 
+const tempDirs = new Set();
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, {recursive: true, force: true}); } catch { /* best-effort */ }
+  }
+});
+
 let failures = 0;
 const check = (name, condition, detail) => {
   if (condition) console.log(`PASS ${name}`);
@@ -39,6 +46,7 @@ function git(cwd, args, env) {
 
 function makeRepo(prefix) {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.add(repo);
   const env = withoutOuterGitGuard(process.env);
   git(repo, ["init", "-q"], env);
   git(repo, ["config", "user.email", "pass-refusal-retry@example.invalid"], env);
@@ -54,6 +62,7 @@ function makeRepo(prefix) {
 
 function makeBin(mode) {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "ap-pass-refusal-bin-"));
+  tempDirs.add(binDir);
   const cursorAgentPath = path.join(binDir, "cursor-agent");
   fs.copyFileSync(path.join(here, "test-fixtures", "relay-scratch-probe-adapter.sh"), cursorAgentPath);
   fs.chmodSync(cursorAgentPath, 0o755);

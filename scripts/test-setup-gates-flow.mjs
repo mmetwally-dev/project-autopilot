@@ -31,10 +31,10 @@ const WARNING =
   'Warning: gate runs with network isolation; tests requiring network access must be excluded or mocked';
 const HAND_EDIT_HINT =
   'edit .autopilot/config.json "gates": {"commands": ["<full command>"]}';
-const GATES_PROMPT = /Gate test command/;
-const DETECTED_PROMPT = /Gate test command \[npm test\]/;
-const NONE_DETECTED = /No test command detected for this project\./;
-const PROMPT_TAIL = /: $|Press Enter[^\n]*\s$/;
+const GATES_PROMPT = /Test command \(Autopilot runs it after each phase to make sure nothing broke\):/;
+const DETECTED_PROMPT = /Found: npm test\nEnter = use it · type another command · "-" = no tests\n> /;
+const NONE_DETECTED = /None found\.\nType a command, or Enter \/ "-" for no tests\n> /;
+const PROMPT_TAIL = /: $|> $|Press Enter[^\n]*\s$/;
 
 // "3" = Framework / safety; a single planning-framework choice is selected
 // without a question.
@@ -299,8 +299,8 @@ await runCase('existing non-empty kept without asking', async ({binDir, makeRepo
   const repo = makeRepo({commands: existing});
   const r = await runScripted({repo, binDir, answers: ['3', '']});
   const combined = assertCleanRun('existing non-empty kept', r);
-  check('does not print the gates prompt', !GATES_PROMPT.test(combined),
-    `unexpected prompt:\n${combined.slice(-2000)}`);
+  check('prints the gates prompt', GATES_PROMPT.test(combined),
+    `prompt missing from output:\n${combined.slice(-2000)}`);
   checkEqual('keeps the existing value', readGateCommands(repo), existing);
   check('no warning for a value that did not change', !combined.includes(WARNING));
 });

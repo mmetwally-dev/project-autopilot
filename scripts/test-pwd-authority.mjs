@@ -45,6 +45,13 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const skillRoot = path.resolve(here, "..");
 const CANONICAL_AP = path.join(skillRoot, "scripts", "autopilot.mjs");
 
+const tempDirs = new Set();
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, {recursive: true, force: true}); } catch { /* best-effort */ }
+  }
+});
+
 let failures = 0;
 function check(name, condition, detail) {
   if (condition) { console.log(`PASS ${name}`); return true; }
@@ -304,6 +311,7 @@ function runUnitSection() {
   // The override mechanism production runRelay() relies on: extra wins over
   // any inherited process value.
   const guardDir = fs.mkdtempSync(path.join(os.tmpdir(), "ap-pwd-unit-guard-"));
+  tempDirs.add(guardDir);
   try {
     const guard = createGitMutationGuard(guardDir, hostRepo);
     const seededEnv = guardedEnv(guard, {PWD: hostRepo, INIT_CWD: hostRepo});
@@ -324,6 +332,7 @@ const PLANNER_BYTES = "pwd-authority-planner-ok\n";
 
 function makeDecoy(prefix) {
   const decoy = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.add(decoy);
   fs.writeFileSync(path.join(decoy, "decoy-marker.txt"), "decoy sentinel — no mission write may land here\n");
   fs.mkdirSync(path.join(decoy, "nested"), {recursive: true});
   fs.writeFileSync(path.join(decoy, "nested", "inner.txt"), "inner sentinel\n");
@@ -362,6 +371,7 @@ function winWorkflowYml() {
 
 function winMakeRepo() {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), targetTmpPrefix()));
+  tempDirs.add(repo);
   git(repo, ["init", "-q"]);
   git(repo, ["config", "user.email", "pwd-authority-test@example.invalid"]);
   git(repo, ["config", "user.name", "PWD Authority Test"]);
@@ -520,6 +530,7 @@ function winAdapterScript() {
 
 function winMakeBin() {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "ap-win-pwd-bin-"));
+  tempDirs.add(binDir);
   const scriptPath = path.join(binDir, "pwd-authority-adapter.mjs");
   fs.writeFileSync(scriptPath, winAdapterScript());
   fs.writeFileSync(path.join(binDir, "cursor-agent.cmd"), `@echo off\r\n"${process.execPath}" "${scriptPath}" %*\r\nexit /b %errorlevel%\r\n`);
@@ -665,6 +676,7 @@ async function runWindowsMission() {
 // =====================================================================
 function linMakeFixtureRepo() {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), targetTmpPrefix()));
+  tempDirs.add(repo);
   const g = (args) => {
     const r = spawnSync("git", args, {cwd: repo, encoding: "utf8", shell: false});
     if (r.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${(r.stderr || r.stdout || "").trim()}`);
@@ -679,6 +691,7 @@ function linMakeFixtureRepo() {
 }
 function linMakeFixtureBin() {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "ap-wf-pwd-bin-"));
+  tempDirs.add(binDir);
   const target = path.join(binDir, "cursor-agent");
   fs.copyFileSync(path.join(here, "test-fixtures", "fake-workflow-adapter.sh"), target);
   fs.chmodSync(target, 0o755);

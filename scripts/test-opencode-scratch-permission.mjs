@@ -89,6 +89,13 @@ const skillRoot = path.resolve(here, "..");
 const thisFile = fileURLToPath(import.meta.url);
 const autopilotSource = fs.readFileSync(path.join(skillRoot, "scripts", "autopilot.mjs"), "utf8");
 
+const tempDirs = new Set();
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, {recursive: true, force: true}); } catch { /* best-effort */ }
+  }
+});
+
 let failures = 0;
 const check = (name, condition, detail) => {
   if (condition) console.log(`PASS ${name}`);
@@ -178,6 +185,7 @@ const EXPECTED_OPENCODE_CONFIG_CONTENT = JSON.stringify({snapshot: false, agent:
 const GIT_FIXTURE_TEMPLATE = path.join(here, "test-fixtures", "opencode-scratch-git-template");
 function makeRepo(prefix, {hostileOpencodeConfig = false} = {}) {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.add(repo);
   fs.rmSync(repo, {recursive: true, force: true});
   fs.cpSync(GIT_FIXTURE_TEMPLATE, repo, {recursive: true});
   fs.renameSync(path.join(repo, "git-dir"), path.join(repo, ".git"));
@@ -385,6 +393,7 @@ process.stdin.on("end", () => {
 
 function makeBinDir({includeFakeOpencode = true, cursorAgentSource = null} = {}) {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "ap-opencode-scratch-bin-"));
+  tempDirs.add(binDir);
   const cursorAgentPath = path.join(binDir, "cursor-agent");
   if (cursorAgentSource) fs.writeFileSync(cursorAgentPath, cursorAgentSource);
   else fs.copyFileSync(path.join(here, "test-fixtures", "relay-scratch-probe-adapter.sh"), cursorAgentPath);

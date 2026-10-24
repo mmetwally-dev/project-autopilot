@@ -547,7 +547,7 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
   check("sub fresh WSL2 prints full protection", combined.includes("✓ Reviewers run with full protection (bubblewrap)."), combined.slice(-2000));
   check("sub fresh WSL2 never says choose one", !/choose one/i.test(combined), combined.slice(-2000));
   check("sub fresh WSL2 SpecKit not detected", combined.includes("· SpecKit: not detected") && !combined.includes("✓ SpecKit: not detected"), combined.slice(-2000));
-  check("sub fresh WSL2 announces the single standalone choice", combined.includes("✓ Planning: Standalone — PLAN.md + TASKS.md per mission in .autopilot/missions/<mission>/") && !combined.includes("Planning framework"), combined.slice(-3000));
+  check("sub fresh WSL2 announces the single standalone choice", combined.includes("✓ Planning: Standalone — PLAN.md + TASKS.md per mission") && !combined.includes("Planning framework"), combined.slice(-3000));
   check("sub fresh WSL2 discovers only the fake CLI", /✓ claude/.test(combined) && !/✓ (opencode|codex|agy|cursor-agent)/.test(combined), combined.slice(-2000));
   check("sub fresh WSL2 launches no real CLI", saved !== null && ["planner","plan_reviewer","implementer","code_reviewer","verifier"].every(r => saved.roles[r]?.cli === "claude"), saved?.roles);
 });
@@ -596,8 +596,10 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
   check("sub dual compat prints no old warnings", !/OS-enforced|disposable-copy|SpecKit-and-standalone|weaker/.test(combined), combined.slice(-2000));
   check("sub dual exact distro not stored for compat", saved?.runtime?.wsl_distro === null, saved?.runtime);
   check("sub dual SpecKit available", combined.includes("✓ SpecKit: available"), combined.slice(-3000));
-  check("sub dual SpecKit label", combined.includes("1) SpecKit — use this project's SpecKit files (.specify/, specs/*/tasks.md);\n   Autopilot implements, reviews and tests the tasks"), combined.slice(-3000));
-  check("sub dual standalone label", combined.includes("2) Standalone — ignore SpecKit; Autopilot writes PLAN.md + TASKS.md per mission\n   in .autopilot/missions/<mission>/"), combined.slice(-3000));
+  check("sub dual SpecKit label", combined.includes("2) SpecKit — use this project's SpecKit files (.specify/, specs/*/tasks.md);\n   Autopilot implements, reviews and tests the tasks"), combined.slice(-3000));
+  check("sub dual standalone label", combined.includes("1) Standalone — Autopilot writes the plan itself: a PLAN.md (the plan) and\n   TASKS.md (the task list) for each mission"), combined.slice(-3000));
+  check("sub dual Standalone is option 1 and Enter picks it", combined.includes("Planning framework\n1) Standalone") && JSON.parse(readRepoConfigRaw(repo))?.project?.planning_framework === "standalone", combined.slice(-3000));
+  check("sub dual no ignore text", !/ignore (SpecKit|GSD|the detected)/.test(combined), combined.slice(-3000));
   check("sub dual no old framework labels", !/Continue without a planning framework|Standalone \(ignore the detected framework\)/.test(combined), combined.slice(-3000));
 });
 
@@ -784,7 +786,9 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
   check("sub preserve drops old preserving wording", !/Preserving saved runtime mode/.test(combined), combined.slice(-2000));
   check("sub preserve config path SpecKit available", combined.includes("✓ SpecKit: available"), combined.slice(-3000));
   check("sub preserve config path SpecKit label", combined.includes("SpecKit — use this project's SpecKit files (.specify/, specs/*/tasks.md);\n   Autopilot implements, reviews and tests the tasks"), combined.slice(-3000));
-  check("sub preserve config path standalone label", combined.includes("Standalone — ignore SpecKit; Autopilot writes PLAN.md + TASKS.md per mission\n   in .autopilot/missions/<mission>/"), combined.slice(-3000));
+  check("sub preserve config path standalone label", combined.includes("1) Standalone — Autopilot writes the plan itself: a PLAN.md (the plan) and\n   TASKS.md (the task list) for each mission"), combined.slice(-3000));
+  check("sub preserve config path Enter keeps speckit", saved?.project?.planning_framework === "speckit", saved?.project);
+  check("sub preserve no ignore text", !/ignore (SpecKit|GSD|the detected)/.test(combined), combined.slice(-3000));
   check("sub preserve no old framework labels", !/Continue without a planning framework|Standalone \(ignore the detected framework\)/.test(combined), combined.slice(-3000));
 });
 

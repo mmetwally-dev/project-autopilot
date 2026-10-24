@@ -21,6 +21,13 @@ const skillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 const savedPath = process.env.PATH ?? "";
 const tmpBase = process.env.TMPDIR || os.tmpdir();
 
+const tempDirs = new Set();
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+});
+
 let failed = 0;
 let ran = 0;
 const check = (name, ok, detail = "") => {
@@ -31,12 +38,14 @@ const check = (name, ok, detail = "") => {
 
 function makeRepo(prefix) {
   const dir = fs.mkdtempSync(path.join(tmpBase, `ap-090-install-${prefix}-`));
+  tempDirs.add(dir);
   fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
   return dir;
 }
 
 function makeBinDir(prefix, names) {
   const dir = fs.mkdtempSync(path.join(tmpBase, `ap-090-install-bin-${prefix}-`));
+  tempDirs.add(dir);
   for (const name of names) {
     const file = path.join(dir, name);
     fs.writeFileSync(file, `#!/bin/sh\nexit 0\n`);

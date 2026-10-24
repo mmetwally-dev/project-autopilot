@@ -268,7 +268,7 @@ await runCase('Yes sets the same model on planner and implementer; one question;
   check('summary line printed', /escalation model \(planner \+ implementer\): /.test(out));
   const q = out.search(ESC_Q_OFF);
   const lastRole = out.lastIndexOf('Verifier CLI');
-  const gates = out.indexOf('Gate test command');
+  const gates = out.indexOf('Test command (Autopilot runs it after each phase');
   check('(e) after the verifier questions', q > 0 && lastRole >= 0 && lastRole < q, `q=${q} verifier=${lastRole}`);
   check('(e) before the gate/runtime/network questions that follow', gates > q, `q=${q} gates=${gates}`);
   check('(e) the single framework choice is announced before the role questions', out.indexOf('✓ Planning: Standalone') >= 0 && out.indexOf('✓ Planning: Standalone') < out.indexOf('Planner CLI'));

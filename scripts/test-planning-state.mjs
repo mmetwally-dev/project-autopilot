@@ -7,6 +7,7 @@ import * as speckit from "../adapters/speckit.mjs";
 import * as gsd from "../adapters/gsd.mjs";
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),"autopilot-planning-state-"));
+process.on("exit",()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best-effort */}});
 const mkdir=p=>fs.mkdirSync(p,{recursive:true});
 const write=(p,s)=>{mkdir(path.dirname(p));fs.writeFileSync(p,s)};
 const assert=(cond,msg)=>{if(!cond)throw new Error(msg)};

@@ -19,6 +19,7 @@ import {
   loadAndMigrateConfig
 } from "./config-migration.mjs";
 import {
+  formatValidationWarnings,
   validateConfigForSave,
   validateExecutionConfig,
   validateNewConfig,
@@ -977,47 +978,38 @@ function planningFrameworkOptions(
 // selectable, even when SpecKit/GSD is detected: a project may carry a
 // framework's files and still want Autopilot's own plan-per-mission flow.
 // Detected frameworks stay first, so the default pick is unchanged.
-function detectedFrameworkNames(detectedFrameworks) {
-  const names = [];
-  if (detectedFrameworks.includes("speckit")) names.push("SpecKit");
-  if (detectedFrameworks.includes("gsd")) names.push("GSD");
-  return names;
-}
-
-function standaloneChoiceLabel(detectedFrameworks) {
-  const names = detectedFrameworkNames(detectedFrameworks);
-  if (names.length) {
-    return `Standalone — ignore ${names.join(" and ")}; Autopilot writes PLAN.md + TASKS.md per mission\n   in .autopilot/missions/<mission>/`;
-  }
-  return "Standalone — Autopilot writes the plan itself: for each mission it creates\n   PLAN.md (the plan) and TASKS.md (the task list) in .autopilot/missions/<mission>/";
+function standaloneChoiceLabel() {
+  return "Standalone — Autopilot writes the plan itself: a PLAN.md (the plan) and\n   TASKS.md (the task list) for each mission";
 }
 
 function frameworkChoicesFor(currentFramework, detectedFrameworks) {
-  // GSD is hidden until it has been reviewed (backlog #4): the option stays
-  // in planningFrameworkOptions() so its code is kept, but it is never
-  // offered as a new choice. A config that already saved gsd keeps it as the
-  // current value (and can keep it by pressing Enter) until the operator
-  // chooses another framework.
-  const choices = planningFrameworkOptions()
-    .filter(x => x.id !== "gsd")
-    .filter(x => detectedFrameworks.includes(x.id));
+  // Standalone is always first. GSD is hidden until it has been reviewed
+  // (backlog #4): the option stays in planningFrameworkOptions() so its code
+  // is kept, but it is never offered as a new choice. A config that already
+  // saved gsd keeps it as the current value (and can keep it by pressing
+  // Enter) until the operator chooses another framework.
+  const choices = [{
+    id: "standalone",
+    label: standaloneChoiceLabel()
+  }];
   if (currentFramework === "gsd") {
-    choices.unshift({
+    choices.splice(1, 0, {
       id: "gsd",
       label: "GSD — current value (not yet reviewed); choose another framework to change it"
     });
   }
-  choices.push({
-    id: "standalone",
-    label: standaloneChoiceLabel(detectedFrameworks)
-  });
+  choices.push(
+    ...planningFrameworkOptions()
+      .filter(x => x.id !== "gsd")
+      .filter(x => detectedFrameworks.includes(x.id))
+  );
   return choices;
 }
 
 function frameworkPickedLine(frameworkId) {
   if (frameworkId === "speckit") return "✓ Planning: SpecKit";
   if (frameworkId === "gsd") return "✓ Planning: GSD (not yet reviewed)";
-  return "✓ Planning: Standalone — PLAN.md + TASKS.md per mission in .autopilot/missions/<mission>/";
+  return "✓ Planning: Standalone — PLAN.md + TASKS.md per mission";
 }
 
 function frameworkAvailabilityLines(detectedFrameworks) {
@@ -1779,8 +1771,9 @@ async function printStartScreen(detectedFrameworks) {
     // that configure the project itself (wizard, full scope, framework/safety
     // — the scope that already owns gates.network_isolation). Enter accepts
     // the proposal, a typed answer is stored verbatim as ONE full shell
-    // command, "-" keeps []. An existing non-empty value is never re-asked,
-    // and nothing is ever written without an answer: a non-interactive stdin
+    // command, "-" keeps []. In `ap config` an existing non-empty value is
+    // re-asked so it can be changed or cleared; first-run wizard never
+    // re-asks. Nothing is written without an answer: a non-interactive stdin
     // keeps what is there and prints how to set it by hand.
     const gatesInScope =
       wizardMode ||
@@ -1797,29 +1790,33 @@ async function printStartScreen(detectedFrameworks) {
 
     let gateAnswer = null;
 
-    if (
-      gatesInScope &&
-      !existingGateCommands.length &&
-      interactive
-    ) {
-      console.log(
-        detectedGateCommand
-          ? `\nProposed gate test command: ${detectedGateCommand}`
-          : "\nNo test command detected for this project."
-      );
+    if (gatesInScope && interactive) {
+      if (!existingGateCommands.length) {
+        const gatePrompt = detectedGateCommand
+          ? `Test command (Autopilot runs it after each phase to make sure nothing broke):\nFound: ${detectedGateCommand}\nEnter = use it · type another command · "-" = no tests\n> `
+          : `Test command (Autopilot runs it after each phase to make sure nothing broke):\nNone found.\nType a command, or Enter / "-" for no tests\n> `;
 
-      const gatePrompt = detectedGateCommand
-        ? `Gate test command [${detectedGateCommand}] — Enter to accept, type a different command, or '-' to keep empty: `
-        : `Gate test command — type a full command, or Enter/'-' to keep empty: `;
+        // ask() renders its question only through readline; the forced
+        // interactive path answers preloaded stdin lines without printing
+        // anything, so the operator (or a scripted run) must see it here.
+        if (forceInteractive) {
+          console.log(gatePrompt);
+        }
 
-      // ask() renders its question only through readline; the forced
-      // interactive path answers preloaded stdin lines without printing
-      // anything, so the operator (or a scripted run) must see it here.
-      if (forceInteractive) {
-        console.log(gatePrompt);
+        gateAnswer = await ask(gatePrompt);
+      } else if (editMode) {
+        const savedJoined = existingGateCommands.join(" && ");
+        const gatePrompt =
+          `Test command (Autopilot runs it after each phase to make sure nothing broke):\n` +
+          `Current: ${savedJoined}\n` +
+          `Enter = keep it · type another command · "-" = no tests\n> `;
+
+        if (forceInteractive) {
+          console.log(gatePrompt);
+        }
+
+        gateAnswer = await ask(gatePrompt);
       }
-
-      gateAnswer = await ask(gatePrompt);
     }
 
     const gatesResolution = gatesInScope
@@ -2203,12 +2200,9 @@ async function printStartScreen(detectedFrameworks) {
         "\nValidation warnings:"
       );
 
-      validation.warnings.forEach(
-        w =>
-          console.log(
-            `  ⚠ ${w}`
-          )
-      );
+      for (const line of formatValidationWarnings(validation.warnings, roles)) {
+        console.log(line);
+      }
 
       const unverified =
         validation.warnings.some(

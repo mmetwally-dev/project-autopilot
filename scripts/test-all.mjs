@@ -273,6 +273,18 @@ function runPool(pending, limit) {
   });
 }
 
+const suiteTempPrefix = /^(ap-|autopilot-)/;
+const listSuiteTempEntries = () => {
+  try { return fs.readdirSync(os.tmpdir()).filter(name => suiteTempPrefix.test(name)); }
+  catch { return []; }
+};
+const tempBefore = new Set(listSuiteTempEntries());
+process.on("exit", () => {
+  const added = listSuiteTempEntries().filter(name => !tempBefore.has(name));
+  console.log(`Temp folders left in /tmp by the suite: ${added.length}`);
+  if (added.length > 0) console.log(`  new: ${added.slice(0, 10).join(", ")}`);
+});
+
 const suiteStarted = Date.now();
 const serialRuns = runs.filter(run => serialAtEnd.has(run.file)).sort((a, b) => a.name.localeCompare(b.name));
 const parallelRuns = runs.filter(run => !runAlone.has(run.file) && !serialAtEnd.has(run.file)).sort(byLongestFirst);

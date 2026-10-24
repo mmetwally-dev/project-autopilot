@@ -29,6 +29,13 @@ import {withoutOuterGitGuard} from "./test-fixtures/workflow-order-harness.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skillRoot = path.resolve(here, "..");
 
+const tempDirs = new Set();
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, {recursive: true, force: true}); } catch { /* best-effort */ }
+  }
+});
+
 let failures = 0;
 const check = (name, condition, detail) => {
   if (condition) console.log(`PASS ${name}`);
@@ -43,6 +50,7 @@ function git(cwd, args) {
 
 function makeRepo() {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "ap-claude-perm-"));
+  tempDirs.add(repo);
   git(repo, ["init", "-q"]);
   git(repo, ["config", "user.email", "claude-perm-test@example.invalid"]);
   git(repo, ["config", "user.name", "Claude Perm Test"]);
@@ -91,6 +99,7 @@ function makeConfig(repo) {
 
 function makeBin() {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "ap-claude-perm-bin-"));
+  tempDirs.add(binDir);
   // "claude": the same two-hop shim shape the production resolver expects
   // (launcher -> claude.com), backed by the permission-enforcing target.
   const claudeLauncherPath = path.join(binDir, "claude");
@@ -202,6 +211,7 @@ function directCheck(claudeTargetPath, cwd) {
 {
   const {claudeTargetPath} = makeBin();
   const directCwd = fs.mkdtempSync(path.join(os.tmpdir(), "ap-claude-perm-direct-"));
+  tempDirs.add(directCwd);
   try {
     directCheck(claudeTargetPath, directCwd);
   } finally {

@@ -197,7 +197,7 @@ async function main() {
 
   const resolve = resolveGatesCommands;
 
-  // Existing non-empty value is kept without asking, whatever the answer.
+  // Existing non-empty value with no answer (not asked) is kept.
   {
     const r = resolve({ existing: ['node scripts/test-all.mjs --skip-live'], detected: 'npm test', answer: null, interactive: true });
     assertEqual(JSON.stringify(r.commands), '["node scripts/test-all.mjs --skip-live"]', 'existing non-empty kept verbatim');
@@ -285,7 +285,17 @@ async function main() {
   }
   {
     const r = resolve({ existing: ['keep-me'], detected: 'npm test', answer: 'npm test', interactive: true });
-    assertEqual(JSON.stringify(r.commands), '["keep-me"]', 'existing value wins over any answer');
+    assertEqual(JSON.stringify(r.commands), '["npm test"]', 'saved value is replaced by a typed answer');
+    assertEqual(r.warn, false, 'replacing a saved command does not warn');
+    assertEqual(r.hint, false, 'interactive replace: no hand-edit hint');
+  }
+  {
+    const r = resolve({ existing: ['keep-me'], detected: 'npm test', answer: '', interactive: true });
+    assertEqual(JSON.stringify(r.commands), '["keep-me"]', 'Enter keeps the saved command');
+  }
+  {
+    const r = resolve({ existing: ['keep-me'], detected: 'npm test', answer: '-', interactive: true });
+    assertEqual(JSON.stringify(r.commands), '[]', '"-" clears the saved command');
   }
 
   console.log('\n' + '='.repeat(50));

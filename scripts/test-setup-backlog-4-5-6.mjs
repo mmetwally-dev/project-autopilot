@@ -242,20 +242,56 @@ try {
     const r = await runSetup({mode: '--wizard', repo, binDir, answers: Array(20).fill('')});
     check('wizard exits 0', r.status === 0, r.combined.slice(-2000));
     check('prints the one-line planning result',
-      r.combined.includes('✓ Planning: Standalone — PLAN.md + TASKS.md per mission in .autopilot/missions/<mission>/'),
+      r.combined.includes('✓ Planning: Standalone — PLAN.md + TASKS.md per mission'),
       r.combined.slice(-2000));
     check('does not ask "Planning framework"', !r.combined.includes('Planning framework'));
+    check('wizard test-command prompt (nothing detected)',
+      r.combined.includes('Test command (Autopilot runs it after each phase to make sure nothing broke):\nNone found.\nType a command, or Enter / "-" for no tests\n> '),
+      r.combined.slice(-2000));
+    check('old gate prompt texts are gone', !/Gate test command|Proposed gate test command|No test command detected/.test(r.combined));
+
+    const repoD = ownedRepo();
+    fs.writeFileSync(path.join(repoD, 'package.json'), JSON.stringify({name: 'x', scripts: {test: 'node t.mjs'}}));
+    const rd = await runSetup({mode: '--wizard', repo: repoD, binDir, answers: Array(20).fill('')});
+    check('wizard test-command prompt (detected)',
+      rd.combined.includes('Test command (Autopilot runs it after each phase to make sure nothing broke):\nFound: npm test\nEnter = use it · type another command · "-" = no tests\n> '),
+      rd.combined.slice(-2000));
   }
 
   {
     console.log('\n#4 two planning options:');
     const repo = ownedRepo({speckit: true});
     const binDir = ownedCli({claude: true, opencode: false});
-    const answers = ['', ...Array(10).fill(''), '1', '2', ''];
+    const answers = ['', ...Array(10).fill(''), '1', '1', ''];
     const r = await runSetup({mode: '--wizard', repo, binDir, answers});
     check('wizard exits 0', r.status === 0, r.combined.slice(-2000));
     check('still asks "Planning framework"', r.combined.includes('Planning framework'), r.combined.slice(-2000));
     checkEqual('saved framework follows the answer', readConfig(repo).project.planning_framework, 'standalone');
+    check('Standalone is option 1 when SpecKit is detected',
+      r.combined.includes('Planning framework\n1) Standalone — Autopilot writes the plan itself: a PLAN.md (the plan) and\n   TASKS.md (the task list) for each mission\n2) SpecKit — use this project\'s SpecKit files (.specify/, specs/*/tasks.md);\n   Autopilot implements, reviews and tests the tasks\n'),
+      r.combined.slice(-3000));
+    check('no "ignore" text in the framework choices', !/ignore (SpecKit|GSD|the detected)/.test(r.combined), r.combined.slice(-3000));
+
+    const repo2 = ownedRepo({speckit: true});
+    const r2 = await runSetup({mode: '--wizard', repo: repo2, binDir, answers: Array(30).fill('')});
+    check('wizard (all Enter) exits 0', r2.status === 0, r2.combined.slice(-2000));
+    checkEqual('wizard default picks standalone even with SpecKit detected', readConfig(repo2).project.planning_framework, 'standalone');
+  }
+
+  {
+    console.log('\n#4 config keeps the saved framework on Enter:');
+    const repo = ownedSeed(baseConfig({plannerCli: 'claude'}));
+    const cfgPath = path.join(repo, '.autopilot', 'config.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    cfg.project = {...(cfg.project || {}), planning_framework: 'speckit'};
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+    fs.mkdirSync(path.join(repo, '.specify', 'workflows', 'speckit'), {recursive: true});
+    fs.writeFileSync(path.join(repo, '.specify', 'workflows', 'speckit', 'workflow.yml'), 'steps: []\n');
+    const binDir = ownedCli({claude: true, opencode: false});
+    const r = await runSetup({mode: '--edit', repo, binDir, answers: ['3', ...Array(30).fill('')]});
+    check('config exits 0', r.status === 0, r.combined.slice(-2000));
+    check('config lists Standalone first and SpecKit second', /Planning framework\n1\) Standalone[\s\S]*?\n2\) SpecKit/.test(r.combined), r.combined.slice(-2500));
+    checkEqual('Enter keeps speckit', readConfig(repo).project.planning_framework, 'speckit');
   }
 
   // ── #5: long model list ──────────────────────────────────────────────
