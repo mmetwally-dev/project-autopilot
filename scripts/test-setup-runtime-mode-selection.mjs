@@ -22,7 +22,9 @@ import {
   resolveRuntimeExecution,
   preserveExecutionForRoleScope,
   isRoleOnlyScope,
-  formatRuntimeModeLabel
+  formatRuntimeModeLabel,
+  formatWslUnavailable,
+  isWslNotInstalled
 } from "./runtime-mode-selection.mjs";
 import {
   validateExecutionConfig,
@@ -68,6 +70,9 @@ function ownFixtureDir(dir) {
 }
 
 let failures = 0;
+function countOccurrences(text, needle) {
+  return String(text).split(needle).length - 1;
+}
 function check(name, condition, detail) {
   if (!condition) {
     failures += 1;
@@ -153,7 +158,7 @@ function wsl1Caps() {
   const caps = windowsDualCaps("Ubuntu");
   const result = resolveRuntimeExecution({capabilities: caps, framework: "speckit", savedExecution: undefined, userChoiceId: RUNTIME_MODE_IDS.wsl2Strong});
   check("pure dual selects wsl2-strong", result.status === "selected" && result.execution?.runtime_mode === RUNTIME_MODE_IDS.wsl2Strong, result);
-  check("pure wsl2-strong mentions OS-enforced", (result.messages || []).join("\n").includes("OS-enforced"), result.messages);
+  check("pure wsl2-strong result line", (result.messages || []).join("\n") === "✓ Reviewers run inside WSL (Ubuntu).", result.messages);
 }
 {
   const caps = windowsDualCaps("Ubuntu");
@@ -170,8 +175,8 @@ function wsl1Caps() {
   const result = resolveRuntimeExecution({capabilities: caps, framework: "speckit", savedExecution: undefined, userChoiceId: RUNTIME_MODE_IDS.windowsCompatibility});
   check("pure dual selects compat", result.status === "selected" && result.execution?.runtime_mode === RUNTIME_MODE_IDS.windowsCompatibility && result.execution?.wsl_distro === null, result);
   const text = (result.messages || []).join("\n");
-  check("pure compat not OS-enforced", text.includes("not OS-enforced"), text);
-  check("pure compat SpecKit disposable", text.includes("SpecKit-and-standalone") && text.includes("disposable-copy"), text);
+  check("pure compat result line", text === "✓ Reviewers run on Windows: each one works on a temporary copy of your\n  project, so your files stay safe.", text);
+  check("pure compat no warnings", !/OS-enforced|disposable-copy|SpecKit-and-standalone|weaker/.test(text), text);
 }
 {
   const caps = windowsNoWslCaps("wsl_not_installed");
@@ -179,8 +184,25 @@ function wsl1Caps() {
   const result = resolveRuntimeExecution({capabilities: caps, framework: "speckit", savedExecution: undefined});
   check("pure no-WSL fresh requires explicit choice (no silent auto)", result.status === "need-choice" && !("execution" in result && result.execution), result);
   const text = (result.messages || []).join("\n");
-  check("pure no-WSL reports unavailable", text.includes("WSL2 Strong is unavailable") && text.includes("wsl_not_installed"), text);
-  check("pure no-WSL has no confirmation wording (setup prints the weaker warning)", !/Explicit confirmation is required/i.test(text) && /not OS-enforced/.test(text), text);
+  check("pure no-WSL has no reason or choice block", text === "", text);
+  check("pure no-WSL never says choose one", !/choose one/i.test(text), text);
+}
+{
+  check("pure B detects WSL not installed", isWslNotInstalled(windowsNoWslCaps("wsl_not_installed")) === true);
+  check("pure C maps bubblewrap missing", formatWslUnavailable(windowsNoWslCaps("bubblewrap_not_installed_in_distro:Ubuntu")) ===
+    "ℹ WSL2 found but not usable: bubblewrap is not installed inside Ubuntu\n  (fix: run \"sudo apt install bubblewrap\" in Ubuntu, then ap setup again).",
+    formatWslUnavailable(windowsNoWslCaps("bubblewrap_not_installed_in_distro:Ubuntu")));
+  const wsl1 = windowsNoWslCaps("wsl1_only_no_usable_wsl2_distro: Ubuntu(wsl1_distro_not_usable_as_strong)");
+  check("pure C maps WSL1", formatWslUnavailable(wsl1) ===
+    "ℹ WSL found but it is WSL1; reviewers need WSL2 (fix: wsl --set-version Ubuntu 2).",
+    formatWslUnavailable(wsl1));
+  check("pure C maps node missing", formatWslUnavailable(windowsNoWslCaps("node_missing_in_distro:Ubuntu")).includes("Node.js is not installed inside Ubuntu"));
+  check("pure C maps unknown code", formatWslUnavailable(windowsNoWslCaps("some_new_code")) ===
+    "ℹ WSL2 found but not usable (some_new_code).",
+    formatWslUnavailable(windowsNoWslCaps("some_new_code")));
+  const fresh = resolveRuntimeExecution({capabilities: windowsNoWslCaps("bubblewrap_not_installed_in_distro:Ubuntu"), framework: "speckit", savedExecution: undefined});
+  check("pure C need-choice includes reason line", fresh.messages?.[0]?.startsWith("ℹ WSL2 found but not usable: bubblewrap is not installed inside Ubuntu"), fresh.messages);
+  check("pure C never says choose one", !/choose one/i.test((fresh.messages || []).join("\n")), fresh.messages);
 }
 {
   const dual = windowsDualCaps("Ubuntu");
@@ -201,7 +223,7 @@ function wsl1Caps() {
   check("pure WSL2 selectable single strong", getSelectableRuntimeModes(caps, "speckit").length === 1, getSelectableRuntimeModes(caps, "speckit"));
   const result = resolveRuntimeExecution({capabilities: caps, framework: "speckit", savedExecution: undefined});
   check("pure WSL2 auto strong", result.status === "auto" && result.execution?.runtime_mode === RUNTIME_MODE_IDS.wsl2Strong && result.execution?.wsl_distro === null, result);
-  check("pure WSL2 OS-enforced", (result.messages || []).join("\n").includes("OS-enforced bubblewrap"), result.messages);
+  check("pure WSL2 inside-WSL result line", (result.messages || []).join("\n") === "✓ Reviewers run with full protection (bubblewrap).", result.messages);
 }
 {
   const caps = linuxUsableCaps();
@@ -269,15 +291,15 @@ function wsl1Caps() {
 {
   const exec = buildExecutionConfig(RUNTIME_MODE_IDS.wsl2Strong, windowsDualCaps("Ubuntu"));
   check("pure only two keys", Object.keys(exec).sort().join(",") === "runtime_mode,wsl_distro", exec);
-  check("pure label strong", formatRuntimeModeLabel({id: RUNTIME_MODE_IDS.wsl2Strong, distro: "Ubuntu"}, windowsDualCaps("Ubuntu")).includes("WSL2 Strong (Recommended)"));
-  check("pure label compat", formatRuntimeModeLabel({id: RUNTIME_MODE_IDS.windowsCompatibility}, windowsDualCaps("Ubuntu")).includes("not OS-enforced"));
+  check("pure label strong", formatRuntimeModeLabel({id: RUNTIME_MODE_IDS.wsl2Strong, distro: "Ubuntu"}, windowsDualCaps("Ubuntu")).includes("Inside WSL (Ubuntu) — Recommended."));
+  check("pure label compat", formatRuntimeModeLabel({id: RUNTIME_MODE_IDS.windowsCompatibility}, windowsDualCaps("Ubuntu")).includes("On Windows directly — Simpler."));
 }
 {
   check("pure selection module has no setup import side effects", !/loadAndMigrateConfig|readline\.createInterface/.test(selectionSource));
   check("pure setup imports selection helpers", /from ["']\.\/runtime-mode-selection\.mjs["']/.test(setupSource) && /resolveRuntimeExecution/.test(setupSource));
   check("pure tests import selection not setup", !/import\s+\{[^}]*\}\s+from\s+["']\.\/setup\.mjs["']/.test(fs.readFileSync(new URL(import.meta.url), "utf8")));
   check("pure selection integrates discovery ids", /RUNTIME_MODE_IDS/.test(selectionSource));
-  check("pure setup no longer asks to confirm compat", !/Save Windows Compatibility execution mode/.test(setupSource) && /Windows Compatibility is weaker: reviewers work on a throwaway copy/.test(setupSource));
+  check("pure setup no longer asks to confirm compat", !/Save Windows Compatibility execution mode/.test(setupSource) && !/Windows Compatibility is weaker/.test(setupSource) && /isWslNotInstalled/.test(setupSource));
   check("pure WSL1 fails", resolveRuntimeExecution({capabilities: wsl1Caps(), framework: "speckit", savedExecution: undefined}).status === "error");
 }
 
@@ -522,7 +544,10 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
   check("sub fresh WSL2 wrote config", typeof raw === "string", combined.slice(-2000));
   const saved = raw ? JSON.parse(raw) : null;
   check("sub fresh WSL2 saves wsl2-strong null", saved?.runtime?.mode === "wsl2-strong" && saved?.runtime?.wsl_distro === null, saved?.runtime);
-  check("sub fresh WSL2 prints OS-enforced", /OS-enforced bubblewrap/.test(combined), combined.slice(-2000));
+  check("sub fresh WSL2 prints full protection", combined.includes("✓ Reviewers run with full protection (bubblewrap)."), combined.slice(-2000));
+  check("sub fresh WSL2 never says choose one", !/choose one/i.test(combined), combined.slice(-2000));
+  check("sub fresh WSL2 SpecKit not detected", combined.includes("· SpecKit: not detected") && !combined.includes("✓ SpecKit: not detected"), combined.slice(-2000));
+  check("sub fresh WSL2 standalone label", combined.includes("1) Standalone — Autopilot writes the plan itself: for each mission it creates\n   PLAN.md (the plan) and TASKS.md (the task list) in .autopilot/missions/<mission>/"), combined.slice(-3000));
   check("sub fresh WSL2 discovers only the fake CLI", /✓ claude/.test(combined) && !/✓ (opencode|codex|agy|cursor-agent)/.test(combined), combined.slice(-2000));
   check("sub fresh WSL2 launches no real CLI", saved !== null && ["planner","plan_reviewer","implementer","code_reviewer","verifier"].every(r => saved.roles[r]?.cli === "claude"), saved?.roles);
 });
@@ -552,19 +577,28 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
     skillCopy, repo,
     setupArgs: ["--wizard", "--repo", repo],
     rules: [
-      {pattern: /Runtime execution mode — choose one/, answer: "2"}
+      {pattern: /Where should the reviewers run\?/, answer: "2"}
     ],
     defaultAnswer: "",
     timeoutMs: 60000
   });
   const combined = `${r.stdout}\n${r.stderr}`;
-  check("sub dual shows both", /WSL2 Strong \(Recommended\)/.test(combined) && /Windows Compatibility/.test(combined) && /not OS-enforced/.test(combined), combined.slice(-3000));
+  const optionOne = "1) Inside WSL (Ubuntu) — Recommended.";
+  const optionTwo = "2) On Windows directly — Simpler.";
+  check("sub dual shows both options", combined.includes(optionOne) && combined.includes(optionTwo), combined.slice(-3000));
+  check("sub dual option list appears exactly once", countOccurrences(combined, optionOne) === 1 && countOccurrences(combined, optionTwo) === 1, combined.slice(-3000));
+  check("sub dual never says choose one", !/choose one/i.test(combined), combined.slice(-3000));
   check("sub dual exits 0", r.status === 0 && !r.timedOut, {status: r.status, tail: combined.slice(-2000)});
   const saved = JSON.parse(readRepoConfigRaw(repo));
   check("sub dual explicit compat saved", saved?.runtime?.mode === "windows-compatibility" && saved?.runtime?.wsl_distro === null, {saved: saved?.runtime, answers: r.answersSent, timedOut: r.timedOut, overflow: r.outputLimitExceeded, termFail: r.terminationFailed, tail: combined.slice(-1500)});
   check("sub dual compat asks no confirmation", !/Save Windows Compatibility/.test(combined), combined.slice(-2000));
-  check("sub dual compat prints the weaker warning", combined.includes("⚠ Windows Compatibility is weaker: reviewers work on a throwaway copy,\n  not OS-enforced containment. SpecKit and standalone projects only."), combined.slice(-2000));
+  check("sub dual compat prints the result lines", combined.includes("✓ Reviewers run on Windows: each one works on a temporary copy of your\n  project, so your files stay safe."), combined.slice(-2000));
+  check("sub dual compat prints no old warnings", !/OS-enforced|disposable-copy|SpecKit-and-standalone|weaker/.test(combined), combined.slice(-2000));
   check("sub dual exact distro not stored for compat", saved?.runtime?.wsl_distro === null, saved?.runtime);
+  check("sub dual SpecKit available", combined.includes("✓ SpecKit: available"), combined.slice(-3000));
+  check("sub dual SpecKit label", combined.includes("1) SpecKit — use this project's SpecKit files (.specify/, specs/*/tasks.md);\n   Autopilot implements, reviews and tests the tasks"), combined.slice(-3000));
+  check("sub dual standalone label", combined.includes("2) Standalone — ignore SpecKit; Autopilot writes PLAN.md + TASKS.md per mission\n   in .autopilot/missions/<mission>/"), combined.slice(-3000));
+  check("sub dual no old framework labels", !/Continue without a planning framework|Standalone \(ignore the detected framework\)/.test(combined), combined.slice(-3000));
 });
 
 // S3b: Windows dual explicit strong choice (no confirmation needed).
@@ -574,7 +608,7 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
   const r = await runSetupSubprocess({
     skillCopy, repo,
     setupArgs: ["--wizard", "--repo", repo],
-    rules: [{pattern: /Runtime execution mode — choose one/, answer: "1"}],
+    rules: [{pattern: /Where should the reviewers run\?/, answer: "1"}],
     defaultAnswer: "",
     timeoutMs: 60000
   });
@@ -582,6 +616,8 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
   check("sub dual strong exits 0", r.status === 0, {status: r.status, tail: combined.slice(-2000)});
   const saved = JSON.parse(readRepoConfigRaw(repo));
   check("sub dual explicit strong saves exact distro", saved?.runtime?.mode === "wsl2-strong" && saved?.runtime?.wsl_distro === "Ubuntu", saved?.runtime);
+  check("sub dual strong result line exactly once", countOccurrences(combined, "✓ Reviewers run inside WSL (Ubuntu).") === 1, combined.slice(-2000));
+  check("sub dual strong never says choose one", !/choose one/i.test(combined), combined.slice(-2000));
 });
 
 // S4: Windows no-WSL warns and requires confirmation (confirm saves).
@@ -596,12 +632,34 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
     timeoutMs: 60000
   });
   const combined = `${r.stdout}\n${r.stderr}`;
-  check("sub no-WSL warns unavailable", /WSL2 Strong is unavailable/.test(combined) && /wsl_not_installed/.test(combined), combined.slice(-3000));
-  check("sub no-WSL warns weaker SpecKit not-enforced", /weaker/.test(combined) && /SpecKit and standalone/.test(combined) && /not OS-enforced/.test(combined), combined.slice(-3000));
+  check("sub no-WSL asks no question", !/Where should the reviewers run\?|choose one/i.test(combined), combined.slice(-3000));
+  check("sub no-WSL result line exactly once", countOccurrences(combined, "✓ Reviewers run on Windows: each one works on a temporary copy of your\n  project, so your files stay safe.") === 1, combined.slice(-3000));
+  check("sub no-WSL install hint exactly once", countOccurrences(combined, "  For full protection, install WSL2 and run ap setup again.") === 1, combined.slice(-3000));
+  check("sub no-WSL no old warnings", !/OS-enforced|disposable-copy|SpecKit-and-standalone|weaker/.test(combined), combined.slice(-3000));
   check("sub no-WSL asks no confirmation", !/Save Windows Compatibility/.test(combined), combined.slice(-2000));
   check("sub no-WSL confirm exits 0", r.status === 0, {status: r.status, tail: combined.slice(-2000)});
   const saved = JSON.parse(readRepoConfigRaw(repo));
   check("sub no-WSL confirm saves compat", saved?.runtime?.mode === "windows-compatibility", {saved: saved?.runtime, answers: r.answersSent, timedOut: r.timedOut, overflow: r.outputLimitExceeded, termFail: r.terminationFailed, tail: combined.slice(-1500)});
+});
+
+// S4b: Windows Compatibility only because WSL exists but is unusable: one plain
+// reason/fix line, then the Windows result lines and no question.
+await withFixtures(async ({skillCopy, trackRepo}) => {
+  stubCapabilities(skillCopy, windowsNoWslCaps("bubblewrap_not_installed_in_distro:Ubuntu"));
+  const repo = trackRepo(makeRepo("speckit"));
+  const r = await runSetupSubprocess({
+    skillCopy, repo,
+    setupArgs: ["--wizard", "--repo", repo],
+    rules: [],
+    defaultAnswer: "",
+    timeoutMs: 60000
+  });
+  const combined = `${r.stdout}\n${r.stderr}`;
+  check("sub C reason mapped", combined.includes("ℹ WSL2 found but not usable: bubblewrap is not installed inside Ubuntu\n  (fix: run \"sudo apt install bubblewrap\" in Ubuntu, then ap setup again)."), combined.slice(-3000));
+  check("sub C no question", !/Where should the reviewers run\?|choose one/i.test(combined), combined.slice(-3000));
+  check("sub C result line exactly once", countOccurrences(combined, "✓ Reviewers run on Windows: each one works on a temporary copy of your\n  project, so your files stay safe.") === 1, combined.slice(-3000));
+  const saved = JSON.parse(readRepoConfigRaw(repo) || "null");
+  check("sub C saves compat", saved?.runtime?.mode === "windows-compatibility", saved?.runtime);
 });
 
 // S6b: Strong-unavailable with a saved Strong mode switches to Compatibility with a warning, no confirm.
@@ -620,7 +678,9 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
   });
   check("sub confirm switches explicitly", r.status === 0, {status: r.status});
   check("sub switch asks no compat confirmation", !/Save Windows Compatibility|Configuration not saved/.test(`${r.stdout}\n${r.stderr}`), `${r.stdout}`.slice(-2000));
-  check("sub switch prints weaker warning", /⚠ Windows Compatibility is weaker/.test(r.stdout), `${r.stdout}`.slice(-2000));
+  check("sub switch prints saved reason", r.stdout.includes("ℹ The saved setting (wsl2-strong) no longer works here: WSL is not installed."), `${r.stdout}`.slice(-2000));
+  check("sub switch prints result lines", r.stdout.includes("✓ Reviewers run on Windows: each one works on a temporary copy of your\n  project, so your files stay safe."), `${r.stdout}`.slice(-2000));
+  check("sub switch never says choose one", !/choose one/i.test(`${r.stdout}\n${r.stderr}`), `${r.stdout}`.slice(-2000));
   const saved = JSON.parse(readRepoConfigRaw(repo));
   check("sub confirm saves compat explicitly", saved?.runtime?.mode === "windows-compatibility", saved?.runtime);
 });
@@ -641,20 +701,26 @@ async function winNetworkScenario(caps, repoKind, rules) {
   });
 }
 {
-  const strong = await winNetworkScenario(windowsDualCaps("Ubuntu"), "speckit", [{pattern: /Runtime execution mode — choose one/, answer: "1"}]);
+  const strong = await winNetworkScenario(windowsDualCaps("Ubuntu"), "speckit", [{pattern: /Where should the reviewers run\?/, answer: "1"}]);
   check("win32 strong exits 0", strong.r.status === 0, {status: strong.r.status, tail: strong.combined.slice(-2000)});
   check("win32 strong asks no network question", !/without network isolation/.test(strong.combined), strong.combined.slice(-2000));
   check("win32 strong isolation true", strong.saved?.runtime?.mode === "wsl2-strong" && strong.saved?.tests?.gate_network === false, strong.saved);
-  check("win32 strong prints line", strong.combined.includes("✓ Tests (gate) will run without network access inside WSL.\n  Change later: tests.gate_network in .autopilot/config.json"), strong.combined.slice(-2000));
+  check("win32 strong reviewer line exactly once", countOccurrences(strong.combined, "✓ Reviewers run inside WSL (Ubuntu).") === 1, strong.combined.slice(-2000));
+  check("win32 strong prints network line exactly once", countOccurrences(strong.combined, "✓ Tests run without internet inside WSL. (Change later: tests.gate_network)") === 1, strong.combined.slice(-2000));
+  check("win32 strong never says choose one", !/choose one/i.test(strong.combined), strong.combined.slice(-2000));
 
-  const compat = await winNetworkScenario(windowsDualCaps("Ubuntu"), "speckit", [{pattern: /Runtime execution mode — choose one/, answer: "2"}]);
+  const compat = await winNetworkScenario(windowsDualCaps("Ubuntu"), "speckit", [{pattern: /Where should the reviewers run\?/, answer: "2"}]);
   check("win32 compat exits 0", compat.r.status === 0, {status: compat.r.status, tail: compat.combined.slice(-2000)});
   check("win32 compat asks no network question", !/without network isolation/.test(compat.combined), compat.combined.slice(-2000));
   check("win32 compat isolation false", compat.saved?.runtime?.mode === "windows-compatibility" && compat.saved?.tests?.gate_network === true, compat.saved);
-  check("win32 compat prints line", compat.combined.includes("✓ Tests (gate) will run with network access (Windows cannot isolate them).\n  Change later: tests.gate_network in .autopilot/config.json"), compat.combined.slice(-2000));
+  check("win32 compat reviewer line exactly once", countOccurrences(compat.combined, "✓ Reviewers run on Windows: each one works on a temporary copy of your\n  project, so your files stay safe.") === 1, compat.combined.slice(-2000));
+  check("win32 compat prints network line", compat.combined.includes("✓ Tests run with internet access (Windows cannot block it).\n  Change later: tests.gate_network in .autopilot/config.json"), compat.combined.slice(-2000));
+  check("win32 compat network line exactly once", countOccurrences(compat.combined, "✓ Tests run with internet access (Windows cannot block it).") === 1, compat.combined.slice(-2000));
+  check("win32 compat never says choose one", !/choose one/i.test(compat.combined), compat.combined.slice(-2000));
 
   const only = await winNetworkScenario(windowsNoWslCaps("wsl_not_installed"), "speckit", []);
-  check("win32 compat-only asks no question", only.r.status === 0 && !/without network isolation|Save Windows Compatibility/.test(only.combined) && only.saved?.tests?.gate_network === true, {status: only.r.status, saved: only.saved, tail: only.combined.slice(-1500)});
+  check("win32 compat-only asks no question", only.r.status === 0 && !/without network isolation|Save Windows Compatibility|Where should the reviewers run\?|choose one/i.test(only.combined) && only.saved?.tests?.gate_network === true, {status: only.r.status, saved: only.saved, tail: only.combined.slice(-1500)});
+  check("win32 compat-only install hint", countOccurrences(only.combined, "  For full protection, install WSL2 and run ap setup again.") === 1, only.combined.slice(-1500));
 }
 
 // S6d: non-Windows without namespace isolation still asks the network question.
@@ -665,7 +731,7 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
     skillCopy, repo,
     setupArgs: ["--wizard", "--repo", repo],
     rules: [
-      {pattern: /Runtime execution mode — choose one/, answer: "1"},
+      {pattern: /Where should the reviewers run\?/, answer: "1"},
       {pattern: /without network isolation/, answer: "y"}
     ],
     defaultAnswer: "", timeoutMs: 60000, fakePlatform: "darwin", withoutUnshare: true
@@ -689,10 +755,11 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
     timeoutMs: 60000
   });
   const combined = `${r.stdout}\n${r.stderr}`;
-  check("sub compat-unavailable explains", /Saved runtime mode is (unavailable|invalid)/.test(combined), `${r.stdout}`.slice(-2000));
+  check("sub compat-unavailable explains", combined.includes("ℹ The saved setting (windows-compatibility) no longer works here: Windows runtime modes do not apply on Linux."), `${r.stdout}`.slice(-2000));
   check("sub strong-only exits 0", r.status === 0, {status: r.status});
   check("sub strong-only asks no confirmation", !/execution mode \(OS-enforced|Configuration not saved/.test(combined), combined.slice(-2000));
-  check("sub strong-only prints the one line", combined.includes("✓ Runtime: linux-strong (OS-enforced bubblewrap containment) — the only usable mode here."), combined.slice(-2000));
+  check("sub strong-only prints the one line", countOccurrences(combined, "✓ Reviewers run with full protection (bubblewrap).") === 1, combined.slice(-2000));
+  check("sub strong-only never says choose one", !/choose one/i.test(combined), combined.slice(-2000));
   const saved = JSON.parse(readRepoConfigRaw(repo));
   check("sub strong-only saves strong", saved?.runtime?.mode === "linux-strong", saved?.runtime);
 });
@@ -713,7 +780,12 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
   check("sub preserve exits 0", r.status === 0, {status: r.status, tail: combined.slice(-2000)});
   const saved = JSON.parse(readRepoConfigRaw(repo));
   check("sub preserve keeps strong exact", saved?.runtime?.mode === "wsl2-strong" && saved?.runtime?.wsl_distro === "Ubuntu", saved?.runtime);
-  check("sub preserve prints preserving", /Preserving saved runtime mode/.test(combined), combined.slice(-2000));
+  check("sub preserve prints result line", countOccurrences(combined, "✓ Reviewers run inside WSL (Ubuntu).") === 1, combined.slice(-2000));
+  check("sub preserve drops old preserving wording", !/Preserving saved runtime mode/.test(combined), combined.slice(-2000));
+  check("sub preserve config path SpecKit available", combined.includes("✓ SpecKit: available"), combined.slice(-3000));
+  check("sub preserve config path SpecKit label", combined.includes("SpecKit — use this project's SpecKit files (.specify/, specs/*/tasks.md);\n   Autopilot implements, reviews and tests the tasks"), combined.slice(-3000));
+  check("sub preserve config path standalone label", combined.includes("Standalone — ignore SpecKit; Autopilot writes PLAN.md + TASKS.md per mission\n   in .autopilot/missions/<mission>/"), combined.slice(-3000));
+  check("sub preserve no old framework labels", !/Continue without a planning framework|Standalone \(ignore the detected framework\)/.test(combined), combined.slice(-3000));
 });
 
 // S9: Role-only preserves execution byte-for-byte and performs no runtime discovery.

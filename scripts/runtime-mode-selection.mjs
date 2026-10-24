@@ -115,16 +115,125 @@ export function classifySavedRuntimeExecution({savedExecution, capabilities, fra
 export function formatRuntimeModeLabel(mode, capabilities) {
   if (mode.id === RUNTIME_MODE_IDS.wsl2Strong) {
     const distro = mode.distro ?? capabilities?.usableWslDistro ?? null;
-    const distroSuffix =
-      capabilities?.currentPlatform === "native-windows" && typeof distro === "string" && distro
-        ? ` via distro '${distro}'`
-        : "";
-    return `WSL2 Strong (Recommended) — OS-enforced bubblewrap containment${distroSuffix}`;
+    if (capabilities?.currentPlatform === "native-windows") {
+      const label = typeof distro === "string" && distro ? distro : "<distro>";
+      return `Inside WSL (${label}) — Recommended. Full protection: the system itself\n   blocks reviewers from changing your files. Your agent CLIs (claude,\n   opencode…) must be installed and signed in inside WSL.`;
+    }
+    return "WSL2 — full protection (bubblewrap) inside WSL";
   }
   if (mode.id === RUNTIME_MODE_IDS.linuxStrong) {
-    return "Linux Strong — OS-enforced bubblewrap containment";
+    return "Linux — full protection (bubblewrap)";
   }
-  return "Windows Compatibility — SpecKit-and-standalone disposable-copy isolation (not OS-enforced containment)";
+  return "On Windows directly — Simpler. Each reviewer works on a temporary copy\n   of your project, so your files stay safe, but the system doesn't enforce it.\n   Not for GSD projects.";
+}
+
+export function formatRuntimeResult(execution, capabilities) {
+  if (!execution) return [];
+  if (execution.runtime_mode === RUNTIME_MODE_IDS.wsl2Strong) {
+    if (capabilities?.currentPlatform === "native-windows") {
+      const distro = execution.wsl_distro ?? capabilities?.usableWslDistro ?? null;
+      return [`✓ Reviewers run inside WSL (${typeof distro === "string" && distro ? distro : "<distro>"}).`];
+    }
+    return ["✓ Reviewers run with full protection (bubblewrap)."];
+  }
+  if (execution.runtime_mode === RUNTIME_MODE_IDS.linuxStrong) {
+    return ["✓ Reviewers run with full protection (bubblewrap)."];
+  }
+  if (execution.runtime_mode === RUNTIME_MODE_IDS.windowsCompatibility) {
+    return [
+      "✓ Reviewers run on Windows: each one works on a temporary copy of your\n" +
+      "  project, so your files stay safe."
+    ];
+  }
+  return [];
+}
+
+function distroFromReason(reason) {
+  const text = String(reason || "");
+  const patterns = [
+    /bubblewrap_not_installed_in_distro:([^;:)]+)/,
+    /bubblewrap_(?:sandbox_)?unusable_in_distro:([^;:)]+)/,
+    /node_missing_in_distro:([^;:)]+)/,
+    /node_unusable_in_distro:([^;:)]+)/,
+    /wsl1_only_no_usable_wsl2_distro:\s*([^;(]+)/
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1] && match[1].trim()) return match[1].trim();
+  }
+  return null;
+}
+
+function wslUnavailableReason(capabilities) {
+  return capabilities?.modes?.find(entry => entry?.id === RUNTIME_MODE_IDS.wsl2Strong)?.reason || "";
+}
+
+export function isWslNotInstalled(capabilities) {
+  return wslUnavailableReason(capabilities) === "wsl_not_installed";
+}
+
+export function formatWslUnavailable(capabilities) {
+  const reason = wslUnavailableReason(capabilities);
+  if (!reason || reason === "wsl_not_installed") return null;
+  const distro = distroFromReason(reason) || "<distro>";
+  if (/bubblewrap_not_installed_in_distro/.test(reason)) {
+    return `ℹ WSL2 found but not usable: bubblewrap is not installed inside ${distro}\n  (fix: run "sudo apt install bubblewrap" in ${distro}, then ap setup again).`;
+  }
+  if (/bubblewrap_(?:sandbox_)?unusable_in_distro/.test(reason)) {
+    return `ℹ WSL2 found but not usable: bubblewrap is not working inside ${distro}\n  (fix: run "sudo apt install --reinstall bubblewrap" in ${distro}, then ap setup again).`;
+  }
+  if (/node_missing_in_distro/.test(reason)) {
+    return `ℹ WSL2 found but not usable: Node.js is not installed inside ${distro}\n  (fix: install Node.js inside ${distro}, then ap setup again).`;
+  }
+  if (/node_unusable_in_distro|malformed_node_output/.test(reason)) {
+    return `ℹ WSL2 found but not usable: Node.js is not working inside ${distro}\n  (fix: reinstall Node.js inside ${distro}, then ap setup again).`;
+  }
+  if (/wsl1/i.test(reason)) {
+    return `ℹ WSL found but it is WSL1; reviewers need WSL2 (fix: wsl --set-version ${distro} 2).`;
+  }
+  if (/no_distro_installed/.test(reason)) {
+    return "ℹ WSL2 found but not usable: no Linux distribution is installed in WSL\n  (fix: install one with \"wsl --install -d Ubuntu\", then ap setup again).";
+  }
+  if (/timed_out/.test(reason)) {
+    return "ℹ WSL2 found but not usable: the check timed out (fix: run ap setup again).";
+  }
+  return `ℹ WSL2 found but not usable (${reason}).`;
+}
+
+function plainSavedUnavailableReason({savedExecution, capabilities, framework, classification}) {
+  if (classification?.status === "invalid") {
+    return `the saved value is invalid (${classification.reason})`;
+  }
+  if (/Saved WSL distro/.test(classification?.reason || "")) {
+    const currentDistro =
+      capabilities?.modes?.find(entry => entry?.id === RUNTIME_MODE_IDS.wsl2Strong)?.distro ??
+      capabilities?.usableWslDistro ??
+      null;
+    return `the WSL distribution '${String(savedExecution?.wsl_distro)}' is no longer available${
+      typeof currentDistro === "string" && currentDistro ? ` (found '${currentDistro}')` : ""
+    }`;
+  }
+  const savedMode = capabilities?.modes?.find(entry => entry?.id === savedExecution?.runtime_mode);
+  if (!savedMode) return "it is not recognised on this machine";
+  if (
+    savedMode.available === true &&
+    Array.isArray(savedMode.supportedFrameworks) &&
+    !savedMode.supportedFrameworks.includes(framework)
+  ) {
+    return `it no longer supports framework '${String(framework)}'`;
+  }
+  const reason = savedMode.reason || "";
+  if (reason === "wsl_not_installed") return "WSL is not installed";
+  if (/no_distro_installed/.test(reason)) return "no Linux distribution is installed in WSL";
+  if (/wsl1/i.test(reason)) return "WSL1 is not supported; reviewers need WSL2";
+  if (/bubblewrap_not_installed/.test(reason)) return "bubblewrap is not installed inside WSL";
+  if (/bubblewrap/.test(reason)) return "bubblewrap is not working inside WSL";
+  if (/node_missing/.test(reason)) return "Node.js is not installed inside WSL";
+  if (/node_unusable|malformed_node/.test(reason)) return "Node.js is not working inside WSL";
+  if (/not_applicable_current_platform_is_native_linux/.test(reason)) return "Windows runtime modes do not apply on Linux";
+  if (/not_applicable_current_platform_is_native_windows/.test(reason)) return "it is not available on Windows";
+  if (/not_applicable_current_platform_is_wsl2/.test(reason)) return "it is not available inside WSL2";
+  return `it is no longer available (${reason || "unknown reason"})`;
 }
 
 function isStrongModeId(modeId) {
@@ -166,20 +275,7 @@ export function resolveRuntimeExecution({capabilities, framework, savedExecution
       };
     }
     const execution = buildExecutionConfig(userChoiceId, capabilities);
-    const messages = [];
-    if (userChoiceId === RUNTIME_MODE_IDS.wsl2Strong) {
-      if (capabilities?.currentPlatform === "native-windows") {
-        messages.push(`Selected WSL2 Strong (Recommended) — OS-enforced bubblewrap containment via distro '${execution.wsl_distro}'.`);
-      } else {
-        messages.push("Selected wsl2-strong — read-only roles use OS-enforced bubblewrap containment.");
-      }
-    } else if (userChoiceId === RUNTIME_MODE_IDS.linuxStrong) {
-      messages.push("Selected linux-strong — read-only roles use OS-enforced bubblewrap containment.");
-    } else {
-      messages.push("Selected Windows Compatibility — SpecKit-and-standalone disposable-copy isolation. This is not OS-enforced containment.");
-      messages.push("Warning: Windows Compatibility is weaker and not OS-enforced containment.");
-    }
-    return {status: "selected", execution, selectable, messages};
+    return {status: "selected", execution, selectable, messages: formatRuntimeResult(execution, capabilities)};
   }
 
   const classification = classifySavedRuntimeExecution({savedExecution, capabilities, framework});
@@ -189,9 +285,7 @@ export function resolveRuntimeExecution({capabilities, framework, savedExecution
       status: "preserved",
       execution,
       selectable,
-      messages: [
-        `Preserving saved runtime mode '${savedExecution.runtime_mode}' (still available for framework '${String(framework)}').`
-      ]
+      messages: formatRuntimeResult(execution, capabilities)
     };
   }
 
@@ -202,47 +296,25 @@ export function resolveRuntimeExecution({capabilities, framework, savedExecution
     if (selectable.length === 1 && isStrongModeId(selectable[0].id)) {
       const only = selectable[0];
       const execution = buildExecutionConfig(only.id, capabilities);
-      const messages = [];
-      if (only.id === RUNTIME_MODE_IDS.wsl2Strong) {
-        if (capabilities?.currentPlatform === "native-windows") {
-          messages.push(`Selected WSL2 Strong (Recommended) — OS-enforced bubblewrap containment via distro '${execution.wsl_distro}'.`);
-        } else {
-          messages.push("Selected wsl2-strong — read-only roles use OS-enforced bubblewrap containment.");
-        }
-      } else {
-        messages.push("Selected linux-strong — read-only roles use OS-enforced bubblewrap containment.");
-      }
-      return {status: "auto", execution, selectable, messages};
+      return {status: "auto", execution, selectable, messages: formatRuntimeResult(execution, capabilities)};
     }
     const messages = [];
-    if (capabilities?.currentPlatform === "native-windows") {
-      if (wslStrong && wslStrong.available !== true) {
-        messages.push(`WSL2 Strong is unavailable: ${wslStrong.reason || "unavailable"}.`);
-      }
-      messages.push("Runtime execution mode — choose one:");
-      for (const mode of selectable) {
-        messages.push(`- ${formatRuntimeModeLabel(mode, capabilities)}`);
-      }
-      messages.push("WSL2 Strong (Recommended) uses OS-enforced bubblewrap containment.");
-      messages.push("Windows Compatibility is SpecKit-and-standalone disposable-copy isolation. This is not OS-enforced containment.");
+    if (capabilities?.currentPlatform === "native-windows" && selectable.length === 1) {
+      const reason = formatWslUnavailable(capabilities);
+      if (reason) messages.push(reason);
     }
     return {status: "need-choice", selectable, messages};
   }
 
   // Invalid or unavailable saved selection: explicit choice required, no execution.
   const messages = [];
-  messages.push(`Saved runtime mode is ${classification.status}: ${classification.reason} Please choose a valid mode.`);
-  if (capabilities?.currentPlatform === "native-windows") {
-    if (wslStrong && wslStrong.available !== true) {
-      messages.push(`WSL2 Strong is unavailable: ${wslStrong.reason || "unavailable"}.`);
-    }
-    messages.push("Runtime execution mode — choose one:");
-    for (const mode of getSelectableRuntimeModes(capabilities, framework)) {
-      messages.push(`- ${formatRuntimeModeLabel(mode, capabilities)}`);
-    }
-    messages.push("WSL2 Strong (Recommended) uses OS-enforced bubblewrap containment.");
-    messages.push("Windows Compatibility is SpecKit-and-standalone disposable-copy isolation. This is not OS-enforced containment.");
-    messages.push("Warning: never silently switches between Strong and Compatibility modes.");
+  messages.push(
+    `ℹ The saved setting (${savedExecution?.runtime_mode}) no longer works here: ` +
+    `${plainSavedUnavailableReason({savedExecution, capabilities, framework, classification})}.`
+  );
+  if (capabilities?.currentPlatform === "native-windows" && selectable.length === 1) {
+    const reason = formatWslUnavailable(capabilities);
+    if (reason) messages.push(reason);
   }
   return {status: "need-choice", selectable, messages};
 }

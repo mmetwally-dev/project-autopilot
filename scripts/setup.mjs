@@ -33,7 +33,8 @@ import {
   isRoleOnlyScope,
   preserveExecutionForRoleScope,
   resolveRuntimeExecution,
-  formatRuntimeModeLabel
+  formatRuntimeModeLabel,
+  isWslNotInstalled
 } from "./runtime-mode-selection.mjs";
 import { detect as detectSpecKit } from "../adapters/speckit.mjs";
 import { detect as detectGsd } from "../adapters/gsd.mjs";
@@ -822,11 +823,11 @@ function planningFrameworkOptions(
   const options = [
     {
       id: "speckit",
-      label: "SpecKit"
+      label: "SpecKit — use this project's SpecKit files (.specify/, specs/*/tasks.md);\n   Autopilot implements, reviews and tests the tasks"
     },
     {
       id: "gsd",
-      label: "GSD"
+      label: "GSD — use this project's .planning/ phases (not yet reviewed in this version)"
     }
   ];
 
@@ -847,16 +848,38 @@ function planningFrameworkOptions(
 // selectable, even when SpecKit/GSD is detected: a project may carry a
 // framework's files and still want Autopilot's own plan-per-mission flow.
 // Detected frameworks stay first, so the default pick is unchanged.
+function detectedFrameworkNames(detectedFrameworks) {
+  const names = [];
+  if (detectedFrameworks.includes("speckit")) names.push("SpecKit");
+  if (detectedFrameworks.includes("gsd")) names.push("GSD");
+  return names;
+}
+
+function standaloneChoiceLabel(detectedFrameworks) {
+  const names = detectedFrameworkNames(detectedFrameworks);
+  if (names.length) {
+    return `Standalone — ignore ${names.join(" and ")}; Autopilot writes PLAN.md + TASKS.md per mission\n   in .autopilot/missions/<mission>/`;
+  }
+  return "Standalone — Autopilot writes the plan itself: for each mission it creates\n   PLAN.md (the plan) and TASKS.md (the task list) in .autopilot/missions/<mission>/";
+}
+
 function frameworkChoicesFor(currentFramework, detectedFrameworks) {
   const choices = planningFrameworkOptions(currentFramework)
     .filter(x => detectedFrameworks.includes(x.id));
   choices.push({
     id: "standalone",
-    label: choices.length
-      ? "Standalone (ignore the detected framework)"
-      : "Continue without a planning framework"
+    label: standaloneChoiceLabel(detectedFrameworks)
   });
   return choices;
+}
+
+function frameworkAvailabilityLines(detectedFrameworks) {
+  const stateFor = id => detectedFrameworks.includes(id) ? "available" : "not detected";
+  const symbolFor = id => detectedFrameworks.includes(id) ? "✓" : "·";
+  return [
+    `${symbolFor("speckit")} SpecKit: ${stateFor("speckit")}`,
+    `${symbolFor("gsd")} GSD: ${stateFor("gsd")}`
+  ];
 }
 
 function detectPlanningFrameworks(repo) {
@@ -880,10 +903,6 @@ function detectPlanningFrameworks(repo) {
 // Platform the network question is decided for (single line so tests can pin it in a disposable copy).
 const NETWORK_PLATFORM = process.platform;
 
-const COMPAT_WARNING =
-  "⚠ Windows Compatibility is weaker: reviewers work on a throwaway copy,\n" +
-  "  not OS-enforced containment. SpecKit and standalone projects only.";
-
 async function networkSetting(current, runtimeMode) {
   let networkIsolation =
     current?.gates?.network_isolation ??
@@ -891,12 +910,11 @@ async function networkSetting(current, runtimeMode) {
 
   if (NETWORK_PLATFORM === "win32") {
     if (runtimeMode === RUNTIME_MODE_IDS.wsl2Strong) {
-      console.log("✓ Tests (gate) will run without network access inside WSL.");
-      console.log("  Change later: tests.gate_network in .autopilot/config.json");
+      console.log("✓ Tests run without internet inside WSL. (Change later: tests.gate_network)");
       return true;
     }
     if (runtimeMode === RUNTIME_MODE_IDS.windowsCompatibility) {
-      console.log("✓ Tests (gate) will run with network access (Windows cannot isolate them).");
+      console.log("✓ Tests run with internet access (Windows cannot block it).");
       console.log("  Change later: tests.gate_network in .autopilot/config.json");
       return false;
     }
@@ -1021,12 +1039,9 @@ async function printExecutionEnvironmentBlock() {
       detectedFrameworks = detectPlanningFrameworks(repo);
 
       console.log("\nFramework availability:");
-      console.log(
-        `✓ SpecKit: ${detectedFrameworks.includes("speckit") ? "available" : "not detected"}`
-      );
-      console.log(
-        `· GSD: ${detectedFrameworks.includes("gsd") ? "available" : "not detected"}`
-      );
+      for (const line of frameworkAvailabilityLines(detectedFrameworks)) {
+        console.log(line);
+      }
       // Print-only: displays install commands, must never execute the command it displays.
       console.log(formatPlaywrightStatusBlock(playwrightRuntime));
       await printExecutionEnvironmentBlock();
@@ -1095,12 +1110,9 @@ async function printExecutionEnvironmentBlock() {
       detectedFrameworks = detectPlanningFrameworks(repo);
 
       console.log("\nFramework availability:");
-      console.log(
-        `✓ SpecKit: ${detectedFrameworks.includes("speckit") ? "available" : "not detected"}`
-      );
-      console.log(
-        `· GSD: ${detectedFrameworks.includes("gsd") ? "available" : "not detected"}`
-      );
+      for (const line of frameworkAvailabilityLines(detectedFrameworks)) {
+        console.log(line);
+      }
       // Print-only: displays install commands, must never execute the command it displays.
       console.log(formatPlaywrightStatusBlock(playwrightRuntime));
       await printExecutionEnvironmentBlock();
@@ -1115,9 +1127,9 @@ async function printExecutionEnvironmentBlock() {
         labels,
         fallback
       );
+      const pickedIndex = labels.indexOf(picked);
       framework =
-        frameworkChoices.find(x => x.label === picked)?.id ||
-        frameworkChoices[fallback].id;
+        frameworkChoices[pickedIndex >= 0 ? pickedIndex : fallback].id;
     }
 
     let roles = {
@@ -1566,9 +1578,9 @@ async function printExecutionEnvironmentBlock() {
         labels,
         fallback
       );
+      const pickedIndex = labels.indexOf(picked);
       framework =
-        frameworkChoices.find(x => x.label === picked)?.id ||
-        frameworkChoices[fallback].id;
+        frameworkChoices[pickedIndex >= 0 ? pickedIndex : fallback].id;
     }
 
     if (!framework) {
@@ -1684,15 +1696,13 @@ async function printExecutionEnvironmentBlock() {
           const recommended = runtimeCapabilities.recommendedMode;
           const recommendedIndex = selectable.findIndex(mode => mode.id === recommended);
           if (recommendedIndex >= 0) fallback = recommendedIndex;
-          console.log("\nRuntime execution mode:");
-          console.log("1) WSL2 Strong (Recommended) — OS-enforced bubblewrap containment.");
-          console.log("   Store the discovered usable WSL distro.");
-          console.log("2) Windows Compatibility — SpecKit-and-standalone disposable-copy isolation.");
-          console.log("   This is not OS-enforced containment.");
-          const picked = await choose("Runtime execution mode — choose one", labels, fallback);
-          const pickedMode =
-            selectable.find(mode => formatRuntimeModeLabel(mode, runtimeCapabilities) === picked) ||
-            selectable[fallback];
+          const picked = await choose(
+            "Where should the reviewers run?\n(The reviewers must not be able to change your files.)",
+            labels,
+            fallback
+          );
+          const pickedIndex = labels.indexOf(picked);
+          const pickedMode = selectable[pickedIndex >= 0 ? pickedIndex : fallback];
           const chosen = resolveRuntimeExecution({
             capabilities: runtimeCapabilities,
             framework,
@@ -1710,53 +1720,33 @@ async function printExecutionEnvironmentBlock() {
               console.log(message);
             }
           }
-          if (chosen.execution?.runtime_mode === RUNTIME_MODE_IDS.windowsCompatibility) {
-            console.log(COMPAT_WARNING);
-          }
           execution = chosen.execution;
         } else if (selectable.length === 1) {
           const only = selectable[0];
-          if (only.id === RUNTIME_MODE_IDS.windowsCompatibility) {
-            console.log(COMPAT_WARNING);
-            const chosen = resolveRuntimeExecution({
-              capabilities: runtimeCapabilities,
-              framework,
-              savedExecution,
-              userChoiceId: only.id
-            });
-            if (chosen.status === "error") {
-              console.error(`\n${chosen.error}`);
-              process.exitCode = 4;
-              return;
-            }
-            if (chosen.messages?.length) {
-              console.log("");
-              for (const message of chosen.messages) {
-                console.log(message);
-              }
-            }
-            execution = chosen.execution;
-          } else {
-            console.log(`✓ Runtime: ${only.id} (OS-enforced bubblewrap containment) — the only usable mode here.`);
-            const chosen = resolveRuntimeExecution({
-              capabilities: runtimeCapabilities,
-              framework,
-              savedExecution,
-              userChoiceId: only.id
-            });
-            if (chosen.status === "error") {
-              console.error(`\n${chosen.error}`);
-              process.exitCode = 4;
-              return;
-            }
-            if (chosen.messages?.length) {
-              console.log("");
-              for (const message of chosen.messages) {
-                console.log(message);
-              }
-            }
-            execution = chosen.execution;
+          const chosen = resolveRuntimeExecution({
+            capabilities: runtimeCapabilities,
+            framework,
+            savedExecution,
+            userChoiceId: only.id
+          });
+          if (chosen.status === "error") {
+            console.error(`\n${chosen.error}`);
+            process.exitCode = 4;
+            return;
           }
+          if (chosen.messages?.length) {
+            console.log("");
+            for (const message of chosen.messages) {
+              console.log(message);
+            }
+          }
+          if (
+            only.id === RUNTIME_MODE_IDS.windowsCompatibility &&
+            isWslNotInstalled(runtimeCapabilities)
+          ) {
+            console.log("  For full protection, install WSL2 and run ap setup again.");
+          }
+          execution = chosen.execution;
         } else {
           console.error("\nNo runtime mode is available. Configuration not saved.");
           process.exitCode = 4;

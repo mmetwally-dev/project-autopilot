@@ -20,8 +20,18 @@ assert.match(
 // .length) { … standalone … }` pin went stale with that refactor.
 assert.match(
   setup,
-  /function\s+frameworkChoicesFor\s*\([\s\S]*?choices\.push\(\s*\{\s*id:\s*["']standalone["'][\s\S]*?["']Continue without a planning framework["']/,
+  /function\s+frameworkChoicesFor\s*\([\s\S]*?choices\.push\(\s*\{\s*id:\s*["']standalone["'][\s\S]*?standaloneChoiceLabel\s*\(/,
   "missing framework artifacts must retain the non-failing standalone choice"
+);
+assert.match(
+  setup,
+  /Standalone — Autopilot writes the plan itself/,
+  "the standalone choice must explain what Autopilot writes"
+);
+assert.match(
+  setup,
+  /Standalone — ignore [\s\S]*?Autopilot writes PLAN\.md \+ TASKS\.md per mission/,
+  "the standalone choice must name the detected framework it ignores"
 );
 assert.match(
   setup,
