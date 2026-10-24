@@ -2539,6 +2539,12 @@ function planningAdapter(c){
   if(!hits.length)return null;
   die("Multiple planning frameworks detected; choose one in config.");
 }
+// Backlog #4: GSD is hidden from setup/config until it is reviewed, but a
+// saved gsd config keeps working. Warn once when a run starts; never block.
+function warnIfGsdFramework(c){
+  if(c?.project?.planning_framework!=="gsd") return;
+  console.log("⚠ GSD is not yet reviewed in this version; Standalone and SpecKit are the supported frameworks.");
+}
 // Backlog #1: every opencode model a role launch can use (primary plus
 // opencode fallbacks) must exist in the sandbox's shared catalog. The cache
 // refreshes itself before the relay launches; this is the preflight view.
@@ -10530,6 +10536,7 @@ async function main(){
   if(command==="plan"||command==="spec")return runSpec(c,s);
   if(command==="review")return reviewPlanCommand(c,s);
   if(command==="implement"||command==="run"||command==="resume"||command==="full") {
+    warnIfGsdFramework(c);
     // Owner PID guard (mission 041 task 1.2): before ANY state mutation,
     // refuse when a verified-live owner PID file exists, else claim it.
     let cur=null;

@@ -249,33 +249,51 @@ export async function detectBubblewrapCapability({platformKind, spawn = nodeSpaw
  * metadata) — it is a throwaway repository copy that protects against
  * accidental/relative-path writes, not a sandbox.
  *
- * The Native Windows mode stays "partial", never "available": only SpecKit
- * and standalone have this compatibility path. GSD still fails closed
- * with READ_ONLY_CONTAINMENT_UNAVAILABLE on Native
- * Windows. This summary makes no claim at all about browser/Playwright
+ * The Native Windows mode stays "partial", never "available" on Windows
+ * itself: only SpecKit and standalone have the disposable-copy compatibility
+ * path. When a usable WSL2 distribution is present the caller may pass
+ * `wsl2Usable: true`; then reviewers can run with full protection inside
+ * WSL. GSD still fails closed with READ_ONLY_CONTAINMENT_UNAVAILABLE on
+ * Native Windows. This summary makes no claim at all about browser/Playwright
  * readiness — that is a separate concern and is not provisioned by this
  * path.
  */
-export function reviewerModeSummary({platformKind, bubblewrap}) {
+export function reviewerModeSummary({platformKind, bubblewrap, wsl2Usable = false}) {
   if (platformKind === PLATFORM_KINDS.nativeWindows) {
+    if (wsl2Usable) {
+      return {mode: "available", detail: "Reviewers can run with full protection inside WSL"};
+    }
     return {
       mode: "partial",
-      detail: "SpecKit and standalone Plan Reviewer, Code Reviewer, and Verifier: available via disposable-copy compatibility isolation (not OS-enforced containment). GSD workflows: unavailable — WSL/Linux bubblewrap is required for their read-only roles."
+      detail: "Reviewers will work on a temporary copy of your project (no full protection on Windows without WSL2)"
     };
   }
   if (platformKind === PLATFORM_KINDS.wsl1) {
-    return {mode: "unavailable", detail: "WSL1 reviewer containment is unsupported"};
+    return {mode: "unavailable", detail: "Reviewers cannot run: WSL1 reviewer containment is unsupported"};
   }
   if (bubblewrap?.available) {
-    return {mode: "available", detail: "filesystem containment available"};
+    return {mode: "available", detail: "Reviewers can run with full protection here"};
   }
-  return {mode: "unavailable", detail: "bubblewrap is required"};
+  switch (bubblewrap?.status) {
+    case BUBBLEWRAP_STATUS.missing:
+      return {mode: "unavailable", detail: "Reviewers cannot run: bubblewrap is missing (fix: sudo apt install bubblewrap)"};
+    case BUBBLEWRAP_STATUS.broken:
+      return {mode: "unavailable", detail: "Reviewers cannot run: bubblewrap is installed but not usable (fix: sudo apt install --reinstall bubblewrap)"};
+    case BUBBLEWRAP_STATUS.timeout:
+      return {mode: "unavailable", detail: "Reviewers cannot run: the bubblewrap check timed out"};
+    case BUBBLEWRAP_STATUS.error:
+      return {mode: "unavailable", detail: "Reviewers cannot run: the bubblewrap check failed unexpectedly"};
+    case BUBBLEWRAP_STATUS.unsupportedPlatform:
+      return {mode: "unavailable", detail: "Reviewers cannot run: full protection needs WSL2 or Linux with bubblewrap"};
+    default:
+      return {mode: "unavailable", detail: "Reviewers cannot run: bubblewrap is required for full protection"};
+  }
 }
 
 export async function detectPlatformCapabilities(overrides = {}) {
   const platformKind = detectPlatformKind(overrides);
   const bubblewrap = await detectBubblewrapCapability({platformKind, ...overrides});
-  const reviewer = reviewerModeSummary({platformKind, bubblewrap});
+  const reviewer = reviewerModeSummary({platformKind, bubblewrap, wsl2Usable: overrides.wsl2Usable === true});
   return {platformKind, bubblewrap, reviewer};
 }
 
@@ -316,18 +334,17 @@ export function bubblewrapLabel(bubblewrap) {
 export function formatExecutionEnvironmentBlock(capabilities) {
   const platformKnown = capabilities.platformKind !== PLATFORM_KINDS.other;
   const bubblewrapAvailable = capabilities.bubblewrap?.status === BUBBLEWRAP_STATUS.available;
-  // "available" and "partial" details are already self-describing (partial
-  // spells out exactly which role(s) work and which don't); only the
-  // "unavailable" case needs the generic prefix.
-  const reviewerAvailable = capabilities.reviewer.mode === "available" || capabilities.reviewer.mode === "partial";
-  const reviewerLine = reviewerAvailable
-    ? capabilities.reviewer.detail
-    : `unavailable — ${capabilities.reviewer.detail}`;
+  // ✓ full protection, · temporary copy, ✗ reviewers cannot run. The detail
+  // is already a complete plain sentence, so no generic prefix is added.
+  const reviewerMarker =
+    capabilities.reviewer.mode === "available" ? "✓"
+      : capabilities.reviewer.mode === "partial" ? "·"
+        : "✗";
   const lines = [
     "\nExecution environment:",
     `${platformKnown ? "✓" : "·"} Platform: ${platformKindLabel(capabilities.platformKind)}`,
     `${bubblewrapAvailable ? "✓" : "·"} Bubblewrap: ${bubblewrapLabel(capabilities.bubblewrap)}`,
-    `${reviewerAvailable ? "✓" : "·"} Current reviewer mode: ${reviewerLine}`
+    `${reviewerMarker} ${capabilities.reviewer.detail}`
   ];
   return lines.join("\n");
 }

@@ -41,7 +41,7 @@ import { detect as detectGsd } from "../adapters/gsd.mjs";
 import { detectTestCommand, resolveGatesCommands } from "./detect-test-command.mjs";
 import { discoverPlaywrightRuntime } from "./playwright-runtime.mjs";
 import { formatPlaywrightStatusBlock } from "./playwright-status-block.mjs";
-import { detectPlatformCapabilities, formatExecutionEnvironmentBlock } from "./platform-capabilities.mjs";
+import { PLATFORM_KINDS, detectPlatformCapabilities, detectPlatformKind, formatExecutionEnvironmentBlock } from "./platform-capabilities.mjs";
 import {
   addFallback,
   applyFallbacks,
@@ -928,8 +928,10 @@ function printCurrentSummary(current) {
   });
 
   if (current.project?.planning_framework) {
+    const framework = current.project.planning_framework;
     console.log(
-      `✓ planning: ${current.project.planning_framework}`
+      `✓ planning: ${framework}` +
+      `${framework === "gsd" ? " (not yet reviewed)" : ""}`
     );
   }
 
@@ -991,8 +993,20 @@ function standaloneChoiceLabel(detectedFrameworks) {
 }
 
 function frameworkChoicesFor(currentFramework, detectedFrameworks) {
-  const choices = planningFrameworkOptions(currentFramework)
+  // GSD is hidden until it has been reviewed (backlog #4): the option stays
+  // in planningFrameworkOptions() so its code is kept, but it is never
+  // offered as a new choice. A config that already saved gsd keeps it as the
+  // current value (and can keep it by pressing Enter) until the operator
+  // chooses another framework.
+  const choices = planningFrameworkOptions()
+    .filter(x => x.id !== "gsd")
     .filter(x => detectedFrameworks.includes(x.id));
+  if (currentFramework === "gsd") {
+    choices.unshift({
+      id: "gsd",
+      label: "GSD — current value (not yet reviewed); choose another framework to change it"
+    });
+  }
   choices.push({
     id: "standalone",
     label: standaloneChoiceLabel(detectedFrameworks)
@@ -1002,7 +1016,7 @@ function frameworkChoicesFor(currentFramework, detectedFrameworks) {
 
 function frameworkPickedLine(frameworkId) {
   if (frameworkId === "speckit") return "✓ Planning: SpecKit";
-  if (frameworkId === "gsd") return "✓ Planning: GSD";
+  if (frameworkId === "gsd") return "✓ Planning: GSD (not yet reviewed)";
   return "✓ Planning: Standalone — PLAN.md + TASKS.md per mission in .autopilot/missions/<mission>/";
 }
 
@@ -1010,8 +1024,11 @@ function frameworkAvailabilityLines(detectedFrameworks) {
   const stateFor = id => detectedFrameworks.includes(id) ? "available" : "not detected";
   const symbolFor = id => detectedFrameworks.includes(id) ? "✓" : "·";
   return [
+    "✓ Standalone: built in — Autopilot writes the plan itself (PLAN.md + TASKS.md per mission)",
     `${symbolFor("speckit")} SpecKit: ${stateFor("speckit")}`,
-    `${symbolFor("gsd")} GSD: ${stateFor("gsd")}`
+    detectedFrameworks.includes("gsd")
+      ? "· GSD: found (.planning/) — support comes in a future version"
+      : "· GSD: not detected"
   ];
 }
 
@@ -1088,8 +1105,27 @@ async function networkSetting(current, runtimeMode) {
   return networkIsolation;
 }
 
-async function printExecutionEnvironmentBlock() {
-  console.log(formatExecutionEnvironmentBlock(await detectPlatformCapabilities()));
+// The start screen, shared by the first-run wizard and `ap config --edit`
+// (backlog #4): framework availability (Standalone first), Playwright in its
+// own section, then the execution environment. Both paths must print the
+// same block.
+async function printStartScreen(detectedFrameworks) {
+  console.log("\nFramework availability:");
+  for (const line of frameworkAvailabilityLines(detectedFrameworks)) {
+    console.log(line);
+  }
+
+  console.log("\nBrowser checks (Playwright):");
+  // Print-only: displays install commands, must never execute the command it displays.
+  console.log(formatPlaywrightStatusBlock(playwrightRuntime));
+
+  let wsl2Usable = false;
+  if (detectPlatformKind() === PLATFORM_KINDS.nativeWindows) {
+    const runtimeCapabilities = await detectRuntimeModeCapabilities();
+    wsl2Usable =
+      runtimeCapabilities?.modes?.find(mode => mode.id === RUNTIME_MODE_IDS.wsl2Strong)?.available === true;
+  }
+  console.log(formatExecutionEnvironmentBlock(await detectPlatformCapabilities({wsl2Usable})));
 }
 
 
@@ -1171,13 +1207,7 @@ async function printExecutionEnvironmentBlock() {
     if (wizardMode) {
       detectedFrameworks = detectPlanningFrameworks(repo);
 
-      console.log("\nFramework availability:");
-      for (const line of frameworkAvailabilityLines(detectedFrameworks)) {
-        console.log(line);
-      }
-      // Print-only: displays install commands, must never execute the command it displays.
-      console.log(formatPlaywrightStatusBlock(playwrightRuntime));
-      await printExecutionEnvironmentBlock();
+      await printStartScreen(detectedFrameworks);
 
       printCurrentSummary(current);
 
@@ -1195,7 +1225,10 @@ async function printExecutionEnvironmentBlock() {
         }
       }
 
-      frameworkChoices = frameworkChoicesFor("", detectedFrameworks);
+      frameworkChoices = frameworkChoicesFor(
+        current?.project?.planning_framework || "",
+        detectedFrameworks
+      );
 
       await continuePrompt("Press Enter to continue to role configuration...");
     }
@@ -1256,13 +1289,7 @@ async function printExecutionEnvironmentBlock() {
     ) {
       detectedFrameworks = detectPlanningFrameworks(repo);
 
-      console.log("\nFramework availability:");
-      for (const line of frameworkAvailabilityLines(detectedFrameworks)) {
-        console.log(line);
-      }
-      // Print-only: displays install commands, must never execute the command it displays.
-      console.log(formatPlaywrightStatusBlock(playwrightRuntime));
-      await printExecutionEnvironmentBlock();
+      await printStartScreen(detectedFrameworks);
 
       frameworkChoices = frameworkChoicesFor(framework, detectedFrameworks);
 

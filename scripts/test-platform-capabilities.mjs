@@ -376,22 +376,15 @@ check(
     && reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeWindows, bubblewrap: {available: false}}).mode === "partial"
 );
 check(
-  "native windows reviewer detail truthfully names SpecKit and standalone Plan Reviewer, Code Reviewer and Verifier as available via disposable-copy compatibility isolation",
-  /SpecKit and standalone Plan Reviewer, Code Reviewer, and Verifier: available via disposable-copy compatibility isolation/.test(
-    reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeWindows, bubblewrap: {available: false}}).detail
-  )
+  "native windows reviewer detail says reviewers work on a temporary copy without full protection",
+  reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeWindows, bubblewrap: {available: false}}).detail ===
+    "Reviewers will work on a temporary copy of your project (no full protection on Windows without WSL2)"
 );
 check(
-  "native windows reviewer detail explicitly states this is NOT OS-enforced containment",
-  /not OS-enforced containment/.test(
-    reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeWindows, bubblewrap: {available: false}}).detail
-  )
-);
-check(
-  "native windows reviewer detail truthfully names the remaining gap: GSD workflows still require WSL/Linux bubblewrap",
-  /GSD workflows: unavailable — WSL\/Linux bubblewrap is required for their read-only roles/.test(
-    reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeWindows, bubblewrap: {available: false}}).detail
-  )
+  "native windows with a usable WSL2 reports full protection inside WSL",
+  reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeWindows, bubblewrap: {available: false}, wsl2Usable: true}).mode === "available"
+    && reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeWindows, bubblewrap: {available: false}, wsl2Usable: true}).detail ===
+      "Reviewers can run with full protection inside WSL"
 );
 check(
   "native windows reviewer detail never falsely claims Code Reviewer or Verifier is unavailable",
@@ -417,15 +410,39 @@ check(
 );
 check(
   "wsl1 reviewer detail names WSL1 containment as unsupported",
-  reviewerModeSummary({platformKind: PLATFORM_KINDS.wsl1, bubblewrap: {available: false}}).detail === "WSL1 reviewer containment is unsupported"
+  reviewerModeSummary({platformKind: PLATFORM_KINDS.wsl1, bubblewrap: {available: false}}).detail ===
+    "Reviewers cannot run: WSL1 reviewer containment is unsupported"
 );
 check(
-  "wsl2 with working bubblewrap reports filesystem containment available",
+  "wsl2 with working bubblewrap reports full protection",
   reviewerModeSummary({platformKind: PLATFORM_KINDS.wsl2, bubblewrap: {available: true}}).mode === "available"
+    && reviewerModeSummary({platformKind: PLATFORM_KINDS.wsl2, bubblewrap: {available: true}}).detail ===
+      "Reviewers can run with full protection here"
 );
 check(
-  "linux without working bubblewrap reports bubblewrap is required",
-  reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeLinux, bubblewrap: {available: false}}).detail === "bubblewrap is required"
+  "linux without bubblewrap tells the reviewer to install it",
+  reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeLinux, bubblewrap: {status: BUBBLEWRAP_STATUS.missing, available: false}}).detail ===
+    "Reviewers cannot run: bubblewrap is missing (fix: sudo apt install bubblewrap)"
+);
+check(
+  "linux with unusable bubblewrap tells the reviewer to reinstall it",
+  reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeLinux, bubblewrap: {status: BUBBLEWRAP_STATUS.broken, available: false}}).detail ===
+    "Reviewers cannot run: bubblewrap is installed but not usable (fix: sudo apt install --reinstall bubblewrap)"
+);
+check(
+  "a timed-out bubblewrap probe reports that reviewers cannot run",
+  reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeLinux, bubblewrap: {status: BUBBLEWRAP_STATUS.timeout, available: false}}).detail ===
+    "Reviewers cannot run: the bubblewrap check timed out"
+);
+check(
+  "a failed bubblewrap probe reports that reviewers cannot run",
+  reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeLinux, bubblewrap: {status: BUBBLEWRAP_STATUS.error, available: false}}).detail ===
+    "Reviewers cannot run: the bubblewrap check failed unexpectedly"
+);
+check(
+  "an unsupported platform reports that full protection needs WSL2 or Linux",
+  reviewerModeSummary({platformKind: PLATFORM_KINDS.other, bubblewrap: {status: BUBBLEWRAP_STATUS.unsupportedPlatform, available: false}}).detail ===
+    "Reviewers cannot run: full protection needs WSL2 or Linux with bubblewrap"
 );
 
 // ---------------------------------------------------------------------
@@ -440,11 +457,17 @@ check(
   });
   check(
     "windows block header lines match the documented example exactly",
-    windowsBlock.startsWith("\nExecution environment:\n✓ Platform: Native Windows\n· Bubblewrap: not applicable\n✓ Current reviewer mode: SpecKit and standalone Plan Reviewer, Code Reviewer, and Verifier: available via disposable-copy compatibility isolation")
+    windowsBlock === "\nExecution environment:\n✓ Platform: Native Windows\n· Bubblewrap: not applicable\n· Reviewers will work on a temporary copy of your project (no full protection on Windows without WSL2)"
   );
+
+  const windowsWslBlock = formatExecutionEnvironmentBlock({
+    platformKind: PLATFORM_KINDS.nativeWindows,
+    bubblewrap: {status: BUBBLEWRAP_STATUS.notApplicable, available: false, version: null, reason: null},
+    reviewer: reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeWindows, bubblewrap: {available: false}, wsl2Usable: true})
+  });
   check(
-    "windows block does NOT use the generic 'unavailable —' prefix (partial mode is self-describing)",
-    !windowsBlock.includes("Current reviewer mode: unavailable —")
+    "windows with usable WSL2 block reports full protection inside WSL",
+    windowsWslBlock === "\nExecution environment:\n✓ Platform: Native Windows\n· Bubblewrap: not applicable\n✓ Reviewers can run with full protection inside WSL"
   );
 
   const wsl1Block = formatExecutionEnvironmentBlock({
@@ -454,7 +477,7 @@ check(
   });
   check(
     "wsl1 block matches the documented example exactly",
-    wsl1Block === "\nExecution environment:\n✓ Platform: WSL1\n· Bubblewrap: unavailable\n· Current reviewer mode: unavailable — WSL1 reviewer containment is unsupported"
+    wsl1Block === "\nExecution environment:\n✓ Platform: WSL1\n· Bubblewrap: unavailable\n✗ Reviewers cannot run: WSL1 reviewer containment is unsupported"
   );
 
   const wslAvailableBlock = formatExecutionEnvironmentBlock({
@@ -464,17 +487,27 @@ check(
   });
   check(
     "wsl2-with-bubblewrap block matches the documented example shape",
-    wslAvailableBlock === "\nExecution environment:\n✓ Platform: WSL2\n✓ Bubblewrap: available (bubblewrap 0.8.0)\n✓ Current reviewer mode: filesystem containment available"
+    wslAvailableBlock === "\nExecution environment:\n✓ Platform: WSL2\n✓ Bubblewrap: available (bubblewrap 0.8.0)\n✓ Reviewers can run with full protection here"
   );
 
   const nativeLinuxBrokenBlock = formatExecutionEnvironmentBlock({
     platformKind: PLATFORM_KINDS.nativeLinux,
     bubblewrap: {status: BUBBLEWRAP_STATUS.broken, available: false, version: null, reason: "bubblewrap_version_probe_unusable"},
-    reviewer: reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeLinux, bubblewrap: {available: false}})
+    reviewer: reviewerModeSummary({platformKind: PLATFORM_KINDS.nativeLinux, bubblewrap: {status: BUBBLEWRAP_STATUS.broken, available: false}})
   });
   check(
     "native-linux-unusable-bubblewrap block matches the documented example exactly",
-    nativeLinuxBrokenBlock === "\nExecution environment:\n✓ Platform: Native Linux\n· Bubblewrap: detected but not usable\n· Current reviewer mode: unavailable — bubblewrap is required"
+    nativeLinuxBrokenBlock === "\nExecution environment:\n✓ Platform: Native Linux\n· Bubblewrap: detected but not usable\n✗ Reviewers cannot run: bubblewrap is installed but not usable (fix: sudo apt install --reinstall bubblewrap)"
+  );
+
+  const nativeLinuxMissingBlock = formatExecutionEnvironmentBlock({
+    platformKind: PLATFORM_KINDS.wsl2,
+    bubblewrap: {status: BUBBLEWRAP_STATUS.missing, available: false, version: null, reason: "bubblewrap_not_installed"},
+    reviewer: reviewerModeSummary({platformKind: PLATFORM_KINDS.wsl2, bubblewrap: {status: BUBBLEWRAP_STATUS.missing, available: false}})
+  });
+  check(
+    "missing bubblewrap block tells the operator to install it",
+    nativeLinuxMissingBlock === "\nExecution environment:\n✓ Platform: WSL2\n· Bubblewrap: not detected\n✗ Reviewers cannot run: bubblewrap is missing (fix: sudo apt install bubblewrap)"
   );
 
   // PLATFORM_KINDS.other (e.g. macOS) is the one case platformKindLabel()
@@ -484,11 +517,11 @@ check(
   const unknownPlatformBlock = formatExecutionEnvironmentBlock({
     platformKind: PLATFORM_KINDS.other,
     bubblewrap: {status: BUBBLEWRAP_STATUS.unsupportedPlatform, available: false, version: null, reason: null},
-    reviewer: reviewerModeSummary({platformKind: PLATFORM_KINDS.other, bubblewrap: {available: false}})
+    reviewer: reviewerModeSummary({platformKind: PLATFORM_KINDS.other, bubblewrap: {status: BUBBLEWRAP_STATUS.unsupportedPlatform, available: false}})
   });
   check(
     "unknown-platform block marks Platform with \"·\", not left unmarked",
-    unknownPlatformBlock === "\nExecution environment:\n· Platform: Unknown\n· Bubblewrap: unavailable\n· Current reviewer mode: unavailable — bubblewrap is required"
+    unknownPlatformBlock === "\nExecution environment:\n· Platform: Unknown\n· Bubblewrap: unavailable\n✗ Reviewers cannot run: full protection needs WSL2 or Linux with bubblewrap"
   );
 }
 

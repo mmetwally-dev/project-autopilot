@@ -35,8 +35,33 @@ assert.match(
 );
 assert.match(
   setup,
-  /frameworkChoices\s*=\s*frameworkChoicesFor\(\s*["']{2}\s*,\s*detectedFrameworks\s*\)/,
-  "the first-run wizard must build its choices through frameworkChoicesFor()"
+  /frameworkChoices\s*=\s*frameworkChoicesFor\(\s*current\?\.project\?\.planning_framework\s*\|\|\s*["']{2}\s*,\s*detectedFrameworks\s*\)/,
+  "the first-run wizard must build its choices through frameworkChoicesFor(), carrying a saved framework"
+);
+assert.match(
+  setup,
+  /\.filter\(x => x\.id !== "gsd"\)/,
+  "GSD must be filtered out of the framework choices (backlog #4)"
+);
+assert.doesNotMatch(
+  setup,
+  /choices\.push\(\{\s*id:\s*["']gsd["']/,
+  "GSD must never be offered as a new framework choice"
+);
+assert.match(
+  setup,
+  /if \(currentFramework === "gsd"\) \{[\s\S]*?id: "gsd",[\s\S]*?current value \(not yet reviewed\)/,
+  "a saved GSD config keeps its current value, marked not yet reviewed"
+);
+assert.match(
+  setup,
+  /✓ Standalone: built in — Autopilot writes the plan itself \(PLAN\.md \+ TASKS\.md per mission\)/,
+  "framework availability must show the built-in Standalone first"
+);
+assert.match(
+  setup,
+  /· GSD: found \(\.planning\/\) — support comes in a future version/,
+  "a detected .planning/ must be reported as found but not yet supported"
 );
 
 console.log("config/framework separation test passed");

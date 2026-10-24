@@ -63,6 +63,19 @@ function writeV4Config(repo, config) {
   return configPath;
 }
 
+function runApRun({repo, binDir}) {
+  const env = {...process.env, PATH: [binDir, ...systemDirs].join(delimiter), AUTOPILOT_SETUP_FORCE_INTERACTIVE: '1'};
+  return new Promise(resolve => {
+    const child = spawn(process.execPath, [path.join(root, 'scripts', 'autopilot.mjs'), 'run', '--stage', 'implement', '--repo', repo], {cwd: root, env, stdio: ['pipe', 'pipe', 'pipe']});
+    let out = '';
+    child.stdout.on('data', d => { out += d; });
+    child.stderr.on('data', d => { out += d; });
+    const watchdog = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } }, 60000);
+    child.on('close', status => { clearTimeout(watchdog); resolve({status, out}); });
+    child.stdin.end();
+  });
+}
+
 function runSetupEdit({repo, binDir, stdinInput}) {
   const env = {...process.env, PATH: [binDir, ...systemDirs].join(delimiter), AUTOPILOT_SETUP_FORCE_INTERACTIVE: '1'};
   return new Promise(resolve => {
@@ -179,6 +192,7 @@ async function main() {
     // Run setup --edit with scope "All configuration" (option 1), then for each role choose "Keep current" (option 1)
     // Menu flow:
     // 1. Configuration scope: "All configuration" (option 1)
+    // 2. Planning framework: keep the saved GSD value (option 1, current value)
     // 3. For each of 5 roles: "Claude" (option 1) - keep current
     // 4. Gate test command: accept detected (empty)
     // 5. Runtime mode: keep current (option 1)
@@ -187,6 +201,7 @@ async function main() {
     // 8. Save confirmation: "y"
     const stdinInput = [
       '1',  // Configuration scope: All configuration
+      '1',  // Planning framework: keep current GSD (not yet reviewed)
       // Role 1: planner
       '1',  // CLI: claude (keep current)
       '',   // Model: keep current (opus)
@@ -226,6 +241,20 @@ async function main() {
       console.error(r.out.slice(-5000));
       process.exit(1);
     }
+
+    // Start screen (backlog #4), shared by --wizard and --edit.
+    check('edit start screen lists Standalone first', /Framework availability:\n✓ Standalone: built in — Autopilot writes the plan itself/.test(r.out), r.out.slice(0, 2000));
+    check('edit start screen has its own Browser checks (Playwright) section', r.out.includes("\nBrowser checks (Playwright):\n✓ Playwright module:") || r.out.includes("\nBrowser checks (Playwright):\n· Playwright module:"), r.out.slice(0, 2500));
+    const editFrameworkSlice = r.out.slice(r.out.indexOf("Framework availability:"), r.out.indexOf("Browser checks (Playwright):"));
+    check('edit Playwright lines are not under Framework availability', !/Playwright module/.test(editFrameworkSlice), editFrameworkSlice);
+    check('edit start screen uses the plain reviewer line', /[✓·✗] Reviewers (can run|will work|cannot run)/.test(r.out), r.out.slice(0, 2500));
+    check('edit start screen does not use the old reviewer wording', !r.out.includes("Current reviewer mode:") && !r.out.includes("filesystem containment available"), r.out.slice(0, 2500));
+    check('edit shows the saved GSD framework as current and not yet reviewed', r.out.includes("GSD — current value (not yet reviewed)") && r.out.includes("✓ planning: gsd (not yet reviewed)"), r.out.slice(0, 3000));
+
+    const run = await runApRun({repo, binDir});
+    const warning = '⚠ GSD is not yet reviewed in this version; Standalone and SpecKit are the supported frameworks.';
+    check('a run with a saved GSD config prints the GSD warning exactly once', (run.out.split(warning).length - 1) === 1, `status=${run.status}\n${run.out.slice(0, 3000)}`);
+    check('the GSD warning does not block the run before the stage guard', run.out.includes(warning), run.out.slice(0, 3000));
 
     const configPath = path.join(repo, '.autopilot', 'config.json');
     check('config.json exists', fs.existsSync(configPath), configPath);
