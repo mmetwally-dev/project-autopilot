@@ -179,7 +179,6 @@ async function main() {
     // Run setup --edit with scope "All configuration" (option 1), then for each role choose "Keep current" (option 1)
     // Menu flow:
     // 1. Configuration scope: "All configuration" (option 1)
-    // 2. Planning framework: "GSD" (option 2) - keep current
     // 3. For each of 5 roles: "Claude" (option 1) - keep current
     // 4. Gate test command: accept detected (empty)
     // 5. Runtime mode: keep current (option 1)
@@ -188,7 +187,6 @@ async function main() {
     // 8. Save confirmation: "y"
     const stdinInput = [
       '1',  // Configuration scope: All configuration
-      '2',  // Planning framework: GSD (keep current)
       // Role 1: planner
       '1',  // CLI: claude (keep current)
       '',   // Model: keep current (opus)

@@ -10,7 +10,7 @@
 //
 // Interactive cases run with AUTOPILOT_SETUP_FORCE_INTERACTIVE=1, which makes
 // setup read its whole answer block from stdin up front (no readline involved)
-// and answer positionally: scope, planning framework, gates question.
+// and answer positionally: scope, then the gates question.
 // The non-TTY case must NOT set that variable: setup then talks to a piped
 // stdin through readline, answers are written only in response to newly
 // observed prompt output (same driver as test-setup-runtime-mode-selection.mjs)
@@ -36,9 +36,9 @@ const DETECTED_PROMPT = /Gate test command \[npm test\]/;
 const NONE_DETECTED = /No test command detected for this project\./;
 const PROMPT_TAIL = /: $|Press Enter[^\n]*\s$/;
 
-// "3" = Framework / safety, then the (only) planning framework choice.
+// "3" = Framework / safety; a single planning-framework choice is selected
+// without a question.
 const SCOPE_RULE = {pattern: /Configuration scope:/, answer: '3'};
-const FRAMEWORK_RULE = {pattern: /\nPlanning framework\n/, answer: '1'};
 
 let passed = 0;
 let failed = 0;
@@ -265,7 +265,7 @@ const overallStarted = Date.now();
 // 1. Detected command + Enter → the proposal is stored as one command.
 await runCase('detected + Enter', async ({binDir, makeRepo}) => {
   const repo = makeRepo({});
-  const r = await runScripted({repo, binDir, answers: ['3', '1', '']});
+  const r = await runScripted({repo, binDir, answers: ['3', '']});
   const combined = assertCleanRun('detected + Enter', r);
   check('prompts for the detected command', DETECTED_PROMPT.test(combined),
     `prompt missing from output:\n${combined.slice(-2000)}`);
@@ -276,7 +276,7 @@ await runCase('detected + Enter', async ({binDir, makeRepo}) => {
 //    ONE shell string (never split into words).
 await runCase('detected + typed edit', async ({binDir, makeRepo}) => {
   const repo = makeRepo({});
-  const r = await runScripted({repo, binDir, answers: ['3', '1', 'npm run test:ci -- --ci']});
+  const r = await runScripted({repo, binDir, answers: ['3', 'npm run test:ci -- --ci']});
   const combined = assertCleanRun('detected + typed edit', r);
   check('prompts for the detected command', DETECTED_PROMPT.test(combined));
   const commands = readGateCommands(repo);
@@ -286,7 +286,7 @@ await runCase('detected + typed edit', async ({binDir, makeRepo}) => {
 // 3. "-" → keep [].
 await runCase('"-" keeps empty', async ({binDir, makeRepo}) => {
   const repo = makeRepo({});
-  const r = await runScripted({repo, binDir, answers: ['3', '1', '-']});
+  const r = await runScripted({repo, binDir, answers: ['3', '-']});
   const combined = assertCleanRun('"-" keeps empty', r);
   check('still asked', DETECTED_PROMPT.test(combined));
   checkEqual('keeps []', readGateCommands(repo), []);
@@ -297,7 +297,7 @@ await runCase('"-" keeps empty', async ({binDir, makeRepo}) => {
 await runCase('existing non-empty kept without asking', async ({binDir, makeRepo}) => {
   const existing = ['node scripts/test-all.mjs --skip-live'];
   const repo = makeRepo({commands: existing});
-  const r = await runScripted({repo, binDir, answers: ['3', '1', '']});
+  const r = await runScripted({repo, binDir, answers: ['3', '']});
   const combined = assertCleanRun('existing non-empty kept', r);
   check('does not print the gates prompt', !GATES_PROMPT.test(combined),
     `unexpected prompt:\n${combined.slice(-2000)}`);
@@ -308,7 +308,7 @@ await runCase('existing non-empty kept without asking', async ({binDir, makeRepo
 // 5. Existing [] → detect + ask (the spread-order bug made this impossible).
 await runCase('existing [] is asked', async ({binDir, makeRepo}) => {
   const repo = makeRepo({commands: []});
-  const r = await runScripted({repo, binDir, answers: ['3', '1', '']});
+  const r = await runScripted({repo, binDir, answers: ['3', '']});
   const combined = assertCleanRun('existing [] is asked', r);
   check('prompts for the detected command', DETECTED_PROMPT.test(combined),
     `prompt missing from output:\n${combined.slice(-2000)}`);
@@ -318,7 +318,7 @@ await runCase('existing [] is asked', async ({binDir, makeRepo}) => {
 // 6. Nothing detected → still asked; typed command stored; "" or "-" keeps [].
 await runCase('nothing detected + typed command', async ({binDir, makeRepo}) => {
   const repo = makeRepo({detected: false});
-  const r = await runScripted({repo, binDir, answers: ['3', '1', 'pytest -q -k unit']});
+  const r = await runScripted({repo, binDir, answers: ['3', 'pytest -q -k unit']});
   const combined = assertCleanRun('nothing detected', r);
   check('reports that nothing was detected', NONE_DETECTED.test(combined),
     `missing from output:\n${combined.slice(-2000)}`);
@@ -329,7 +329,7 @@ await runCase('nothing detected + typed command', async ({binDir, makeRepo}) => 
 // 7. Commands becoming non-empty print the network-isolation warning exactly once.
 await runCase('warning printed once', async ({binDir, makeRepo}) => {
   const repo = makeRepo({});
-  const r = await runScripted({repo, binDir, answers: ['3', '1', '']});
+  const r = await runScripted({repo, binDir, answers: ['3', '']});
   const combined = assertCleanRun('warning printed once', r);
   const occurrences = combined.split(WARNING).length - 1;
   checkEqual('warning printed exactly once', occurrences, 1);
@@ -338,7 +338,7 @@ await runCase('warning printed once', async ({binDir, makeRepo}) => {
 // 8. Non-TTY stdin: no prompt, no hang, [] kept, hand-edit hint printed.
 await runCase('non-TTY keeps [] and prints the hint', async ({binDir, makeRepo}) => {
   const repo = makeRepo({});
-  const r = await runPiped({repo, binDir, rules: [SCOPE_RULE, FRAMEWORK_RULE], timeoutMs: 15000});
+  const r = await runPiped({repo, binDir, rules: [SCOPE_RULE], timeoutMs: 15000});
   const combined = assertCleanRun('non-TTY', r);
   check('does not print the gates prompt', !GATES_PROMPT.test(combined),
     `setup prompted on a non-TTY stdin:\n${combined.slice(-2000)}`);
@@ -351,7 +351,7 @@ await runCase('non-TTY keeps [] and prints the hint', async ({binDir, makeRepo})
 await runCase('non-TTY keeps an existing value', async ({binDir, makeRepo}) => {
   const existing = ['npm test --workspace=unit'];
   const repo = makeRepo({commands: existing});
-  const r = await runPiped({repo, binDir, rules: [SCOPE_RULE, FRAMEWORK_RULE], timeoutMs: 15000});
+  const r = await runPiped({repo, binDir, rules: [SCOPE_RULE], timeoutMs: 15000});
   const combined = assertCleanRun('non-TTY existing', r);
   check('does not print the gates prompt', !GATES_PROMPT.test(combined),
     `setup prompted on a non-TTY stdin:\n${combined.slice(-2000)}`);

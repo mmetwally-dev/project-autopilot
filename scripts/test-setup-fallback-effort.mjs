@@ -51,7 +51,7 @@ fs.chmodSync(claudeBin, 0o755);
 // roles pick claude and answer No.
 function run(plannerAnswers) {
   const repo = fs.mkdtempSync(path.join(temporary, "repo-"));
-  const answers = ["", ...plannerAnswers, "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "", "y"];
+  const answers = ["", ...plannerAnswers, "1", "1", "1", "1", "1", "1", "1", "1", "1", "", "y"];
   return new Promise(resolve => {
     const env = {...process.env, PATH: [binDir, "/usr/bin", "/bin"].join(":"), AUTOPILOT_SETUP_FORCE_INTERACTIVE: "1"};
     const child = spawn(process.execPath, [path.join(here, "setup.mjs"), "--wizard", "--repo", repo],

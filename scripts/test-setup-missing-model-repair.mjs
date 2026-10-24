@@ -228,10 +228,10 @@ function runScripted({repo, binDir, answers, timeoutMs = 20000}) {
   return proc.done;
 }
 
-// --edit answer prefix: scope, framework, (adapter <default>, Keep-menu) x 5,
-// gate command. `tail` appends the post-validation repair answers.
+// --edit answer prefix: scope, (adapter <default>, Keep-menu) x 5, gate
+// command. `tail` appends the post-validation repair answers.
 function editAnswers(tail = []) {
-  const out = ['1', '1'];
+  const out = ['1'];
   for (let i = 0; i < 5; i++) out.push('', '1');
   out.push('');
   return [...out, ...tail];

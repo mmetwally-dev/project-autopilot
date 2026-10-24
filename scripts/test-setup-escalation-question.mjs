@@ -239,9 +239,10 @@ const ESC_PICK = {cli: 'opencode', model: 'opencode/mimo-v2.6-flash-free'};
 
 const count = (text, re) => (text.match(new RegExp(re.source, 'g')) || []).length;
 
-// --edit "All configuration": scope, framework, (adapter, edit-menu) x 5,
-// then `after` answers (escalation question etc.), then gates.
-const allAnswers = after => ['1', '1', ...['1', '1', '1', '1', '1', '1', '1', '1', '1', '1'], ...after, ''];
+// --edit "All configuration": scope, (adapter, edit-menu) x 5, then `after`
+// answers (escalation question etc.), then gates. The single framework choice
+// (standalone here) is selected without a question.
+const allAnswers = after => ['1', ...['1', '1', '1', '1', '1', '1', '1', '1', '1', '1'], ...after, ''];
 // --edit "One role": scope 2, role number, adapter, edit-menu, `after`.
 const roleAnswers = (roleNo, after) => ['2', String(roleNo), '1', '1', ...after];
 
@@ -270,7 +271,7 @@ await runCase('Yes sets the same model on planner and implementer; one question;
   const gates = out.indexOf('Gate test command');
   check('(e) after the verifier questions', q > 0 && lastRole >= 0 && lastRole < q, `q=${q} verifier=${lastRole}`);
   check('(e) before the gate/runtime/network questions that follow', gates > q, `q=${q} gates=${gates}`);
-  check('(e) edit-mode Planning framework prompt (asked up front) precedes the role questions', out.indexOf('Planning framework') < out.indexOf('Planner CLI'));
+  check('(e) the single framework choice is announced before the role questions', out.indexOf('✓ Planning: Standalone') >= 0 && out.indexOf('✓ Planning: Standalone') < out.indexOf('Planner CLI'));
 });
 
 await runCase('Turn off clears both', async ({binDir, seed}) => {

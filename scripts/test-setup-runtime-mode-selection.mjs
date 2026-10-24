@@ -547,7 +547,7 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
   check("sub fresh WSL2 prints full protection", combined.includes("✓ Reviewers run with full protection (bubblewrap)."), combined.slice(-2000));
   check("sub fresh WSL2 never says choose one", !/choose one/i.test(combined), combined.slice(-2000));
   check("sub fresh WSL2 SpecKit not detected", combined.includes("· SpecKit: not detected") && !combined.includes("✓ SpecKit: not detected"), combined.slice(-2000));
-  check("sub fresh WSL2 standalone label", combined.includes("1) Standalone — Autopilot writes the plan itself: for each mission it creates\n   PLAN.md (the plan) and TASKS.md (the task list) in .autopilot/missions/<mission>/"), combined.slice(-3000));
+  check("sub fresh WSL2 announces the single standalone choice", combined.includes("✓ Planning: Standalone — PLAN.md + TASKS.md per mission in .autopilot/missions/<mission>/") && !combined.includes("Planning framework"), combined.slice(-3000));
   check("sub fresh WSL2 discovers only the fake CLI", /✓ claude/.test(combined) && !/✓ (opencode|codex|agy|cursor-agent)/.test(combined), combined.slice(-2000));
   check("sub fresh WSL2 launches no real CLI", saved !== null && ["planner","plan_reviewer","implementer","code_reviewer","verifier"].every(r => saved.roles[r]?.cli === "claude"), saved?.roles);
 });

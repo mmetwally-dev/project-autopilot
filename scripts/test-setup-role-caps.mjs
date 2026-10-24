@@ -144,7 +144,8 @@ function makeRepo(caps) {
   return repo;
 }
 
-// Scope "3" (Framework / safety), framework "1" (standalone), empty gates answer.
+// Scope "3" (Framework / safety), empty gates answer; the single framework
+// choice (standalone) is selected without a question.
 function runSetup(repo, binDir) {
   const env = {...process.env, PATH: [binDir, ...systemDirs].join(delimiter), AUTOPILOT_SETUP_FORCE_INTERACTIVE: '1'};
   return new Promise(resolve => {
@@ -154,7 +155,7 @@ function runSetup(repo, binDir) {
     child.stderr.on('data', d => { out += d; });
     const watchdog = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } }, 20000);
     child.on('close', status => { clearTimeout(watchdog); resolve({status, out}); });
-    child.stdin.write(['3', '1', ''].map(a => `${a}\n`).join(''));
+    child.stdin.write(['3', ''].map(a => `${a}\n`).join(''));
     child.stdin.end();
   });
 }

@@ -233,11 +233,11 @@ async function runCase(name, fn) {
   }
 }
 
-// --edit answer prefix: scope, framework, (adapter, edit-menu) x 5, gates.
+// --edit answer prefix: scope, (adapter, edit-menu) x 5, gates.
 // `menus` holds the five per-role edit-menu answers; `extra` maps a role
 // index (0-4) to the follow-up answers its edit choice consumes.
 function editAnswers(menus, extra = {}) {
-  const out = ['1', '1'];
+  const out = ['1'];
   const roles = [0, 1, 2, 3, 4];
   for (const i of roles) {
     out.push('1', menus[i] ?? '1');

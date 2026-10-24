@@ -249,15 +249,17 @@ async function runCase(name, fn) {
 
 const overallStarted = Date.now();
 
-// Wizard answer prefix: continue + (adapter, fallback) x 5 + framework +
-// gates. allNo alternates '' and '1' across the five fallback answers so
-// both spellings of No are covered.
-function wizardAnswers(fallbacks) {
-  const out = [''];
+// Wizard answer prefix: continue + (adapter, fallback) x 5 + gates. A re-run
+// over an existing config first answers the "already set up" yes/no. allNo
+// alternates '' and '1' across the five fallback answers so both spellings
+// of No are covered.
+function wizardAnswers(fallbacks, existingConfig = false) {
+  const out = existingConfig ? ['y'] : [];
+  out.push('');
   for (const f of fallbacks) {
     out.push('1', ...f);
   }
-  out.push('1', '');
+  out.push('');
   return out;
 }
 
@@ -305,9 +307,10 @@ async function rerunCase({binDir, makeRepo}) {
   assertCleanRun('re-run first pass', first);
   checkEqual('first pass saves one fallback', readConfig(repo).roles.planner?.fallbacks,
     [{cli: 'claude', model: ''}]);
-  // Second wizard run over the same repo: planner adds codex.
+  // Second wizard run over the same repo: planner adds codex. The existing
+  // config now needs the "run the full setup again?" yes first.
   const second = await runScripted({mode: '--wizard', repo, binDir,
-    answers: wizardAnswers([['2', '2', '1'], ['1'], ['1'], ['1'], ['1']])});
+    answers: wizardAnswers([['2', '2', '1'], ['1'], ['1'], ['1'], ['1']], true)});
   const combined = assertCleanRun('re-run second pass', second);
   check('re-run prompt shows the carried-forward list', CURRENT_LIST.test(combined),
     combined.slice(-2000));
@@ -334,10 +337,10 @@ await runCase('reviewer warning still saves', async ({binDir, makeRepo}) => {
 await runCase('--edit keeps fallbacks without asking', async ({binDir, seed}) => {
   const prior = [{cli: 'claude', model: ''}];
   const repo = seed(baseConfig({fallbacks: {planner: prior}}));
-  // Scope "All configuration", planning framework, one adapter answer per
-  // role, gates command.
+  // Scope "All configuration" (the framework is auto-picked), then the
+  // default CLI and "Keep current fallbacks" for each of the five roles.
   const r = await runScripted({mode: '--edit', repo, binDir,
-    answers: ['1', '1', '1', '1', '1', '1', '1', '']});
+    answers: ['1', ...Array(10).fill(''), '']});
   const combined = assertCleanRun('--edit', r);
   check('no fallback prompt under --edit', !FALLBACK_PROMPT.test(combined),
     combined.slice(-2000));

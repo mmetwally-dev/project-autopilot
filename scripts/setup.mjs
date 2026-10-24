@@ -256,6 +256,142 @@ const valueOrDefault = async (
   return raw;
 };
 
+function modelEntryLabel(item) {
+  return item.label || item.id;
+}
+
+function freeModelRegex(adapterId) {
+  const raw = agents[adapterId]?.free_model_pattern;
+  if (typeof raw === "string" && raw.trim()) {
+    try {
+      return new RegExp(raw, "i");
+    } catch {
+      // Fall through to the generic matcher.
+    }
+  }
+  return /-free$| free$/i;
+}
+
+async function chooseFullModelList(label, meta, options, curIndex) {
+  const picked = await choose(
+    `${label} model (live discovery from ${meta.binary})`,
+    options.map(
+      x => modelEntryLabel(x)
+    ),
+    curIndex
+  );
+
+  return options.find(
+    x => modelEntryLabel(x) === picked
+  ) || options[0];
+}
+
+// Backlog #5: a live catalog longer than 15 models gets a short first menu
+// (default / keep current / free models / search / show all) instead of one
+// 85-line numbered list. Every path returns one of the same catalog items
+// (or the synthetic "Use CLI default" entry), so the saved model id and
+// capabilities are identical to picking that item from the full list.
+async function pickLongModelList(label, meta, current, adapterId, catalog, options, curIndex) {
+  const defaultItem = options[0];
+  const keepModel = current?.model || "";
+  const currentIndex = keepModel
+    ? options.findIndex(x =>
+      x.id === keepModel ||
+      (x.effortModelIds && Object.values(x.effortModelIds).includes(keepModel))
+    )
+    : -1;
+  const freeRegex = freeModelRegex(adapterId);
+  const isFree = item =>
+    freeRegex.test(item.id || "") ||
+    freeRegex.test(item.label || "");
+
+  const entries = [{kind: "item", item: defaultItem}];
+  if (keepModel) {
+    entries.push({
+      kind: "item",
+      item: currentIndex >= 0
+        ? options[currentIndex]
+        : {id: keepModel, label: keepModel, reasoning: [], variants: []},
+      labelOverride: `Keep current: ${keepModel}`
+    });
+  }
+  for (const item of catalog.filter(isFree)) {
+    entries.push({kind: "item", item});
+  }
+  entries.push({kind: "search"});
+  entries.push({kind: "showall"});
+
+  const entryLabel = entry => {
+    if (entry.labelOverride) return entry.labelOverride;
+    if (entry.kind === "search") {
+      return 'Search by name (type part of it, e.g. "opus", "gpt-5", "deepseek")';
+    }
+    if (entry.kind === "showall") return `Show all ${catalog.length} models`;
+    return modelEntryLabel(entry.item);
+  };
+  const defaultIndex = keepModel ? 1 : 0;
+  const showAll = () => chooseFullModelList(label, meta, options, curIndex);
+
+  const search = async initialQuery => {
+    let query = initialQuery;
+    while (true) {
+      if (query === undefined) {
+        if (forceInteractive) console.log("Search: ");
+        query = (await ask("Search: ")).trim();
+      }
+      const needle = query.toLowerCase();
+      const matches = catalog.filter(item =>
+        String(item.id || "").toLowerCase().includes(needle) ||
+        String(item.label || "").toLowerCase().includes(needle)
+      );
+      if (!matches.length) {
+        console.log(`No models match "${query}".`);
+        query = undefined;
+        continue;
+      }
+      console.log(`\nModels matching "${query}":`);
+      matches.forEach((item, i) => console.log(`${i + 1}) ${modelEntryLabel(item)}`));
+      console.log(`${matches.length + 1}) Search again`);
+      console.log(`${matches.length + 2}) Show all ${catalog.length} models`);
+
+      const raw = await ask("Choose [1]: ");
+      const n = Number(raw);
+      if (Number.isInteger(n) && n >= 1 && n <= matches.length) {
+        return {item: matches[n - 1]};
+      }
+      if (n === matches.length + 1) {
+        query = undefined;
+        continue;
+      }
+      if (n === matches.length + 2) return {showAll: true};
+      query = undefined;
+    }
+  };
+
+  while (true) {
+    console.log(`\n${label} model (live discovery from ${meta.binary}, ${catalog.length} models)`);
+    entries.forEach((entry, i) => console.log(`${i + 1}) ${entryLabel(entry)}`));
+
+    const raw = await ask(`Choose [${defaultIndex + 1}]: `);
+    if (!raw) return entries[defaultIndex].item;
+
+    const n = Number(raw);
+    if (Number.isInteger(n) && n >= 1 && n <= entries.length) {
+      const entry = entries[n - 1];
+      if (entry.kind === "showall") return showAll();
+      if (entry.kind === "search") {
+        const result = await search(undefined);
+        return result.showAll ? showAll() : result.item;
+      }
+      return entry.item;
+    }
+
+    // Typing text instead of a number searches with that text directly.
+    const result = await search(raw);
+    return result.showAll ? showAll() : result.item;
+  }
+}
+
 async function pickModelAndCapabilities(
   label,
   meta,
@@ -297,18 +433,9 @@ async function pickModelAndCapabilities(
 
     const curIndex = currentIndex >= 0 ? currentIndex : 0;
 
-    const picked = await choose(
-      `${label} model (live discovery from ${meta.binary})`,
-      options.map(
-        x => x.label || x.id
-      ),
-      curIndex
-    );
-
-    const item =
-      options.find(
-        x => (x.label || x.id) === picked
-      ) || options[0];
+    const item = catalog.length > 15
+      ? await pickLongModelList(label, meta, current, adapterId, catalog, options, curIndex)
+      : await chooseFullModelList(label, meta, options, curIndex);
 
     // Live discovery succeeded for the model list itself, but this specific
     // model's own entry reported no reasoning/effort levels (the live CLI
@@ -873,6 +1000,12 @@ function frameworkChoicesFor(currentFramework, detectedFrameworks) {
   return choices;
 }
 
+function frameworkPickedLine(frameworkId) {
+  if (frameworkId === "speckit") return "✓ Planning: SpecKit";
+  if (frameworkId === "gsd") return "✓ Planning: GSD";
+  return "✓ Planning: Standalone — PLAN.md + TASKS.md per mission in .autopilot/missions/<mission>/";
+}
+
 function frameworkAvailabilityLines(detectedFrameworks) {
   const stateFor = id => detectedFrameworks.includes(id) ? "available" : "not detected";
   const symbolFor = id => detectedFrameworks.includes(id) ? "✓" : "·";
@@ -1048,6 +1181,20 @@ async function printExecutionEnvironmentBlock() {
 
       printCurrentSummary(current);
 
+      if (current) {
+        console.log(
+          "\nThis project is already set up (.autopilot/config.json).\n" +
+          "  To change one thing: ap config  (or ap config --role implementer)"
+        );
+        if (forceInteractive) {
+          console.log("Run the full setup again from the start? [y/N]: ");
+        }
+        if (!(await yesNo("Run the full setup again from the start?", false))) {
+          console.log("Nothing changed.");
+          return;
+        }
+      }
+
       frameworkChoices = frameworkChoicesFor("", detectedFrameworks);
 
       await continuePrompt("Press Enter to continue to role configuration...");
@@ -1119,17 +1266,22 @@ async function printExecutionEnvironmentBlock() {
 
       frameworkChoices = frameworkChoicesFor(framework, detectedFrameworks);
 
-      const labels = frameworkChoices.map(x => x.label);
-      const currentIndex = frameworkChoices.findIndex(x => x.id === framework);
-      const fallback = currentIndex >= 0 ? currentIndex : 0;
-      const picked = await choose(
-        "Planning framework",
-        labels,
-        fallback
-      );
-      const pickedIndex = labels.indexOf(picked);
-      framework =
-        frameworkChoices[pickedIndex >= 0 ? pickedIndex : fallback].id;
+      if (frameworkChoices.length === 1) {
+        framework = frameworkChoices[0].id;
+        console.log(frameworkPickedLine(framework));
+      } else {
+        const labels = frameworkChoices.map(x => x.label);
+        const currentIndex = frameworkChoices.findIndex(x => x.id === framework);
+        const fallback = currentIndex >= 0 ? currentIndex : 0;
+        const picked = await choose(
+          "Planning framework",
+          labels,
+          fallback
+        );
+        const pickedIndex = labels.indexOf(picked);
+        framework =
+          frameworkChoices[pickedIndex >= 0 ? pickedIndex : fallback].id;
+      }
     }
 
     let roles = {
@@ -1570,17 +1722,22 @@ async function printExecutionEnvironmentBlock() {
     }
 
     if (wizardMode && scope === SCOPE.ALL) {
-      const labels = frameworkChoices.map(x => x.label);
-      const currentIndex = frameworkChoices.findIndex(x => x.id === framework);
-      const fallback = currentIndex >= 0 ? currentIndex : 0;
-      const picked = await choose(
-        "Planning framework",
-        labels,
-        fallback
-      );
-      const pickedIndex = labels.indexOf(picked);
-      framework =
-        frameworkChoices[pickedIndex >= 0 ? pickedIndex : fallback].id;
+      if (frameworkChoices.length === 1) {
+        framework = frameworkChoices[0].id;
+        console.log(frameworkPickedLine(framework));
+      } else {
+        const labels = frameworkChoices.map(x => x.label);
+        const currentIndex = frameworkChoices.findIndex(x => x.id === framework);
+        const fallback = currentIndex >= 0 ? currentIndex : 0;
+        const picked = await choose(
+          "Planning framework",
+          labels,
+          fallback
+        );
+        const pickedIndex = labels.indexOf(picked);
+        framework =
+          frameworkChoices[pickedIndex >= 0 ? pickedIndex : fallback].id;
+      }
     }
 
     if (!framework) {
