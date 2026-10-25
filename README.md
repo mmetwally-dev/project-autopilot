@@ -326,7 +326,7 @@ Every command takes `--repo <path>`; the default is the current folder.
 | `ap rebase [--note "<why>"] [--yes]` | Accept your own edits made while a mission was paused |
 | `ap finding list` / `ap finding drop <n> [--note "<why>"] [--yes]` | List the current review findings / drop one you disagree with |
 | `ap config [--role <role>]` | Change roles, models, the test command and other options interactively |
-| `ap config show [--path <key.path>]` | Print the effective settings, each marked `[default]` or `[from config.json]` |
+| `ap config show [--path <key.path>] [--explain]` | Print the effective settings, each marked `[default]` or `[from config.json]`; `--explain` adds a one-line explanation under each setting |
 | `ap config fill [--dry-run]` | Add every missing setting at its default (after an upgrade) |
 | `ap commands` | Re-install the `/ap.*` slash-command files |
 | `ap plan-review <plan-file>` | Review a plan file, outside any mission |
@@ -761,8 +761,9 @@ of this page, generated from `config.schema.json`.
 - **`ap config`** edits the file interactively: it shows the current roles,
   then lets you change all of them or one (`ap config --role <role>`). It edits
   the existing file and never reinstalls anything.
-- **`ap config show [--path <key.path>]`** prints the effective configuration:
+- **`ap config show [--path <key.path>] [--explain]`** prints the effective configuration:
   your values plus the code defaults, each marked `[default]` or `[from config.json]`.
+  `--explain` adds a one-line explanation under each setting.
 - **`ap config fill [--dry-run]`** adds every missing setting at its default
   (useful after an upgrade or a hand edit). It keeps every existing value
   (including `null` and empty lists), renames old setting names in place (for
@@ -891,11 +892,11 @@ Generated from `config.schema.json` by `node scripts/gen-config-schema.mjs`; do 
 
 ### $schema
 
-Relative path to this schema file.
+Path to the JSON schema that gives editor help for this file.
 
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
-| `$schema` | `"./config.schema.json"` | — | Relative path to this schema file. |
+| `$schema` | `"./config.schema.json"` | — | Path to the JSON schema that gives editor help for this file. |
 
 ### schema_version
 
@@ -907,12 +908,12 @@ On-disk config format version; always 4.0 for this layout.
 
 ### project
 
-Project identity and which planning framework drives it.
+Project identity and how its work is planned.
 
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
-| `project.repo` | `"."` | — | Repository root the mission runs in. |
-| `project.planning_framework` | `"standalone"` | `"auto"`, `"standalone"`, `"speckit"`, `"gsd"` | Which planning framework to drive (auto, standalone, speckit or gsd). |
+| `project.repo` | `"."` | — | Intended repository root the mission runs in. Not used by this version; changing it has no effect. |
+| `project.planning_framework` | `"standalone"` | `"auto"`, `"standalone"`, `"speckit"`, `"gsd"` | How work is planned: standalone, speckit or gsd; auto detects the framework from the repository. |
 
 ### roles
 
@@ -920,61 +921,61 @@ The agent CLI, model and session settings for each role.
 
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
-| `roles.planner.cli` | `""` | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Agent CLI adapter for this role (claude, opencode, codex, ...). |
-| `roles.planner.model` | `""` | — | Model id for this role; empty means the adapter default. |
-| `roles.planner.reasoning` | `""` | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort for this role; empty means the adapter default. |
-| `roles.planner.variant` | `""` | — | Adapter-specific model variant; empty means none. |
-| `roles.planner.resume_session` | `true` | — | Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true. |
-| `roles.planner.fallbacks[].cli` | — | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Fallback adapter CLI. |
-| `roles.planner.fallbacks[].model` | — | — | Fallback model id. |
-| `roles.planner.fallbacks[].reasoning` | — | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Fallback reasoning effort. |
-| `roles.planner.fallbacks[].variant` | — | — | Fallback model variant. |
-| `roles.planner.escalation_model.cli` | — | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Agent CLI adapter for the escalation model; empty means the role's adapter. |
-| `roles.planner.escalation_model.model` | — | — | Model id for the escalation model; empty means the role's model. |
-| `roles.planner.escalation_model.reasoning` | — | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort for the escalation model; empty means the role's effort. |
-| `roles.planner.escalation_model.variant` | — | — | Adapter-specific model variant for the escalation model; empty means none. |
-| `roles.plan_reviewer.cli` | `""` | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Agent CLI adapter for this role (claude, opencode, codex, ...). |
-| `roles.plan_reviewer.model` | `""` | — | Model id for this role; empty means the adapter default. |
-| `roles.plan_reviewer.reasoning` | `""` | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort for this role; empty means the adapter default. |
-| `roles.plan_reviewer.variant` | `""` | — | Adapter-specific model variant; empty means none. |
-| `roles.plan_reviewer.resume_session` | `true` | — | Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true. |
-| `roles.plan_reviewer.fallbacks[].cli` | — | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Fallback adapter CLI. |
-| `roles.plan_reviewer.fallbacks[].model` | — | — | Fallback model id. |
-| `roles.plan_reviewer.fallbacks[].reasoning` | — | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Fallback reasoning effort. |
-| `roles.plan_reviewer.fallbacks[].variant` | — | — | Fallback model variant. |
-| `roles.implementer.cli` | `""` | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Agent CLI adapter for this role (claude, opencode, codex, ...). |
-| `roles.implementer.model` | `""` | — | Model id for this role; empty means the adapter default. |
-| `roles.implementer.reasoning` | `""` | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort for this role; empty means the adapter default. |
-| `roles.implementer.variant` | `""` | — | Adapter-specific model variant; empty means none. |
-| `roles.implementer.resume_session` | `false` | — | Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true. |
-| `roles.implementer.fallbacks[].cli` | — | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Fallback adapter CLI. |
-| `roles.implementer.fallbacks[].model` | — | — | Fallback model id. |
-| `roles.implementer.fallbacks[].reasoning` | — | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Fallback reasoning effort. |
-| `roles.implementer.fallbacks[].variant` | — | — | Fallback model variant. |
-| `roles.implementer.escalation_model.cli` | — | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Agent CLI adapter for the escalation model; empty means the role's adapter. |
-| `roles.implementer.escalation_model.model` | — | — | Model id for the escalation model; empty means the role's model. |
-| `roles.implementer.escalation_model.reasoning` | — | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort for the escalation model; empty means the role's effort. |
-| `roles.implementer.escalation_model.variant` | — | — | Adapter-specific model variant for the escalation model; empty means none. |
-| `roles.code_reviewer.cli` | `""` | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Agent CLI adapter for this role (claude, opencode, codex, ...). |
-| `roles.code_reviewer.model` | `""` | — | Model id for this role; empty means the adapter default. |
-| `roles.code_reviewer.reasoning` | `""` | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort for this role; empty means the adapter default. |
-| `roles.code_reviewer.variant` | `""` | — | Adapter-specific model variant; empty means none. |
-| `roles.code_reviewer.resume_session` | `true` | — | Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true. |
-| `roles.code_reviewer.fallbacks[].cli` | — | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Fallback adapter CLI. |
-| `roles.code_reviewer.fallbacks[].model` | — | — | Fallback model id. |
-| `roles.code_reviewer.fallbacks[].reasoning` | — | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Fallback reasoning effort. |
-| `roles.code_reviewer.fallbacks[].variant` | — | — | Fallback model variant. |
-| `roles.verifier.cli` | `""` | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Agent CLI adapter for this role (claude, opencode, codex, ...). |
-| `roles.verifier.model` | `""` | — | Model id for this role; empty means the adapter default. |
-| `roles.verifier.reasoning` | `""` | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort for this role; empty means the adapter default. |
-| `roles.verifier.variant` | `""` | — | Adapter-specific model variant; empty means none. |
-| `roles.verifier.resume_session` | `true` | — | Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true. |
-| `roles.verifier.fallbacks[].cli` | — | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Fallback adapter CLI. |
-| `roles.verifier.fallbacks[].model` | — | — | Fallback model id. |
-| `roles.verifier.fallbacks[].reasoning` | — | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Fallback reasoning effort. |
-| `roles.verifier.fallbacks[].variant` | — | — | Fallback model variant. |
-| `roles.free_models.auto_fallback` | `true` | — | Automatically fall back to a free model when the primary is unavailable. |
-| `roles.free_models.max_turns` | `45` | >= 0 | Maximum turns allowed on a free-model fallback before giving up. |
+| `roles.planner.cli` | `""` | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Agent CLI adapter that runs this role (for example claude, opencode or codex); empty leaves it unset. |
+| `roles.planner.model` | `""` | — | Model id this role uses (for example provider/model); empty means the adapter default. |
+| `roles.planner.reasoning` | `""` | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort sent to the model (low, medium, high, ...); empty means the adapter default. |
+| `roles.planner.variant` | `""` | — | Extra model variant for adapters that support it; empty means no variant. |
+| `roles.planner.resume_session` | `true` | — | Start from this role's previous session (true) or fresh (false); the implementer defaults to false so a capped run continues fresh with the hand-off note. |
+| `roles.planner.fallbacks[].cli` | — | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | CLI adapter for this fallback entry. |
+| `roles.planner.fallbacks[].model` | — | — | Model id for this fallback entry. |
+| `roles.planner.fallbacks[].reasoning` | — | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort for this fallback entry; empty uses the role's value. |
+| `roles.planner.fallbacks[].variant` | — | — | Model variant for this fallback entry; empty uses the role's value. |
+| `roles.planner.escalation_model.cli` | — | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | CLI adapter for the escalation model; required for escalation. |
+| `roles.planner.escalation_model.model` | — | — | Model id for the escalation model; required for escalation. |
+| `roles.planner.escalation_model.reasoning` | — | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort for the escalation model; empty uses no explicit effort. |
+| `roles.planner.escalation_model.variant` | — | — | Model variant for the escalation model; empty means no variant. |
+| `roles.plan_reviewer.cli` | `""` | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Agent CLI adapter that runs this role (for example claude, opencode or codex); empty leaves it unset. |
+| `roles.plan_reviewer.model` | `""` | — | Model id this role uses (for example provider/model); empty means the adapter default. |
+| `roles.plan_reviewer.reasoning` | `""` | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort sent to the model (low, medium, high, ...); empty means the adapter default. |
+| `roles.plan_reviewer.variant` | `""` | — | Extra model variant for adapters that support it; empty means no variant. |
+| `roles.plan_reviewer.resume_session` | `true` | — | Start from this role's previous session (true) or fresh (false); the implementer defaults to false so a capped run continues fresh with the hand-off note. |
+| `roles.plan_reviewer.fallbacks[].cli` | — | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | CLI adapter for this fallback entry. |
+| `roles.plan_reviewer.fallbacks[].model` | — | — | Model id for this fallback entry. |
+| `roles.plan_reviewer.fallbacks[].reasoning` | — | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort for this fallback entry; empty uses the role's value. |
+| `roles.plan_reviewer.fallbacks[].variant` | — | — | Model variant for this fallback entry; empty uses the role's value. |
+| `roles.implementer.cli` | `""` | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Agent CLI adapter that runs this role (for example claude, opencode or codex); empty leaves it unset. |
+| `roles.implementer.model` | `""` | — | Model id this role uses (for example provider/model); empty means the adapter default. |
+| `roles.implementer.reasoning` | `""` | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort sent to the model (low, medium, high, ...); empty means the adapter default. |
+| `roles.implementer.variant` | `""` | — | Extra model variant for adapters that support it; empty means no variant. |
+| `roles.implementer.resume_session` | `false` | — | Start from this role's previous session (true) or fresh (false); the implementer defaults to false so a capped run continues fresh with the hand-off note. |
+| `roles.implementer.fallbacks[].cli` | — | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | CLI adapter for this fallback entry. |
+| `roles.implementer.fallbacks[].model` | — | — | Model id for this fallback entry. |
+| `roles.implementer.fallbacks[].reasoning` | — | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort for this fallback entry; empty uses the role's value. |
+| `roles.implementer.fallbacks[].variant` | — | — | Model variant for this fallback entry; empty uses the role's value. |
+| `roles.implementer.escalation_model.cli` | — | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | CLI adapter for the escalation model; required for escalation. |
+| `roles.implementer.escalation_model.model` | — | — | Model id for the escalation model; required for escalation. |
+| `roles.implementer.escalation_model.reasoning` | — | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort for the escalation model; empty uses no explicit effort. |
+| `roles.implementer.escalation_model.variant` | — | — | Model variant for the escalation model; empty means no variant. |
+| `roles.code_reviewer.cli` | `""` | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Agent CLI adapter that runs this role (for example claude, opencode or codex); empty leaves it unset. |
+| `roles.code_reviewer.model` | `""` | — | Model id this role uses (for example provider/model); empty means the adapter default. |
+| `roles.code_reviewer.reasoning` | `""` | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort sent to the model (low, medium, high, ...); empty means the adapter default. |
+| `roles.code_reviewer.variant` | `""` | — | Extra model variant for adapters that support it; empty means no variant. |
+| `roles.code_reviewer.resume_session` | `true` | — | Start from this role's previous session (true) or fresh (false); the implementer defaults to false so a capped run continues fresh with the hand-off note. |
+| `roles.code_reviewer.fallbacks[].cli` | — | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | CLI adapter for this fallback entry. |
+| `roles.code_reviewer.fallbacks[].model` | — | — | Model id for this fallback entry. |
+| `roles.code_reviewer.fallbacks[].reasoning` | — | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort for this fallback entry; empty uses the role's value. |
+| `roles.code_reviewer.fallbacks[].variant` | — | — | Model variant for this fallback entry; empty uses the role's value. |
+| `roles.verifier.cli` | `""` | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | Agent CLI adapter that runs this role (for example claude, opencode or codex); empty leaves it unset. |
+| `roles.verifier.model` | `""` | — | Model id this role uses (for example provider/model); empty means the adapter default. |
+| `roles.verifier.reasoning` | `""` | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort sent to the model (low, medium, high, ...); empty means the adapter default. |
+| `roles.verifier.variant` | `""` | — | Extra model variant for adapters that support it; empty means no variant. |
+| `roles.verifier.resume_session` | `true` | — | Start from this role's previous session (true) or fresh (false); the implementer defaults to false so a capped run continues fresh with the hand-off note. |
+| `roles.verifier.fallbacks[].cli` | — | `""`, `"claude"`, `"codex"`, `"opencode"`, `"cursor"`, `"antigravity"` | CLI adapter for this fallback entry. |
+| `roles.verifier.fallbacks[].model` | — | — | Model id for this fallback entry. |
+| `roles.verifier.fallbacks[].reasoning` | — | `""`, `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | Reasoning effort for this fallback entry; empty uses the role's value. |
+| `roles.verifier.fallbacks[].variant` | — | — | Model variant for this fallback entry; empty uses the role's value. |
+| `roles.free_models.auto_fallback` | `true` | — | When the effective model is free and the configured fallbacks are used up, try another free model from the same CLI (true) or not (false). |
+| `roles.free_models.max_turns` | `45` | >= 0 | Most turns a role running a free model may use; 0 turns this extra cap off, and at the limit the run is cut and may continue in a new session. |
 
 ### caps
 
@@ -982,44 +983,44 @@ Per-role turn, token and session caps plus the mission token backstop.
 
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
-| `caps.task_size_target_turns` | `30` | >= 1 | Target turns per task used when splitting oversized work. |
-| `caps.planner.max_turns` | `30` | >= 1 | Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue. |
-| `caps.planner.max_tokens` | `200000` | >= 1 | Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue. |
-| `caps.planner.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap. |
-| `caps.planner.wrap_up_at_tokens` | `180000` | >= 1 | Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops. |
-| `caps.plan_reviewer.max_turns` | `30` | >= 1 | Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue. |
-| `caps.plan_reviewer.max_tokens` | `150000` | >= 1 | Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue. |
-| `caps.plan_reviewer.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap. |
-| `caps.plan_reviewer.wrap_up_at_tokens` | `135000` | >= 1 | Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops. |
-| `caps.implementer.max_turns` | `40` | >= 1 | Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue. |
-| `caps.implementer.max_tokens` | `180000` | >= 1 | Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue. |
-| `caps.implementer.extra_sessions` | `5` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap. |
-| `caps.implementer.wrap_up_at_tokens` | `160000` | >= 1 | Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops. |
-| `caps.code_reviewer.max_turns` | `22` | >= 1 | Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue. |
-| `caps.code_reviewer.max_tokens` | `150000` | >= 1 | Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue. |
-| `caps.code_reviewer.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap. |
-| `caps.code_reviewer.wrap_up_at_tokens` | `135000` | >= 1 | Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops. |
-| `caps.verifier.max_turns` | `30` | >= 1 | Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue. |
-| `caps.verifier.max_tokens` | `150000` | >= 1 | Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue. |
-| `caps.verifier.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap. |
-| `caps.verifier.wrap_up_at_tokens` | `135000` | >= 1 | Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops. |
-| `caps.mission_token_backstop` | `6000000` | >= 1 | Raw-token backstop for a whole mission before it is stopped. |
+| `caps.task_size_target_turns` | `30` | >= 1 | Implementer turns the planner should aim for per task when splitting work; this is guidance, not a hard limit. |
+| `caps.planner.max_turns` | `30` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
+| `caps.planner.max_tokens` | `200000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
+| `caps.planner.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
+| `caps.planner.wrap_up_at_tokens` | `180000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
+| `caps.plan_reviewer.max_turns` | `30` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
+| `caps.plan_reviewer.max_tokens` | `150000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
+| `caps.plan_reviewer.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
+| `caps.plan_reviewer.wrap_up_at_tokens` | `135000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
+| `caps.implementer.max_turns` | `40` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
+| `caps.implementer.max_tokens` | `180000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
+| `caps.implementer.extra_sessions` | `5` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
+| `caps.implementer.wrap_up_at_tokens` | `160000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
+| `caps.code_reviewer.max_turns` | `22` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
+| `caps.code_reviewer.max_tokens` | `150000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
+| `caps.code_reviewer.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
+| `caps.code_reviewer.wrap_up_at_tokens` | `135000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
+| `caps.verifier.max_turns` | `30` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
+| `caps.verifier.max_tokens` | `150000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
+| `caps.verifier.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
+| `caps.verifier.wrap_up_at_tokens` | `135000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
+| `caps.mission_token_backstop` | `6000000` | >= 1 | Cumulative raw tokens (input, cached input and output) allowed across one task; when exceeded the role wraps up and continues in a new backstop session, and two firings in a row stop the task with BACKSTOP_CONSECUTIVE_FIRINGS. |
 
 ### retries
 
-Retry and revision budgets for each stage.
+How many times each stage may retry or revise before it stops and asks you.
 
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
-| `retries.plan_revisions` | `8` | >= 0 | Maximum plan revision rounds before plan review gives up. |
-| `retries.implementation` | `4` | >= 0 | Failure budget for the implementation phase. |
-| `retries.verification` | `4` | >= 0 | Failure budget for the verification phase. |
-| `retries.final_review_fix_rounds` | `2` | >= 1 | Maximum final-review fix rounds before stopping. |
-| `retries.cli_errors` | `3` | >= 0 | Adapter retry budget for transient CLI errors. |
-| `retries.infrastructure` | `3` | >= 0 | Retry budget for infrastructure failures. |
-| `retries.no_progress_sessions` | `2` | >= 1 | Consecutive no-progress generations before a mission is stopped. |
-| `retries.extra_sessions_per_task` | `5` | >= 0 | Continuation sessions allowed per task (mirrors caps.implementer.extra_sessions). |
-| `retries.escalate_after_not_fixed` | `2` | >= 1 | Consecutive reviews that must report the same finding not fixed before the escalation model is used (1 = escalate on the first not-fixed report). |
+| `retries.plan_revisions` | `8` | >= 0 | Planner and plan reviewer revision rounds before planning stops; at the limit the plan is escalated for help. |
+| `retries.implementation` | `4` | >= 0 | Implementer fix rounds per phase before the phase stops; at the limit the mission stops and asks you. |
+| `retries.verification` | `4` | >= 0 | Verifier FAIL rounds per phase before the phase stops; at the limit the mission stops and asks you. |
+| `retries.final_review_fix_rounds` | `2` | >= 1 | Final-review fix rounds per mission before it stops; 1 allows one round, and at the limit the mission stops. |
+| `retries.cli_errors` | `3` | >= 0 | Same-model retries after a CLI error before the run gives up; at the limit the run fails over or stops. |
+| `retries.infrastructure` | `3` | >= 0 | Retries after an infrastructure error such as a snapshot, sandbox or gate failure; at the limit the mission stops. |
+| `retries.no_progress_sessions` | `2` | >= 1 | Sessions in a row that change no file before the task stops; 1 stops on the first session that changes nothing. |
+| `retries.extra_sessions_per_task` | `5` | >= 0 | Extra sessions the implementer may start per task after a cap; the caps.implementer.extra_sessions value wins when both are set. |
+| `retries.escalate_after_not_fixed` | `2` | >= 1 | Reviews in a row that must report the same finding not fixed before the stronger escalation model is used; 1 escalates on the first not-fixed report. |
 
 ### time_limits
 
@@ -1027,14 +1028,14 @@ Wall-clock limits and waits, with the unit in each name.
 
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
-| `time_limits.role_timeout_minutes.default` | `60` | >= 0 | Default wall-clock limit per role session, in minutes. |
-| `time_limits.role_timeout_minutes.verifier` | `180` | >= 0 | Wall-clock limit for the verifier role session, in minutes. |
-| `time_limits.call_backstop_minutes` | `200` | >= 0 | Hard wall-clock backstop for ONE role call, in minutes (not a mission limit): a call that runs past it is stopped. The old name mission_timeout_minutes is still read and migrated. |
-| `time_limits.role_timeout_floor_minutes` | `null` | >= 0 | Minimum per-role timeout floor in minutes; null disables the floor. |
-| `time_limits.silent_run_minutes` | `10` | >= 0 | Minutes of silence before an active run is treated as hung. |
-| `time_limits.no_first_output_minutes` | `3` | >= 0 | Minutes allowed before a session must produce its first output. |
-| `time_limits.read_only_max_silence_minutes` | `15` | >= 0 | Maximum silence for read-only roles, in minutes. |
-| `time_limits.retry_wait_seconds` | `60` | >= 0 | Seconds to wait between retries. |
+| `time_limits.role_timeout_minutes.default` | `60` | >= 0 | Time limit in minutes for one implementer task; past the limit the implementer call is stopped. |
+| `time_limits.role_timeout_minutes.verifier` | `180` | >= 0 | Session time limit for the verifier role, in minutes; past the limit the verifier call is stopped. |
+| `time_limits.call_backstop_minutes` | `200` | >= 0 | Hard wall-clock backstop for one role call, in minutes (not a mission limit); a call that runs past it is stopped. The old name mission_timeout_minutes is still read and migrated. |
+| `time_limits.role_timeout_floor_minutes` | `null` | >= 0 | Lowest session limit that measured run times may produce, in minutes; null or 0 uses the built-in 10-minute floor. |
+| `time_limits.silent_run_minutes` | `10` | >= 0 | Minutes without any output before an active run is treated as hung and stopped; 0 turns this watchdog off. |
+| `time_limits.no_first_output_minutes` | `3` | >= 0 | Minutes a new session may run without producing any output before it is stopped; 0 turns this check off. |
+| `time_limits.read_only_max_silence_minutes` | `15` | >= 0 | Maximum minutes a read-only role may stay silent even while a tool runs before it is stopped; 0 turns this cap off. |
+| `time_limits.retry_wait_seconds` | `60` | >= 0 | Seconds to wait before retrying after a provider or network error; 0 retries immediately. |
 
 ### workflow
 
@@ -1042,18 +1043,18 @@ Which review and approval stages run, and how work is committed.
 
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
-| `workflow.plan_review` | `true` | — | Run a plan review stage before implementation. |
-| `workflow.plan_review_rounds_converge` | `true` | — | Iterate plan review rounds until the plan converges. |
-| `workflow.gsd_planning_review` | `false` | — | Use the GSD planning-review stages. |
-| `workflow.spec_review` | `true` | — | Run a spec review stage. |
-| `workflow.code_review_per_phase` | `true` | — | Run code review after each implementation phase. |
-| `workflow.final_review` | `true` | — | Run a final review at the end of the mission. |
-| `workflow.analysis_after_tasks` | `true` | — | Run an analysis pass after all tasks complete. |
-| `workflow.approve_spec_myself` | `false` | — | Auto-approve the spec without asking the operator. |
-| `workflow.approve_plan_myself` | `false` | — | Auto-approve the plan without asking the operator. |
-| `workflow.parallel_independent_tasks` | `false` | — | Run independent tasks in parallel. |
-| `workflow.use_worktrees` | `true` | — | Use git worktrees to isolate parallel work. |
-| `workflow.commit_by_human` | `true` | — | Only a human may commit; roles never run git commit. |
+| `workflow.plan_review` | `true` | — | Run the GSD plan-review stage before implementation (true) or skip it (false); only GSD reads this setting. (GSD is not yet reviewed in this version). |
+| `workflow.plan_review_rounds_converge` | `true` | — | Intended to make the first plan-review round exhaustive and later rounds check only the fixes. Not used by this version; changing it has no effect. |
+| `workflow.gsd_planning_review` | `false` | — | Use the GSD planning-review stages (true) or skip them (false). (GSD is not yet reviewed in this version). |
+| `workflow.spec_review` | `true` | — | Intended to run a spec review stage before planning. Not used by this version; changing it has no effect. |
+| `workflow.code_review_per_phase` | `true` | — | Intended to run code review after each implementation phase instead of only at the end. Not used by this version; changing it has no effect. |
+| `workflow.final_review` | `true` | — | Intended to run a final review over the whole mission at the end. Not used by this version; changing it has no effect. |
+| `workflow.analysis_after_tasks` | `true` | — | Intended to run an analysis pass after all tasks complete. Not used by this version; changing it has no effect. |
+| `workflow.approve_spec_myself` | `false` | — | Intended to approve the spec automatically without asking you. Not used by this version; changing it has no effect. |
+| `workflow.approve_plan_myself` | `false` | — | Intended to approve the plan automatically without asking you. Not used by this version; changing it has no effect. |
+| `workflow.parallel_independent_tasks` | `false` | — | Intended to run independent tasks in parallel. Not used by this version; changing it has no effect. |
+| `workflow.use_worktrees` | `true` | — | Intended to run parallel tasks in separate git worktrees. Not used by this version; changing it has no effect. |
+| `workflow.commit_by_human` | `true` | — | Stop at "ready to commit" and let you commit; false is not supported because Autopilot never commits. |
 
 ### tests
 
@@ -1061,13 +1062,13 @@ Gate commands, reviewer requirement and verification policy.
 
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
-| `tests.gate_commands` | `[]` | — | Commands run as the phase/mission gate. |
-| `tests.gate_network` | `false` | — | Allow the gate commands to use the network (false keeps them network-isolated). |
-| `tests.gate_env_allowlist` | `[]` | — | Environment variables allowed through to gate commands. |
-| `tests.require_reviewer` | `true` | — | Require a reviewer role to sign off before completion. |
-| `tests.browser` | `"native"` | `"native"`, `"playwright"`, `"both"` | Browser capability mode used for verification (native, playwright or both). |
-| `tests.require_browser` | `"when-task-requires"` | `"always"`, `"when-task-requires"`, `"never"` | When browser verification is required (always, when-task-requires or never). |
-| `tests.verify_denylist` | `[]` | — | Commands or paths never allowed in verification. |
+| `tests.gate_commands` | `[]` | — | Commands run after each phase and at the end as the gate; a failing command fails the phase, and an empty list runs no gate. |
+| `tests.gate_network` | `false` | — | Allow the gate commands to use the network (true); false keeps them network-isolated. |
+| `tests.gate_env_allowlist` | `[]` | — | Environment variable names allowed through to gate commands; empty passes no extra variables. |
+| `tests.require_reviewer` | `true` | — | Intended to require a reviewer verdict before a phase passes. Not used by this version; changing it has no effect. |
+| `tests.browser` | `"native"` | `"native"`, `"playwright"`, `"both"` | Browser capability used for verification: native (the agent's own browser), playwright or both. |
+| `tests.require_browser` | `"when-task-requires"` | `"always"`, `"when-task-requires"`, `"never"` | How browser capabilities are required for the verifier: always adds them to every call; when-task-requires and never add them only when the task itself needs a browser. |
+| `tests.verify_denylist` | `[]` | — | Commands or paths that a task or verification step may never run; empty adds no bans beyond the built-in full-suite ban. |
 
 ### safety
 
@@ -1075,14 +1076,14 @@ What roles may do and which safety checks are enforced.
 
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
-| `safety.allow_git_commit` | `false` | — | Permit roles to run git commit. |
-| `safety.allow_git_push` | `false` | — | Permit roles to run git push. |
-| `safety.allow_destructive_operations` | `false` | — | Permit destructive filesystem or git operations. |
-| `safety.stop_on_sandbox_violation` | `true` | — | Stop the mission when a sandbox/relay violation is detected. |
-| `safety.block_git_in_roles` | `true` | — | Block git commit/push inside role sessions. |
-| `safety.check_read_only_roles` | `true` | — | Verify read-only roles by comparing snapshots. |
-| `safety.record_touched_files` | `true` | — | Capture the files each role touches. |
-| `safety.keep_role_sessions` | `true` | — | Persist role sessions so they can be resumed. |
+| `safety.allow_git_commit` | `false` | — | Setting this true is rejected; Autopilot never commits, so keep it false. |
+| `safety.allow_git_push` | `false` | — | Setting this true is rejected; Autopilot never pushes, so keep it false. |
+| `safety.allow_destructive_operations` | `false` | — | Setting this true is rejected; destructive operations stay blocked, so keep it false. |
+| `safety.stop_on_sandbox_violation` | `true` | — | Setting this false is rejected; a sandbox or relay violation always stops the mission, so keep it true. |
+| `safety.block_git_in_roles` | `true` | — | Intended to block git commit and push inside role sessions. Not used by this version; changing it has no effect. |
+| `safety.check_read_only_roles` | `true` | — | Intended to check that read-only roles changed no file by comparing before and after snapshots. Not used by this version; changing it has no effect. |
+| `safety.record_touched_files` | `true` | — | Intended to record the files each role touches. Not used by this version; changing it has no effect. |
+| `safety.keep_role_sessions` | `true` | — | Intended to keep role sessions on disk so a later run can resume them. Not used by this version; changing it has no effect. |
 
 ### runtime
 
@@ -1090,8 +1091,8 @@ Containment mode and, for WSL2, the distribution to use.
 
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
-| `runtime.mode` | `"linux-strong"` | `"auto"`, `"linux-strong"`, `"wsl2-strong"`, `"windows-compatibility"` | Runtime containment mode (auto, linux-strong, wsl2-strong or windows-compatibility). |
-| `runtime.wsl_distro` | `null` | — | WSL2 distribution to use for wsl2-strong mode; null means auto-detect. |
+| `runtime.mode` | `"linux-strong"` | `"auto"`, `"linux-strong"`, `"wsl2-strong"`, `"windows-compatibility"` | How roles are contained: auto, linux-strong, wsl2-strong or windows-compatibility. |
+| `runtime.wsl_distro` | `null` | — | WSL2 distribution used for wsl2-strong mode; null detects it automatically. |
 
 ### frameworks
 
@@ -1099,25 +1100,25 @@ Per-framework planning settings for SpecKit and GSD.
 
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
-| `frameworks.speckit.workflow_file` | `".specify/workflows/speckit/workflow.yml"` | — | Path to the SpecKit workflow definition. |
-| `frameworks.speckit.task_files` | `[".specify/tasks.md","specs/*/tasks.md","specs/*/tasks/*.md"]` | — | Glob patterns that identify SpecKit task files. |
-| `frameworks.gsd.phase_root` | `".planning/phases"` | — | Root directory holding GSD phase folders. |
-| `frameworks.gsd.run_plan_verify` | `true` | — | Run GSD plan verification. |
-| `frameworks.gsd.run_state_validate` | `true` | — | Run GSD state validation. |
-| `frameworks.gsd.write_summary_artifacts` | `true` | — | Write GSD summary artifacts. |
-| `frameworks.gsd.write_verification_artifacts` | `true` | — | Write GSD verification artifacts. |
-| `frameworks.gsd.write_uat_artifact` | `true` | — | Write the GSD UAT artifact. |
-| `frameworks.gsd.use_gsd_tools_when_available` | `true` | — | Use GSD helper tools when they are available. |
-| `frameworks.gsd.planning_review.enabled` | `false` | — | Enable the GSD planning-review stages. |
-| `frameworks.gsd.planning_review.review_after_each_stage` | `true` | — | Review after every GSD planning stage. |
-| `frameworks.gsd.planning_review.stages` | `["discuss","research","plan","plan-check"]` | — | GSD planning stages to review. |
-| `frameworks.gsd.planning_review.max_revisions` | `3` | >= 0 | Maximum GSD planning-review revisions. |
-| `frameworks.gsd.planning_review.read_only_reviewer` | `true` | — | Use a read-only reviewer for GSD planning review. |
-| `frameworks.gsd.parallel.enabled` | `false` | — | Enable parallel GSD execution. |
-| `frameworks.gsd.parallel.plan_level` | `false` | — | Allow plan-level GSD parallelism. |
-| `frameworks.gsd.parallel.task_level` | `false` | — | Allow task-level GSD parallelism. |
-| `frameworks.gsd.parallel.max_concurrent_agents` | `3` | >= 1 | Maximum concurrent GSD agents. |
-| `frameworks.gsd.parallel.min_plans_for_parallel` | `2` | >= 1 | Minimum plans before parallel GSD execution starts. |
+| `frameworks.speckit.workflow_file` | `".specify/workflows/speckit/workflow.yml"` | — | Intended path to the SpecKit workflow definition. Not used by this version; changing it has no effect. |
+| `frameworks.speckit.task_files` | `[".specify/tasks.md","specs/*/tasks.md","specs/*/tasks/*.md"]` | — | Glob patterns that identify SpecKit task files; empty means no task files are found. |
+| `frameworks.gsd.phase_root` | `".planning/phases"` | — | Directory holding GSD phase folders. (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.run_plan_verify` | `true` | — | Run the gsd-tools plan check (references and state validation) after planning (true) or skip it (false). (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.run_state_validate` | `true` | — | Intended to run GSD state validation. Not used by this version; changing it has no effect. (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.write_summary_artifacts` | `true` | — | Intended to write GSD summary artifacts. Not used by this version; changing it has no effect. (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.write_verification_artifacts` | `true` | — | Intended to write GSD verification artifacts. Not used by this version; changing it has no effect. (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.write_uat_artifact` | `true` | — | Intended to write the GSD UAT artifact. Not used by this version; changing it has no effect. (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.use_gsd_tools_when_available` | `true` | — | Use GSD helper tools when they are available (true) or skip them (false). (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.planning_review.enabled` | `false` | — | Enable the GSD planning-review stages (true) or skip them (false). (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.planning_review.review_after_each_stage` | `true` | — | Intended to review after every GSD planning stage. Not used by this version; changing it has no effect. (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.planning_review.stages` | `["discuss","research","plan","plan-check"]` | — | GSD planning stages to review: discuss, research and plan. (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.planning_review.max_revisions` | `3` | >= 0 | Revisions allowed per GSD planning stage; at the limit the stage fails and the mission stops. (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.planning_review.read_only_reviewer` | `true` | — | Intended to use a read-only reviewer for GSD planning review. Not used by this version; changing it has no effect. (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.parallel.enabled` | `false` | — | Allow GSD work to run in parallel (true) or one at a time (false). (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.parallel.plan_level` | `false` | — | Allow different GSD plans to run in parallel (true) or one plan at a time (false). (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.parallel.task_level` | `false` | — | Tasks inside one GSD plan always run one at a time; this setting has no effect. (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.parallel.max_concurrent_agents` | `3` | >= 1 | Most GSD agents that may run at once; at the limit new work waits for a free slot. (GSD is not yet reviewed in this version). |
+| `frameworks.gsd.parallel.min_plans_for_parallel` | `2` | >= 1 | Smallest number of plans that starts GSD parallel execution; below it plans run one at a time. (GSD is not yet reviewed in this version). |
 
 ### advanced
 
@@ -1125,15 +1126,15 @@ Paths, hand-off limits and capability defaults.
 
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
-| `advanced.state_file` | `".autopilot/state.json"` | — | Path to the mission state file. |
-| `advanced.runs_dir` | `".autopilot/runs"` | — | Directory holding run records. |
-| `advanced.handoff_max_chars` | `2000` | >= 500 | Maximum characters in a role hand-off document. |
-| `advanced.handoff_note_max_chars` | `4000` | >= 1000 | Maximum characters in a hand-off note. |
-| `advanced.handoff_wrapup_tokens` | `160000` | >= 1 | Token count at which a role is told to wrap up its hand-off. |
-| `advanced.fallback_retry_primary_minutes` | `60` | >= 0 | Minutes to wait before retrying the primary model after a fallback took over. |
-| `advanced.checkpoint_after_task` | `true` | — | Write a checkpoint after each task. |
-| `advanced.checkpoint_after_phase` | `true` | — | Write a checkpoint after each phase. |
-| `advanced.capabilities.project_defaults` | `[]` | — | Capabilities assumed present for this project. |
-| `advanced.capabilities.safety_denied` | `[]` | — | Capabilities explicitly denied for safety. |
-| `advanced.capabilities.legacy_text_inference` | `false` | — | Infer capabilities from task text (legacy behaviour). |
+| `advanced.state_file` | `".autopilot/state.json"` | — | Intended path to the mission state file. Not used by this version; changing it has no effect. |
+| `advanced.runs_dir` | `".autopilot/runs"` | — | Intended directory holding run records. Not used by this version; changing it has no effect. |
+| `advanced.handoff_max_chars` | `2000` | >= 500 | Maximum characters in a role hand-off document; longer text is cut, and values below 500 are rejected. |
+| `advanced.handoff_note_max_chars` | `4000` | >= 1000 | Maximum characters in a hand-off note; longer text is cut, and values below 1000 are rejected. |
+| `advanced.handoff_wrapup_tokens` | `160000` | >= 1 | Token count at which a role is told to wrap up its hand-off; it must be below the implementer token cap. |
+| `advanced.fallback_retry_primary_minutes` | `60` | >= 0 | Minutes to wait before retrying the primary model after a fallback took over; 0 uses the built-in 60-minute wait. |
+| `advanced.checkpoint_after_task` | `true` | — | Intended to write a checkpoint after each task. Not used by this version; changing it has no effect. |
+| `advanced.checkpoint_after_phase` | `true` | — | Intended to write a checkpoint after each phase. Not used by this version; changing it has no effect. |
+| `advanced.capabilities.project_defaults` | `[]` | — | Capabilities assumed present for every role in this project; empty adds none. |
+| `advanced.capabilities.safety_denied` | `[]` | — | Intended to deny capabilities for safety. Not used by this version; changing it has no effect. |
+| `advanced.capabilities.legacy_text_inference` | `false` | — | Infer browser capabilities from task text for the verifier (legacy); false keeps inference off. |
 <!-- config-reference:end -->

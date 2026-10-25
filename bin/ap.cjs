@@ -36,7 +36,7 @@ function usage() {
     '  ap finding list [--scope <key>] [--repo <path>]   list the open review findings the mission is carrying',
     '  ap finding drop <n> [--scope <key>] [--note "<why>"] [--yes] [--repo <path>]   drop finding number <n> (recorded with the note)',
     '  ap config [--repo <path>] [--role <role>]',
-    '  ap config show [--repo <path>] [--path <key.path>]',
+    '  ap config show [--repo <path>] [--path <key.path>] [--explain]',
     '  ap config fill [--dry-run] [--repo <path>]   add missing defaults and repair $schema (dry run prints changes)',
     '  ap plan-review <plan-file>',
     '  ap code-review (<range> | <commit> | <diff-file> | <path>) [--range <a..b> | --commit <sha> | --diff-file <file>]',

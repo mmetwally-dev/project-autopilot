@@ -1,4 +1,5 @@
 import {DEFAULTS, toNewLayoutConfig, toRuntimeConfig} from "./config-layout.mjs";
+import {descriptionFor} from "./gen-config-schema.mjs";
 import {loadAndMigrateConfig} from "./config-migration.mjs";
 import path from "node:path";
 import {pathToFileURL} from "node:url";
@@ -165,7 +166,7 @@ export function buildEffectiveConfig(layout) {
 }
 
 export function renderConfigShow(effectiveConfig, options = {}) {
-  const {format = "text", showOnly = null} = options;
+  const {format = "text", showOnly = null, explain = false} = options;
 
   function shouldShowPath(currentPath) {
     if (!showOnly) return true;
@@ -192,6 +193,13 @@ export function renderConfigShow(effectiveConfig, options = {}) {
         const sourceLabel = value.source === "default" ? "[default]" : "[from config.json]";
         const displayValue = formatValue(value.value);
         output += `${currentPath}: ${displayValue} ${sourceLabel}\n`;
+        if (explain) {
+          try {
+            output += `  # ${descriptionFor(currentPath)}\n`;
+          } catch {
+            // Keys without a schema description still render their value line.
+          }
+        }
       } else if (value && typeof value === "object" && !Array.isArray(value)) {
         output += renderValue(value, currentPath);
       }
@@ -235,7 +243,7 @@ export function getEffectiveConfigForTest(partialConfig) {
   return buildEffectiveConfig(partialConfig);
 }
 
-export const CONFIG_SHOW_USAGE = `Usage: ap config show [--repo <path>] [--path <key.path>] [--format text]
+export const CONFIG_SHOW_USAGE = `Usage: ap config show [--repo <path>] [--path <key.path>] [--explain] [--format text]
 
 Renders the effective configuration: values from .autopilot/config.json plus
 code defaults, each marked [default] or [from config.json].
@@ -243,15 +251,20 @@ code defaults, each marked [default] or [from config.json].
 Options:
   --repo <path>       Repository containing .autopilot/config.json (default: .)
   --path <key.path>   Show only this key and its descendants/ancestors
+  --explain           Add a one-line explanation under each setting
   --format <format>   Output format (only "text" is supported today)
   --help, -h          Show this help`;
 
 function parseShowArgs(args) {
-  const parsed = {repo: ".", showOnly: null, format: "text", help: false};
+  const parsed = {repo: ".", showOnly: null, format: "text", explain: false, help: false};
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--help" || arg === "-h") {
       parsed.help = true;
+      continue;
+    }
+    if (arg === "--explain") {
+      parsed.explain = true;
       continue;
     }
     if (arg !== "--repo" && arg !== "--path" && arg !== "--format") {
@@ -287,7 +300,8 @@ async function main(args) {
   try {
     const output = await configShowCommand(configPath, {
       format: parsed.format,
-      showOnly: parsed.showOnly
+      showOnly: parsed.showOnly,
+      explain: parsed.explain
     });
     if (output) process.stdout.write(output.endsWith("\n") ? output : `${output}\n`);
     return 0;

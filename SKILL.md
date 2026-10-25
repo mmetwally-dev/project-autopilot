@@ -65,7 +65,7 @@ success, dry-run or nothing to do; `1` refusal or failure; `2` usage error
 | `rebase [--note "<why>"] [--yes]` | accept operator edits made during a pause | y/N |
 | `finding list` / `finding drop <n> [--note] [--yes]` | list / drop a current review finding | y/N for drop |
 | `config [--role <role>]` | edit settings interactively | interactive |
-| `config show [--path <key.path>]` | print effective settings, marked `[default]` / `[from config.json]` | none |
+| `config show [--path <key.path>] [--explain]` | print effective settings, marked `[default]` / `[from config.json]`; `--explain` adds a one-line explanation under each setting | none |
 | `config fill [--dry-run]` | add missing settings at their defaults, repair `$schema` | none |
 | `commands` | re-install the `/ap.*` slash-command files | none |
 | `plan-review`, `code-review`, `verify-file` | adhoc reviews outside any mission (below) | none |
@@ -297,8 +297,8 @@ migrate automatically with one timestamped backup.
 
 - `ap config [--role <role>]` — interactive edit (roles: `planner`,
   `plan_reviewer`, `implementer`, `code_reviewer`, `verifier`).
-- `ap config show [--path <key.path>]` — effective values, marked `[default]` or
-  `[from config.json]`.
+- `ap config show [--path <key.path>] [--explain]` — effective values, marked `[default]` or
+  `[from config.json]`; `--explain` adds a one-line explanation under each setting.
 - `ap config fill [--dry-run]` — add every missing setting at its default, keep
   every existing value (including `null` and empty lists), rename old names in
   place (`time_limits.mission_timeout_minutes` → `call_backstop_minutes`), repair

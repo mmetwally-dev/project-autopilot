@@ -11,7 +11,7 @@
   "properties": {
     "$schema": {
       "type": "string",
-      "description": "Relative path to this schema file.",
+      "description": "Path to the JSON schema that gives editor help for this file.",
       "default": "./config.schema.json"
     },
     "schema_version": {
@@ -22,7 +22,7 @@
     },
     "project": {
       "type": "object",
-      "description": "Project identity and which planning framework drives it.",
+      "description": "Project identity and how its work is planned.",
       "default": {
         "repo": ".",
         "planning_framework": "standalone"
@@ -30,12 +30,12 @@
       "properties": {
         "repo": {
           "type": "string",
-          "description": "Repository root the mission runs in.",
+          "description": "Intended repository root the mission runs in. Not used by this version; changing it has no effect.",
           "default": "."
         },
         "planning_framework": {
           "type": "string",
-          "description": "Which planning framework to drive (auto, standalone, speckit or gsd).",
+          "description": "How work is planned: standalone, speckit or gsd; auto detects the framework from the repository.",
           "default": "standalone",
           "enum": [
             "auto",
@@ -102,7 +102,7 @@
       "properties": {
         "planner": {
           "type": "object",
-          "description": "Role settings for the planner.",
+          "description": "Role settings for the planner, which writes the plan.",
           "default": {
             "cli": "",
             "model": "",
@@ -114,7 +114,7 @@
           "properties": {
             "cli": {
               "type": "string",
-              "description": "Agent CLI adapter for this role (claude, opencode, codex, ...).",
+              "description": "Agent CLI adapter that runs this role (for example claude, opencode or codex); empty leaves it unset.",
               "default": "",
               "enum": [
                 "",
@@ -127,12 +127,12 @@
             },
             "model": {
               "type": "string",
-              "description": "Model id for this role; empty means the adapter default.",
+              "description": "Model id this role uses (for example provider/model); empty means the adapter default.",
               "default": ""
             },
             "reasoning": {
               "type": "string",
-              "description": "Reasoning effort for this role; empty means the adapter default.",
+              "description": "Reasoning effort sent to the model (low, medium, high, ...); empty means the adapter default.",
               "default": "",
               "enum": [
                 "",
@@ -147,17 +147,17 @@
             },
             "variant": {
               "type": "string",
-              "description": "Adapter-specific model variant; empty means none.",
+              "description": "Extra model variant for adapters that support it; empty means no variant.",
               "default": ""
             },
             "resume_session": {
               "type": "boolean",
-              "description": "Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true.",
+              "description": "Start from this role's previous session (true) or fresh (false); the implementer defaults to false so a capped run continues fresh with the hand-off note.",
               "default": true
             },
             "fallbacks": {
               "type": "array",
-              "description": "Ordered fallback role entries tried when the primary adapter/model fails.",
+              "description": "Fallback CLI and model entries tried in order when the primary one fails; empty means no fallbacks.",
               "default": [],
               "items": {
                 "type": "object",
@@ -176,11 +176,11 @@
                       "cursor",
                       "antigravity"
                     ],
-                    "description": "Fallback adapter CLI."
+                    "description": "CLI adapter for this fallback entry."
                   },
                   "model": {
                     "type": "string",
-                    "description": "Fallback model id."
+                    "description": "Model id for this fallback entry."
                   },
                   "reasoning": {
                     "type": "string",
@@ -194,11 +194,11 @@
                       "xhigh",
                       "max"
                     ],
-                    "description": "Fallback reasoning effort."
+                    "description": "Reasoning effort for this fallback entry; empty uses the role's value."
                   },
                   "variant": {
                     "type": "string",
-                    "description": "Fallback model variant."
+                    "description": "Model variant for this fallback entry; empty uses the role's value."
                   }
                 }
               }
@@ -208,7 +208,7 @@
                 "object",
                 "null"
               ],
-              "description": "Stronger model used for the next fix round after retries.escalate_after_not_fixed not-fixed reports; null or absent turns escalation off.",
+              "description": "Stronger model used for fix rounds after retries.escalate_after_not_fixed reviews report the same finding not-fixed; null or absent turns escalation off.",
               "additionalProperties": false,
               "patternProperties": {
                 "^_": {}
@@ -224,11 +224,11 @@
                     "cursor",
                     "antigravity"
                   ],
-                  "description": "Agent CLI adapter for the escalation model; empty means the role's adapter."
+                  "description": "CLI adapter for the escalation model; required for escalation."
                 },
                 "model": {
                   "type": "string",
-                  "description": "Model id for the escalation model; empty means the role's model."
+                  "description": "Model id for the escalation model; required for escalation."
                 },
                 "reasoning": {
                   "type": "string",
@@ -242,11 +242,11 @@
                     "xhigh",
                     "max"
                   ],
-                  "description": "Reasoning effort for the escalation model; empty means the role's effort."
+                  "description": "Reasoning effort for the escalation model; empty uses no explicit effort."
                 },
                 "variant": {
                   "type": "string",
-                  "description": "Adapter-specific model variant for the escalation model; empty means none."
+                  "description": "Model variant for the escalation model; empty means no variant."
                 }
               }
             }
@@ -258,7 +258,7 @@
         },
         "plan_reviewer": {
           "type": "object",
-          "description": "Role settings for the plan reviewer.",
+          "description": "Role settings for the plan reviewer, which checks the plan.",
           "default": {
             "cli": "",
             "model": "",
@@ -270,7 +270,7 @@
           "properties": {
             "cli": {
               "type": "string",
-              "description": "Agent CLI adapter for this role (claude, opencode, codex, ...).",
+              "description": "Agent CLI adapter that runs this role (for example claude, opencode or codex); empty leaves it unset.",
               "default": "",
               "enum": [
                 "",
@@ -283,12 +283,12 @@
             },
             "model": {
               "type": "string",
-              "description": "Model id for this role; empty means the adapter default.",
+              "description": "Model id this role uses (for example provider/model); empty means the adapter default.",
               "default": ""
             },
             "reasoning": {
               "type": "string",
-              "description": "Reasoning effort for this role; empty means the adapter default.",
+              "description": "Reasoning effort sent to the model (low, medium, high, ...); empty means the adapter default.",
               "default": "",
               "enum": [
                 "",
@@ -303,17 +303,17 @@
             },
             "variant": {
               "type": "string",
-              "description": "Adapter-specific model variant; empty means none.",
+              "description": "Extra model variant for adapters that support it; empty means no variant.",
               "default": ""
             },
             "resume_session": {
               "type": "boolean",
-              "description": "Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true.",
+              "description": "Start from this role's previous session (true) or fresh (false); the implementer defaults to false so a capped run continues fresh with the hand-off note.",
               "default": true
             },
             "fallbacks": {
               "type": "array",
-              "description": "Ordered fallback role entries tried when the primary adapter/model fails.",
+              "description": "Fallback CLI and model entries tried in order when the primary one fails; empty means no fallbacks.",
               "default": [],
               "items": {
                 "type": "object",
@@ -332,11 +332,11 @@
                       "cursor",
                       "antigravity"
                     ],
-                    "description": "Fallback adapter CLI."
+                    "description": "CLI adapter for this fallback entry."
                   },
                   "model": {
                     "type": "string",
-                    "description": "Fallback model id."
+                    "description": "Model id for this fallback entry."
                   },
                   "reasoning": {
                     "type": "string",
@@ -350,11 +350,11 @@
                       "xhigh",
                       "max"
                     ],
-                    "description": "Fallback reasoning effort."
+                    "description": "Reasoning effort for this fallback entry; empty uses the role's value."
                   },
                   "variant": {
                     "type": "string",
-                    "description": "Fallback model variant."
+                    "description": "Model variant for this fallback entry; empty uses the role's value."
                   }
                 }
               }
@@ -367,7 +367,7 @@
         },
         "implementer": {
           "type": "object",
-          "description": "Role settings for the implementer.",
+          "description": "Role settings for the implementer, which makes the code changes.",
           "default": {
             "cli": "",
             "model": "",
@@ -379,7 +379,7 @@
           "properties": {
             "cli": {
               "type": "string",
-              "description": "Agent CLI adapter for this role (claude, opencode, codex, ...).",
+              "description": "Agent CLI adapter that runs this role (for example claude, opencode or codex); empty leaves it unset.",
               "default": "",
               "enum": [
                 "",
@@ -392,12 +392,12 @@
             },
             "model": {
               "type": "string",
-              "description": "Model id for this role; empty means the adapter default.",
+              "description": "Model id this role uses (for example provider/model); empty means the adapter default.",
               "default": ""
             },
             "reasoning": {
               "type": "string",
-              "description": "Reasoning effort for this role; empty means the adapter default.",
+              "description": "Reasoning effort sent to the model (low, medium, high, ...); empty means the adapter default.",
               "default": "",
               "enum": [
                 "",
@@ -412,17 +412,17 @@
             },
             "variant": {
               "type": "string",
-              "description": "Adapter-specific model variant; empty means none.",
+              "description": "Extra model variant for adapters that support it; empty means no variant.",
               "default": ""
             },
             "resume_session": {
               "type": "boolean",
-              "description": "Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true.",
+              "description": "Start from this role's previous session (true) or fresh (false); the implementer defaults to false so a capped run continues fresh with the hand-off note.",
               "default": false
             },
             "fallbacks": {
               "type": "array",
-              "description": "Ordered fallback role entries tried when the primary adapter/model fails.",
+              "description": "Fallback CLI and model entries tried in order when the primary one fails; empty means no fallbacks.",
               "default": [],
               "items": {
                 "type": "object",
@@ -441,11 +441,11 @@
                       "cursor",
                       "antigravity"
                     ],
-                    "description": "Fallback adapter CLI."
+                    "description": "CLI adapter for this fallback entry."
                   },
                   "model": {
                     "type": "string",
-                    "description": "Fallback model id."
+                    "description": "Model id for this fallback entry."
                   },
                   "reasoning": {
                     "type": "string",
@@ -459,11 +459,11 @@
                       "xhigh",
                       "max"
                     ],
-                    "description": "Fallback reasoning effort."
+                    "description": "Reasoning effort for this fallback entry; empty uses the role's value."
                   },
                   "variant": {
                     "type": "string",
-                    "description": "Fallback model variant."
+                    "description": "Model variant for this fallback entry; empty uses the role's value."
                   }
                 }
               }
@@ -473,7 +473,7 @@
                 "object",
                 "null"
               ],
-              "description": "Stronger model used for the next fix round after retries.escalate_after_not_fixed not-fixed reports; null or absent turns escalation off.",
+              "description": "Stronger model used for fix rounds after retries.escalate_after_not_fixed reviews report the same finding not-fixed; null or absent turns escalation off.",
               "additionalProperties": false,
               "patternProperties": {
                 "^_": {}
@@ -489,11 +489,11 @@
                     "cursor",
                     "antigravity"
                   ],
-                  "description": "Agent CLI adapter for the escalation model; empty means the role's adapter."
+                  "description": "CLI adapter for the escalation model; required for escalation."
                 },
                 "model": {
                   "type": "string",
-                  "description": "Model id for the escalation model; empty means the role's model."
+                  "description": "Model id for the escalation model; required for escalation."
                 },
                 "reasoning": {
                   "type": "string",
@@ -507,11 +507,11 @@
                     "xhigh",
                     "max"
                   ],
-                  "description": "Reasoning effort for the escalation model; empty means the role's effort."
+                  "description": "Reasoning effort for the escalation model; empty uses no explicit effort."
                 },
                 "variant": {
                   "type": "string",
-                  "description": "Adapter-specific model variant for the escalation model; empty means none."
+                  "description": "Model variant for the escalation model; empty means no variant."
                 }
               }
             }
@@ -523,7 +523,7 @@
         },
         "code_reviewer": {
           "type": "object",
-          "description": "Role settings for the code reviewer.",
+          "description": "Role settings for the code reviewer, which checks the changes.",
           "default": {
             "cli": "",
             "model": "",
@@ -535,7 +535,7 @@
           "properties": {
             "cli": {
               "type": "string",
-              "description": "Agent CLI adapter for this role (claude, opencode, codex, ...).",
+              "description": "Agent CLI adapter that runs this role (for example claude, opencode or codex); empty leaves it unset.",
               "default": "",
               "enum": [
                 "",
@@ -548,12 +548,12 @@
             },
             "model": {
               "type": "string",
-              "description": "Model id for this role; empty means the adapter default.",
+              "description": "Model id this role uses (for example provider/model); empty means the adapter default.",
               "default": ""
             },
             "reasoning": {
               "type": "string",
-              "description": "Reasoning effort for this role; empty means the adapter default.",
+              "description": "Reasoning effort sent to the model (low, medium, high, ...); empty means the adapter default.",
               "default": "",
               "enum": [
                 "",
@@ -568,17 +568,17 @@
             },
             "variant": {
               "type": "string",
-              "description": "Adapter-specific model variant; empty means none.",
+              "description": "Extra model variant for adapters that support it; empty means no variant.",
               "default": ""
             },
             "resume_session": {
               "type": "boolean",
-              "description": "Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true.",
+              "description": "Start from this role's previous session (true) or fresh (false); the implementer defaults to false so a capped run continues fresh with the hand-off note.",
               "default": true
             },
             "fallbacks": {
               "type": "array",
-              "description": "Ordered fallback role entries tried when the primary adapter/model fails.",
+              "description": "Fallback CLI and model entries tried in order when the primary one fails; empty means no fallbacks.",
               "default": [],
               "items": {
                 "type": "object",
@@ -597,11 +597,11 @@
                       "cursor",
                       "antigravity"
                     ],
-                    "description": "Fallback adapter CLI."
+                    "description": "CLI adapter for this fallback entry."
                   },
                   "model": {
                     "type": "string",
-                    "description": "Fallback model id."
+                    "description": "Model id for this fallback entry."
                   },
                   "reasoning": {
                     "type": "string",
@@ -615,11 +615,11 @@
                       "xhigh",
                       "max"
                     ],
-                    "description": "Fallback reasoning effort."
+                    "description": "Reasoning effort for this fallback entry; empty uses the role's value."
                   },
                   "variant": {
                     "type": "string",
-                    "description": "Fallback model variant."
+                    "description": "Model variant for this fallback entry; empty uses the role's value."
                   }
                 }
               }
@@ -632,7 +632,7 @@
         },
         "verifier": {
           "type": "object",
-          "description": "Role settings for the verifier.",
+          "description": "Role settings for the verifier, which runs the checks.",
           "default": {
             "cli": "",
             "model": "",
@@ -644,7 +644,7 @@
           "properties": {
             "cli": {
               "type": "string",
-              "description": "Agent CLI adapter for this role (claude, opencode, codex, ...).",
+              "description": "Agent CLI adapter that runs this role (for example claude, opencode or codex); empty leaves it unset.",
               "default": "",
               "enum": [
                 "",
@@ -657,12 +657,12 @@
             },
             "model": {
               "type": "string",
-              "description": "Model id for this role; empty means the adapter default.",
+              "description": "Model id this role uses (for example provider/model); empty means the adapter default.",
               "default": ""
             },
             "reasoning": {
               "type": "string",
-              "description": "Reasoning effort for this role; empty means the adapter default.",
+              "description": "Reasoning effort sent to the model (low, medium, high, ...); empty means the adapter default.",
               "default": "",
               "enum": [
                 "",
@@ -677,17 +677,17 @@
             },
             "variant": {
               "type": "string",
-              "description": "Adapter-specific model variant; empty means none.",
+              "description": "Extra model variant for adapters that support it; empty means no variant.",
               "default": ""
             },
             "resume_session": {
               "type": "boolean",
-              "description": "Resume the previous session for this role instead of starting fresh. Defaults to false for the implementer: a capped implementer continues in a fresh session with the hand-off note (the wrap-up turn still resumes); every other role defaults to true.",
+              "description": "Start from this role's previous session (true) or fresh (false); the implementer defaults to false so a capped run continues fresh with the hand-off note.",
               "default": true
             },
             "fallbacks": {
               "type": "array",
-              "description": "Ordered fallback role entries tried when the primary adapter/model fails.",
+              "description": "Fallback CLI and model entries tried in order when the primary one fails; empty means no fallbacks.",
               "default": [],
               "items": {
                 "type": "object",
@@ -706,11 +706,11 @@
                       "cursor",
                       "antigravity"
                     ],
-                    "description": "Fallback adapter CLI."
+                    "description": "CLI adapter for this fallback entry."
                   },
                   "model": {
                     "type": "string",
-                    "description": "Fallback model id."
+                    "description": "Model id for this fallback entry."
                   },
                   "reasoning": {
                     "type": "string",
@@ -724,11 +724,11 @@
                       "xhigh",
                       "max"
                     ],
-                    "description": "Fallback reasoning effort."
+                    "description": "Reasoning effort for this fallback entry; empty uses the role's value."
                   },
                   "variant": {
                     "type": "string",
-                    "description": "Fallback model variant."
+                    "description": "Model variant for this fallback entry; empty uses the role's value."
                   }
                 }
               }
@@ -749,12 +749,12 @@
           "properties": {
             "auto_fallback": {
               "type": "boolean",
-              "description": "Automatically fall back to a free model when the primary is unavailable.",
+              "description": "When the effective model is free and the configured fallbacks are used up, try another free model from the same CLI (true) or not (false).",
               "default": true
             },
             "max_turns": {
               "type": "number",
-              "description": "Maximum turns allowed on a free-model fallback before giving up.",
+              "description": "Most turns a role running a free model may use; 0 turns this extra cap off, and at the limit the run is cut and may continue in a new session.",
               "default": 45,
               "minimum": 0
             }
@@ -810,7 +810,7 @@
       "properties": {
         "task_size_target_turns": {
           "type": "number",
-          "description": "Target turns per task used when splitting oversized work.",
+          "description": "Implementer turns the planner should aim for per task when splitting work; this is guidance, not a hard limit.",
           "default": 30,
           "minimum": 1
         },
@@ -826,25 +826,25 @@
           "properties": {
             "max_turns": {
               "type": "number",
-              "description": "Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "description": "Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
               "default": 30,
               "minimum": 1
             },
             "max_tokens": {
               "type": "number",
-              "description": "Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "description": "Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
               "default": 200000,
               "minimum": 1
             },
             "extra_sessions": {
               "type": "number",
-              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap.",
+              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap.",
               "default": 2,
               "minimum": 0
             },
             "wrap_up_at_tokens": {
               "type": "number",
-              "description": "Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops.",
+              "description": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
               "default": 180000,
               "minimum": 1
             }
@@ -866,25 +866,25 @@
           "properties": {
             "max_turns": {
               "type": "number",
-              "description": "Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "description": "Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
               "default": 30,
               "minimum": 1
             },
             "max_tokens": {
               "type": "number",
-              "description": "Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "description": "Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
               "default": 150000,
               "minimum": 1
             },
             "extra_sessions": {
               "type": "number",
-              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap.",
+              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap.",
               "default": 2,
               "minimum": 0
             },
             "wrap_up_at_tokens": {
               "type": "number",
-              "description": "Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops.",
+              "description": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
               "default": 135000,
               "minimum": 1
             }
@@ -906,25 +906,25 @@
           "properties": {
             "max_turns": {
               "type": "number",
-              "description": "Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "description": "Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
               "default": 40,
               "minimum": 1
             },
             "max_tokens": {
               "type": "number",
-              "description": "Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "description": "Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
               "default": 180000,
               "minimum": 1
             },
             "extra_sessions": {
               "type": "number",
-              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap.",
+              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap.",
               "default": 5,
               "minimum": 0
             },
             "wrap_up_at_tokens": {
               "type": "number",
-              "description": "Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops.",
+              "description": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
               "default": 160000,
               "minimum": 1
             }
@@ -946,25 +946,25 @@
           "properties": {
             "max_turns": {
               "type": "number",
-              "description": "Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "description": "Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
               "default": 22,
               "minimum": 1
             },
             "max_tokens": {
               "type": "number",
-              "description": "Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "description": "Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
               "default": 150000,
               "minimum": 1
             },
             "extra_sessions": {
               "type": "number",
-              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap.",
+              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap.",
               "default": 2,
               "minimum": 0
             },
             "wrap_up_at_tokens": {
               "type": "number",
-              "description": "Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops.",
+              "description": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
               "default": 135000,
               "minimum": 1
             }
@@ -986,25 +986,25 @@
           "properties": {
             "max_turns": {
               "type": "number",
-              "description": "Maximum model turns for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "description": "Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
               "default": 30,
               "minimum": 1
             },
             "max_tokens": {
               "type": "number",
-              "description": "Maximum tokens for this role in one session; at the limit the role stops and hands off, and extra_sessions decides whether it may continue.",
+              "description": "Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
               "default": 150000,
               "minimum": 1
             },
             "extra_sessions": {
               "type": "number",
-              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session is started and the mission stops or reports the cap.",
+              "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap.",
               "default": 2,
               "minimum": 0
             },
             "wrap_up_at_tokens": {
               "type": "number",
-              "description": "Token count at which this role is told to wrap up and hand off before reaching max_tokens; at the limit the role writes its hand-off and stops.",
+              "description": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
               "default": 135000,
               "minimum": 1
             }
@@ -1016,7 +1016,7 @@
         },
         "mission_token_backstop": {
           "type": "number",
-          "description": "Raw-token backstop for a whole mission before it is stopped.",
+          "description": "Cumulative raw tokens (input, cached input and output) allowed across one task; when exceeded the role wraps up and continues in a new backstop session, and two firings in a row stop the task with BACKSTOP_CONSECUTIVE_FIRINGS.",
           "default": 6000000,
           "minimum": 1
         }
@@ -1028,7 +1028,7 @@
     },
     "retries": {
       "type": "object",
-      "description": "Retry and revision budgets for each stage.",
+      "description": "How many times each stage may retry or revise before it stops and asks you.",
       "default": {
         "plan_revisions": 8,
         "implementation": 4,
@@ -1043,55 +1043,55 @@
       "properties": {
         "plan_revisions": {
           "type": "number",
-          "description": "Maximum plan revision rounds before plan review gives up.",
+          "description": "Planner and plan reviewer revision rounds before planning stops; at the limit the plan is escalated for help.",
           "default": 8,
           "minimum": 0
         },
         "implementation": {
           "type": "number",
-          "description": "Failure budget for the implementation phase.",
+          "description": "Implementer fix rounds per phase before the phase stops; at the limit the mission stops and asks you.",
           "default": 4,
           "minimum": 0
         },
         "verification": {
           "type": "number",
-          "description": "Failure budget for the verification phase.",
+          "description": "Verifier FAIL rounds per phase before the phase stops; at the limit the mission stops and asks you.",
           "default": 4,
           "minimum": 0
         },
         "final_review_fix_rounds": {
           "type": "number",
-          "description": "Maximum final-review fix rounds before stopping.",
+          "description": "Final-review fix rounds per mission before it stops; 1 allows one round, and at the limit the mission stops.",
           "default": 2,
           "minimum": 1
         },
         "cli_errors": {
           "type": "number",
-          "description": "Adapter retry budget for transient CLI errors.",
+          "description": "Same-model retries after a CLI error before the run gives up; at the limit the run fails over or stops.",
           "default": 3,
           "minimum": 0
         },
         "infrastructure": {
           "type": "number",
-          "description": "Retry budget for infrastructure failures.",
+          "description": "Retries after an infrastructure error such as a snapshot, sandbox or gate failure; at the limit the mission stops.",
           "default": 3,
           "minimum": 0
         },
         "no_progress_sessions": {
           "type": "number",
-          "description": "Consecutive no-progress generations before a mission is stopped.",
+          "description": "Sessions in a row that change no file before the task stops; 1 stops on the first session that changes nothing.",
           "default": 2,
           "minimum": 1
         },
         "extra_sessions_per_task": {
           "type": "number",
-          "description": "Continuation sessions allowed per task (mirrors caps.implementer.extra_sessions).",
+          "description": "Extra sessions the implementer may start per task after a cap; the caps.implementer.extra_sessions value wins when both are set.",
           "default": 5,
           "minimum": 0
         },
         "escalate_after_not_fixed": {
           "type": "number",
-          "description": "Consecutive reviews that must report the same finding not fixed before the escalation model is used (1 = escalate on the first not-fixed report).",
+          "description": "Reviews in a row that must report the same finding not fixed before the stronger escalation model is used; 1 escalates on the first not-fixed report.",
           "default": 2,
           "minimum": 1
         }
@@ -1123,7 +1123,7 @@
             "number",
             "null"
           ],
-          "description": "Per-role session timeout overrides, in minutes.",
+          "description": "Per-role session time limits in minutes, keyed by role name (for example verifier); past a role's limit that role call is stopped.",
           "default": {
             "default": 60,
             "verifier": 180
@@ -1134,7 +1134,7 @@
                 "number",
                 "null"
               ],
-              "description": "Default wall-clock limit per role session, in minutes.",
+              "description": "Time limit in minutes for one implementer task; past the limit the implementer call is stopped.",
               "default": 60,
               "minimum": 0
             },
@@ -1143,7 +1143,7 @@
                 "number",
                 "null"
               ],
-              "description": "Wall-clock limit for the verifier role session, in minutes.",
+              "description": "Session time limit for the verifier role, in minutes; past the limit the verifier call is stopped.",
               "default": 180,
               "minimum": 0
             }
@@ -1159,7 +1159,7 @@
             "number",
             "null"
           ],
-          "description": "Hard wall-clock backstop for ONE role call, in minutes (not a mission limit): a call that runs past it is stopped. The old name mission_timeout_minutes is still read and migrated.",
+          "description": "Hard wall-clock backstop for one role call, in minutes (not a mission limit); a call that runs past it is stopped. The old name mission_timeout_minutes is still read and migrated.",
           "default": 200,
           "minimum": 0
         },
@@ -1168,7 +1168,7 @@
             "number",
             "null"
           ],
-          "description": "Minimum per-role timeout floor in minutes; null disables the floor.",
+          "description": "Lowest session limit that measured run times may produce, in minutes; null or 0 uses the built-in 10-minute floor.",
           "default": null,
           "minimum": 0
         },
@@ -1177,7 +1177,7 @@
             "number",
             "null"
           ],
-          "description": "Minutes of silence before an active run is treated as hung.",
+          "description": "Minutes without any output before an active run is treated as hung and stopped; 0 turns this watchdog off.",
           "default": 10,
           "minimum": 0
         },
@@ -1186,7 +1186,7 @@
             "number",
             "null"
           ],
-          "description": "Minutes allowed before a session must produce its first output.",
+          "description": "Minutes a new session may run without producing any output before it is stopped; 0 turns this check off.",
           "default": 3,
           "minimum": 0
         },
@@ -1195,7 +1195,7 @@
             "number",
             "null"
           ],
-          "description": "Maximum silence for read-only roles, in minutes.",
+          "description": "Maximum minutes a read-only role may stay silent even while a tool runs before it is stopped; 0 turns this cap off.",
           "default": 15,
           "minimum": 0
         },
@@ -1204,7 +1204,7 @@
             "number",
             "null"
           ],
-          "description": "Seconds to wait between retries.",
+          "description": "Seconds to wait before retrying after a provider or network error; 0 retries immediately.",
           "default": 60,
           "minimum": 0
         }
@@ -1234,62 +1234,62 @@
       "properties": {
         "plan_review": {
           "type": "boolean",
-          "description": "Run a plan review stage before implementation.",
+          "description": "Run the GSD plan-review stage before implementation (true) or skip it (false); only GSD reads this setting. (GSD is not yet reviewed in this version).",
           "default": true
         },
         "plan_review_rounds_converge": {
           "type": "boolean",
-          "description": "Iterate plan review rounds until the plan converges.",
+          "description": "Intended to make the first plan-review round exhaustive and later rounds check only the fixes. Not used by this version; changing it has no effect.",
           "default": true
         },
         "gsd_planning_review": {
           "type": "boolean",
-          "description": "Use the GSD planning-review stages.",
+          "description": "Use the GSD planning-review stages (true) or skip them (false). (GSD is not yet reviewed in this version).",
           "default": false
         },
         "spec_review": {
           "type": "boolean",
-          "description": "Run a spec review stage.",
+          "description": "Intended to run a spec review stage before planning. Not used by this version; changing it has no effect.",
           "default": true
         },
         "code_review_per_phase": {
           "type": "boolean",
-          "description": "Run code review after each implementation phase.",
+          "description": "Intended to run code review after each implementation phase instead of only at the end. Not used by this version; changing it has no effect.",
           "default": true
         },
         "final_review": {
           "type": "boolean",
-          "description": "Run a final review at the end of the mission.",
+          "description": "Intended to run a final review over the whole mission at the end. Not used by this version; changing it has no effect.",
           "default": true
         },
         "analysis_after_tasks": {
           "type": "boolean",
-          "description": "Run an analysis pass after all tasks complete.",
+          "description": "Intended to run an analysis pass after all tasks complete. Not used by this version; changing it has no effect.",
           "default": true
         },
         "approve_spec_myself": {
           "type": "boolean",
-          "description": "Auto-approve the spec without asking the operator.",
+          "description": "Intended to approve the spec automatically without asking you. Not used by this version; changing it has no effect.",
           "default": false
         },
         "approve_plan_myself": {
           "type": "boolean",
-          "description": "Auto-approve the plan without asking the operator.",
+          "description": "Intended to approve the plan automatically without asking you. Not used by this version; changing it has no effect.",
           "default": false
         },
         "parallel_independent_tasks": {
           "type": "boolean",
-          "description": "Run independent tasks in parallel.",
+          "description": "Intended to run independent tasks in parallel. Not used by this version; changing it has no effect.",
           "default": false
         },
         "use_worktrees": {
           "type": "boolean",
-          "description": "Use git worktrees to isolate parallel work.",
+          "description": "Intended to run parallel tasks in separate git worktrees. Not used by this version; changing it has no effect.",
           "default": true
         },
         "commit_by_human": {
           "type": "boolean",
-          "description": "Only a human may commit; roles never run git commit.",
+          "description": "Stop at \"ready to commit\" and let you commit; false is not supported because Autopilot never commits.",
           "default": true
         }
       },
@@ -1313,7 +1313,7 @@
       "properties": {
         "gate_commands": {
           "type": "array",
-          "description": "Commands run as the phase/mission gate.",
+          "description": "Commands run after each phase and at the end as the gate; a failing command fails the phase, and an empty list runs no gate.",
           "default": [],
           "items": {
             "type": "string"
@@ -1321,12 +1321,12 @@
         },
         "gate_network": {
           "type": "boolean",
-          "description": "Allow the gate commands to use the network (false keeps them network-isolated).",
+          "description": "Allow the gate commands to use the network (true); false keeps them network-isolated.",
           "default": false
         },
         "gate_env_allowlist": {
           "type": "array",
-          "description": "Environment variables allowed through to gate commands.",
+          "description": "Environment variable names allowed through to gate commands; empty passes no extra variables.",
           "default": [],
           "items": {
             "type": "string"
@@ -1334,12 +1334,12 @@
         },
         "require_reviewer": {
           "type": "boolean",
-          "description": "Require a reviewer role to sign off before completion.",
+          "description": "Intended to require a reviewer verdict before a phase passes. Not used by this version; changing it has no effect.",
           "default": true
         },
         "browser": {
           "type": "string",
-          "description": "Browser capability mode used for verification (native, playwright or both).",
+          "description": "Browser capability used for verification: native (the agent's own browser), playwright or both.",
           "default": "native",
           "enum": [
             "native",
@@ -1349,7 +1349,7 @@
         },
         "require_browser": {
           "type": "string",
-          "description": "When browser verification is required (always, when-task-requires or never).",
+          "description": "How browser capabilities are required for the verifier: always adds them to every call; when-task-requires and never add them only when the task itself needs a browser.",
           "default": "when-task-requires",
           "enum": [
             "always",
@@ -1359,7 +1359,7 @@
         },
         "verify_denylist": {
           "type": "array",
-          "description": "Commands or paths never allowed in verification.",
+          "description": "Commands or paths that a task or verification step may never run; empty adds no bans beyond the built-in full-suite ban.",
           "default": [],
           "items": {
             "type": "string"
@@ -1387,42 +1387,42 @@
       "properties": {
         "allow_git_commit": {
           "type": "boolean",
-          "description": "Permit roles to run git commit.",
+          "description": "Setting this true is rejected; Autopilot never commits, so keep it false.",
           "default": false
         },
         "allow_git_push": {
           "type": "boolean",
-          "description": "Permit roles to run git push.",
+          "description": "Setting this true is rejected; Autopilot never pushes, so keep it false.",
           "default": false
         },
         "allow_destructive_operations": {
           "type": "boolean",
-          "description": "Permit destructive filesystem or git operations.",
+          "description": "Setting this true is rejected; destructive operations stay blocked, so keep it false.",
           "default": false
         },
         "stop_on_sandbox_violation": {
           "type": "boolean",
-          "description": "Stop the mission when a sandbox/relay violation is detected.",
+          "description": "Setting this false is rejected; a sandbox or relay violation always stops the mission, so keep it true.",
           "default": true
         },
         "block_git_in_roles": {
           "type": "boolean",
-          "description": "Block git commit/push inside role sessions.",
+          "description": "Intended to block git commit and push inside role sessions. Not used by this version; changing it has no effect.",
           "default": true
         },
         "check_read_only_roles": {
           "type": "boolean",
-          "description": "Verify read-only roles by comparing snapshots.",
+          "description": "Intended to check that read-only roles changed no file by comparing before and after snapshots. Not used by this version; changing it has no effect.",
           "default": true
         },
         "record_touched_files": {
           "type": "boolean",
-          "description": "Capture the files each role touches.",
+          "description": "Intended to record the files each role touches. Not used by this version; changing it has no effect.",
           "default": true
         },
         "keep_role_sessions": {
           "type": "boolean",
-          "description": "Persist role sessions so they can be resumed.",
+          "description": "Intended to keep role sessions on disk so a later run can resume them. Not used by this version; changing it has no effect.",
           "default": true
         }
       },
@@ -1441,7 +1441,7 @@
       "properties": {
         "mode": {
           "type": "string",
-          "description": "Runtime containment mode (auto, linux-strong, wsl2-strong or windows-compatibility).",
+          "description": "How roles are contained: auto, linux-strong, wsl2-strong or windows-compatibility.",
           "default": "linux-strong",
           "enum": [
             "auto",
@@ -1455,7 +1455,7 @@
             "string",
             "null"
           ],
-          "description": "WSL2 distribution to use for wsl2-strong mode; null means auto-detect.",
+          "description": "WSL2 distribution used for wsl2-strong mode; null detects it automatically.",
           "default": null
         }
       },
@@ -1520,12 +1520,12 @@
           "properties": {
             "workflow_file": {
               "type": "string",
-              "description": "Path to the SpecKit workflow definition.",
+              "description": "Intended path to the SpecKit workflow definition. Not used by this version; changing it has no effect.",
               "default": ".specify/workflows/speckit/workflow.yml"
             },
             "task_files": {
               "type": "array",
-              "description": "Glob patterns that identify SpecKit task files.",
+              "description": "Glob patterns that identify SpecKit task files; empty means no task files are found.",
               "default": [
                 ".specify/tasks.md",
                 "specs/*/tasks.md",
@@ -1543,7 +1543,7 @@
         },
         "gsd": {
           "type": "object",
-          "description": "GSD phase, artifact and parallelism settings.",
+          "description": "GSD phase, artifact and parallelism settings. (GSD is not yet reviewed in this version).",
           "default": {
             "phase_root": ".planning/phases",
             "run_plan_verify": true,
@@ -1575,42 +1575,42 @@
           "properties": {
             "phase_root": {
               "type": "string",
-              "description": "Root directory holding GSD phase folders.",
+              "description": "Directory holding GSD phase folders. (GSD is not yet reviewed in this version).",
               "default": ".planning/phases"
             },
             "run_plan_verify": {
               "type": "boolean",
-              "description": "Run GSD plan verification.",
+              "description": "Run the gsd-tools plan check (references and state validation) after planning (true) or skip it (false). (GSD is not yet reviewed in this version).",
               "default": true
             },
             "run_state_validate": {
               "type": "boolean",
-              "description": "Run GSD state validation.",
+              "description": "Intended to run GSD state validation. Not used by this version; changing it has no effect. (GSD is not yet reviewed in this version).",
               "default": true
             },
             "write_summary_artifacts": {
               "type": "boolean",
-              "description": "Write GSD summary artifacts.",
+              "description": "Intended to write GSD summary artifacts. Not used by this version; changing it has no effect. (GSD is not yet reviewed in this version).",
               "default": true
             },
             "write_verification_artifacts": {
               "type": "boolean",
-              "description": "Write GSD verification artifacts.",
+              "description": "Intended to write GSD verification artifacts. Not used by this version; changing it has no effect. (GSD is not yet reviewed in this version).",
               "default": true
             },
             "write_uat_artifact": {
               "type": "boolean",
-              "description": "Write the GSD UAT artifact.",
+              "description": "Intended to write the GSD UAT artifact. Not used by this version; changing it has no effect. (GSD is not yet reviewed in this version).",
               "default": true
             },
             "use_gsd_tools_when_available": {
               "type": "boolean",
-              "description": "Use GSD helper tools when they are available.",
+              "description": "Use GSD helper tools when they are available (true) or skip them (false). (GSD is not yet reviewed in this version).",
               "default": true
             },
             "planning_review": {
               "type": "object",
-              "description": "GSD planning-review stage settings.",
+              "description": "GSD planning-review stage settings. (GSD is not yet reviewed in this version).",
               "default": {
                 "enabled": false,
                 "review_after_each_stage": true,
@@ -1626,17 +1626,17 @@
               "properties": {
                 "enabled": {
                   "type": "boolean",
-                  "description": "Enable the GSD planning-review stages.",
+                  "description": "Enable the GSD planning-review stages (true) or skip them (false). (GSD is not yet reviewed in this version).",
                   "default": false
                 },
                 "review_after_each_stage": {
                   "type": "boolean",
-                  "description": "Review after every GSD planning stage.",
+                  "description": "Intended to review after every GSD planning stage. Not used by this version; changing it has no effect. (GSD is not yet reviewed in this version).",
                   "default": true
                 },
                 "stages": {
                   "type": "array",
-                  "description": "GSD planning stages to review.",
+                  "description": "GSD planning stages to review: discuss, research and plan. (GSD is not yet reviewed in this version).",
                   "default": [
                     "discuss",
                     "research",
@@ -1649,13 +1649,13 @@
                 },
                 "max_revisions": {
                   "type": "number",
-                  "description": "Maximum GSD planning-review revisions.",
+                  "description": "Revisions allowed per GSD planning stage; at the limit the stage fails and the mission stops. (GSD is not yet reviewed in this version).",
                   "default": 3,
                   "minimum": 0
                 },
                 "read_only_reviewer": {
                   "type": "boolean",
-                  "description": "Use a read-only reviewer for GSD planning review.",
+                  "description": "Intended to use a read-only reviewer for GSD planning review. Not used by this version; changing it has no effect. (GSD is not yet reviewed in this version).",
                   "default": true
                 }
               },
@@ -1666,7 +1666,7 @@
             },
             "parallel": {
               "type": "object",
-              "description": "Parallel GSD execution settings.",
+              "description": "Parallel GSD execution settings. (GSD is not yet reviewed in this version).",
               "default": {
                 "enabled": false,
                 "plan_level": false,
@@ -1677,28 +1677,28 @@
               "properties": {
                 "enabled": {
                   "type": "boolean",
-                  "description": "Enable parallel GSD execution.",
+                  "description": "Allow GSD work to run in parallel (true) or one at a time (false). (GSD is not yet reviewed in this version).",
                   "default": false
                 },
                 "plan_level": {
                   "type": "boolean",
-                  "description": "Allow plan-level GSD parallelism.",
+                  "description": "Allow different GSD plans to run in parallel (true) or one plan at a time (false). (GSD is not yet reviewed in this version).",
                   "default": false
                 },
                 "task_level": {
                   "type": "boolean",
-                  "description": "Allow task-level GSD parallelism.",
+                  "description": "Tasks inside one GSD plan always run one at a time; this setting has no effect. (GSD is not yet reviewed in this version).",
                   "default": false
                 },
                 "max_concurrent_agents": {
                   "type": "number",
-                  "description": "Maximum concurrent GSD agents.",
+                  "description": "Most GSD agents that may run at once; at the limit new work waits for a free slot. (GSD is not yet reviewed in this version).",
                   "default": 3,
                   "minimum": 1
                 },
                 "min_plans_for_parallel": {
                   "type": "number",
-                  "description": "Minimum plans before parallel GSD execution starts.",
+                  "description": "Smallest number of plans that starts GSD parallel execution; below it plans run one at a time. (GSD is not yet reviewed in this version).",
                   "default": 2,
                   "minimum": 1
                 }
@@ -1742,46 +1742,46 @@
       "properties": {
         "state_file": {
           "type": "string",
-          "description": "Path to the mission state file.",
+          "description": "Intended path to the mission state file. Not used by this version; changing it has no effect.",
           "default": ".autopilot/state.json"
         },
         "runs_dir": {
           "type": "string",
-          "description": "Directory holding run records.",
+          "description": "Intended directory holding run records. Not used by this version; changing it has no effect.",
           "default": ".autopilot/runs"
         },
         "handoff_max_chars": {
           "type": "number",
-          "description": "Maximum characters in a role hand-off document.",
+          "description": "Maximum characters in a role hand-off document; longer text is cut, and values below 500 are rejected.",
           "default": 2000,
           "minimum": 500
         },
         "handoff_note_max_chars": {
           "type": "number",
-          "description": "Maximum characters in a hand-off note.",
+          "description": "Maximum characters in a hand-off note; longer text is cut, and values below 1000 are rejected.",
           "default": 4000,
           "minimum": 1000
         },
         "handoff_wrapup_tokens": {
           "type": "number",
-          "description": "Token count at which a role is told to wrap up its hand-off.",
+          "description": "Token count at which a role is told to wrap up its hand-off; it must be below the implementer token cap.",
           "default": 160000,
           "minimum": 1
         },
         "fallback_retry_primary_minutes": {
           "type": "number",
-          "description": "Minutes to wait before retrying the primary model after a fallback took over.",
+          "description": "Minutes to wait before retrying the primary model after a fallback took over; 0 uses the built-in 60-minute wait.",
           "default": 60,
           "minimum": 0
         },
         "checkpoint_after_task": {
           "type": "boolean",
-          "description": "Write a checkpoint after each task.",
+          "description": "Intended to write a checkpoint after each task. Not used by this version; changing it has no effect.",
           "default": true
         },
         "checkpoint_after_phase": {
           "type": "boolean",
-          "description": "Write a checkpoint after each phase.",
+          "description": "Intended to write a checkpoint after each phase. Not used by this version; changing it has no effect.",
           "default": true
         },
         "capabilities": {
@@ -1796,7 +1796,7 @@
           "properties": {
             "project_defaults": {
               "type": "array",
-              "description": "Capabilities assumed present for this project.",
+              "description": "Capabilities assumed present for every role in this project; empty adds none.",
               "default": [],
               "items": {
                 "type": "string"
@@ -1804,7 +1804,7 @@
             },
             "role_requirements": {
               "type": "object",
-              "description": "Per-role capability requirements.",
+              "description": "Extra capabilities required per role, keyed by role name; empty adds none.",
               "default": {},
               "properties": {},
               "additionalProperties": false,
@@ -1820,7 +1820,7 @@
             },
             "safety_denied": {
               "type": "array",
-              "description": "Capabilities explicitly denied for safety.",
+              "description": "Intended to deny capabilities for safety. Not used by this version; changing it has no effect.",
               "default": [],
               "items": {
                 "type": "string"
@@ -1828,7 +1828,7 @@
             },
             "legacy_text_inference": {
               "type": "boolean",
-              "description": "Infer capabilities from task text (legacy behaviour).",
+              "description": "Infer browser capabilities from task text for the verifier (legacy); false keeps inference off.",
               "default": false
             }
           },
