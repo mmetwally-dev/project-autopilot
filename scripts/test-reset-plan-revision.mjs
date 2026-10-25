@@ -27,7 +27,15 @@ function check(name, condition, detail){
   console.error(`FAIL ${name}${detail !== undefined ? ` :: ${JSON.stringify(detail)}` : ""}`);
 }
 
+const tempDirs = new Set();
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, {recursive: true, force: true}); } catch { /* best-effort */ }
+  }
+});
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ap-reset-plan-revision-"));
+tempDirs.add(tmp);
 const queueFile = () => path.join(tmp, `reset-${Math.random().toString(36).slice(2)}.json`);
 
 function spentState(mission = "001-test-mission"){

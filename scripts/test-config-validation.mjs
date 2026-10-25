@@ -5,7 +5,15 @@ import path from "node:path";
 import {validateConfigForSave, validateExecutionConfig, validatePolicyConfig} from "./config-validation.mjs";
 import {resolveFinalReviewFixRounds, FINAL_REVIEW_FIX_ROUNDS_DEFAULT} from "./per-task-budget.mjs";
 
+const tempDirs = new Set();
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+});
+
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ap-validation-"));
+tempDirs.add(temporary);
 const binary = process.platform === "win32" ? path.join(temporary, "fake-cli.cmd") : path.join(temporary, "fake-cli");
 if (process.platform === "win32") {
   fs.writeFileSync(binary, '@echo off\r\nif "%1"=="--help" (echo --model MODEL --effort LEVEL --resume-last) else (echo ok)\r\n');

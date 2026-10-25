@@ -16,6 +16,13 @@ import {createGitMutationGuard, BLOCKED_SUBCOMMANDS} from "./relay-guards.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const IS_WIN = process.platform === "win32";
 
+const tempDirs = new Set();
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, {recursive: true, force: true}); } catch { /* best-effort */ }
+  }
+});
+
 let failures = 0;
 function check(name, condition, detail) {
   if (condition) { console.log(`PASS ${name}`); return; }
@@ -24,6 +31,7 @@ function check(name, condition, detail) {
 }
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "ap-fgf-"));
+tempDirs.add(root);
 const repo = path.join(root, "repo");
 fs.mkdirSync(repo, {recursive: true});
 function rawGit(args, opts = {}) {

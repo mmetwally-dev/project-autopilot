@@ -59,10 +59,15 @@ assert.match(
   /✓ Standalone: built in — Autopilot writes the plan itself \(PLAN\.md \+ TASKS\.md per mission\)/,
   "framework availability must show the built-in Standalone first"
 );
+assert.doesNotMatch(
+  setup,
+  /GSD: (?:found \(\.planning\/\)|not detected)/,
+  "Framework availability must not list GSD at all, with or without .planning/"
+);
 assert.match(
   setup,
-  /· GSD: found \(\.planning\/\) — support comes in a future version/,
-  "a detected .planning/ must be reported as found but not yet supported"
+  /`\$\{symbolFor\("speckit"\)\} SpecKit: \$\{stateFor\("speckit"\)\}`/,
+  "framework availability must still report SpecKit"
 );
 
 console.log("config/framework separation test passed");

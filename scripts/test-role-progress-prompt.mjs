@@ -25,6 +25,13 @@ import {
 } from "./role-progress-brief.mjs";
 import {emptyRoleProgress} from "./phase-stage-checkpoint.mjs";
 
+const tempDirs = new Set();
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+});
+
 let ok = 0;
 let failed = 0;
 function check(name, condition, evidence) {
@@ -407,6 +414,7 @@ for (const framework of ["standalone", "speckit"]) {
 // ── Phase brief producer (task 10), asserted on its own ──────────────────
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ap-phase-brief-"));
+  tempDirs.add(dir);
   const mission = "001-example";
   const rel = phaseBriefRelativePath(mission, 1);
   check("brief: decided path is per-mission and per-phase",

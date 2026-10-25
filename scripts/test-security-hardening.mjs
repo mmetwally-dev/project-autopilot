@@ -7,6 +7,13 @@ import { spawnSync } from 'node:child_process';
 import { evaluateCommand, sandboxCommandPrefix } from './shell-guard.mjs';
 import { createGitMutationGuard, guardedCommandEnv, gitSnapshot, readGuardLog, touchedFilesBetween } from './relay-guards.mjs';
 
+const tempDirs = new Set();
+process.on('exit', () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, {recursive: true, force: true}); } catch { /* best-effort */ }
+  }
+});
+
 const blocked = [
   'rm -rf .',
   'rm -rf ./',
@@ -74,6 +81,7 @@ const oldCustom = process.env.AUTOPILOT_TEST_SECRET;
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'do-not-pass';
 process.env.AUTOPILOT_TEST_SECRET = 'explicitly-allowed';
 const tmpRun = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-hardening-env-'));
+tempDirs.add(tmpRun);
 const gitGuard = createGitMutationGuard(tmpRun);
 const envDefault = guardedCommandEnv(gitGuard);
 assert.equal(envDefault.SUPABASE_SERVICE_ROLE_KEY, undefined, 'secret env var must not be exposed by default');
@@ -87,6 +95,7 @@ if (oldSecret === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY; else 
 if (oldCustom === undefined) delete process.env.AUTOPILOT_TEST_SECRET; else process.env.AUTOPILOT_TEST_SECRET = oldCustom;
 
 const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-hardening-git-'));
+tempDirs.add(repo);
 const run = (args) => spawnSync('git', args, { cwd: repo, encoding: 'utf8', stdio: 'pipe', shell: false });
 assert.equal(run(['init', '-q']).status, 0);
 assert.equal(run(['config', 'user.email', 'test@example.com']).status, 0);

@@ -9,6 +9,13 @@ import { toNewLayoutConfig } from "./config-layout.mjs";
 import { initRun } from "./run-observability.mjs";
 import { rebuildSummary } from "./watch-summary.mjs";
 
+const tempDirs = new Set();
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+});
+
 const failures = [];
 const check = (name, cond, extra) => {
   if (cond) console.log(`PASS ${name}`);
@@ -19,6 +26,7 @@ const run = (o) => ({ status: "completed", decision: null, findings: [], ...o })
 
 function mkRepo() {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "ap-f1-"));
+  tempDirs.add(repo);
   return repo;
 }
 
@@ -191,6 +199,7 @@ check("F1b owner alive: CURRENT RUN", reportAlive.includes("=== CURRENT RUN ==="
 
 // --- F1b: no live run -> LIVE PROGRESS uses newest run's progress.log ---
 const repoLP = fs.mkdtempSync(path.join(os.tmpdir(), "ap-f1-lp-"));
+tempDirs.add(repoLP);
 const missionLP = "lp-mission";
 fs.mkdirSync(path.join(repoLP, ".autopilot", "missions", missionLP, "runs", "01-implementer-lp"), { recursive: true });
 fs.writeFileSync(path.join(repoLP, ".autopilot", "state.json"), JSON.stringify({ mission: missionLP, phase: "implementing", step: "implement", phaseIndex: 0, attempt: 1, planningDetection: { framework: "standalone" } }, null, 2));

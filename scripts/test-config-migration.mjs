@@ -36,7 +36,15 @@ if (direct.meta?.config_metadata?.migrated_from !== '1.4') throw new Error(`meta
 // The runtime shape still resolves the operator role.
 if (toRuntimeConfig(directLayout).roles.planner.adapter !== 'claude') throw new Error('toRuntimeConfig did not resolve the migrated role');
 
+const tempDirs = new Set();
+process.on('exit', () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, {recursive: true, force: true}); } catch { /* best-effort */ }
+  }
+});
+
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'ap-migration-'));
+tempDirs.add(tmp);
 const file=path.join(tmp,'config.json'); fs.writeFileSync(file,JSON.stringify(old,null,2));
 const loaded=loadAndMigrateConfig(file,{persist:true});
 if(!loaded.changed || !loaded.backupPath || !fs.existsSync(loaded.backupPath)) throw new Error('Persistent migration failed');

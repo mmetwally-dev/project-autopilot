@@ -13,7 +13,15 @@ function check(name, condition, evidence) {
   failed += 1;
 }
 
+const tempDirs = new Set();
+process.on('exit', () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, {recursive: true, force: true}); } catch { /* best-effort */ }
+  }
+});
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-runtime-wire-'));
+tempDirs.add(tmp);
 const file = path.join(tmp, 'config.json');
 
 const v4 = {

@@ -26,7 +26,15 @@ function assertDefaultsPresent(actual, defaults, prefix = "") {
   }
 }
 
+const tempDirs = new Set();
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+});
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ap-migration-fill-"));
+tempDirs.add(tmp);
 const configPath = path.join(tmp, ".autopilot", "config.json");
 fs.mkdirSync(path.dirname(configPath), { recursive: true });
 

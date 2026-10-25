@@ -5,7 +5,15 @@ import path from "node:path";
 import assert from "node:assert/strict";
 import {discoverModelCatalog, parseOpenCodeVerboseOutput, parseAntigravityModels} from "./model-discovery.mjs";
 
+const tempDirs = new Set();
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+});
+
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ap-models-"));
+tempDirs.add(temporary);
 const server = path.join(temporary, "fake-codex.mjs");
 fs.writeFileSync(server, `process.stdin.setEncoding("utf8");let buffer="";process.stdin.on("data",chunk=>{buffer+=chunk;if(buffer.includes('"method":"model/list"')){console.log(JSON.stringify({jsonrpc:"2.0",id:2,result:{data:[{slug:"gpt-test-a",displayName:"GPT Test A",supportedReasoningEfforts:["low","high"]},{slug:"gpt-test-b",displayName:"GPT Test B",supportedReasoningEfforts:["medium"]}]}}));}});`);
 let binary;

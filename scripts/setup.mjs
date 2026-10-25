@@ -1017,10 +1017,7 @@ function frameworkAvailabilityLines(detectedFrameworks) {
   const symbolFor = id => detectedFrameworks.includes(id) ? "✓" : "·";
   return [
     "✓ Standalone: built in — Autopilot writes the plan itself (PLAN.md + TASKS.md per mission)",
-    `${symbolFor("speckit")} SpecKit: ${stateFor("speckit")}`,
-    detectedFrameworks.includes("gsd")
-      ? "· GSD: found (.planning/) — support comes in a future version"
-      : "· GSD: not detected"
+    `${symbolFor("speckit")} SpecKit: ${stateFor("speckit")}`
   ];
 }
 
@@ -1793,8 +1790,8 @@ async function printStartScreen(detectedFrameworks) {
     if (gatesInScope && interactive) {
       if (!existingGateCommands.length) {
         const gatePrompt = detectedGateCommand
-          ? `Test command (Autopilot runs it after each phase to make sure nothing broke):\nFound: ${detectedGateCommand}\nEnter = use it · type another command · "-" = no tests\n> `
-          : `Test command (Autopilot runs it after each phase to make sure nothing broke):\nNone found.\nType a command, or Enter / "-" for no tests\n> `;
+          ? `\nTest command (Autopilot runs it after each phase to make sure nothing broke):\nFound: ${detectedGateCommand}\nEnter = use it · type another command · "-" = no tests\n> `
+          : `\nTest command (Autopilot runs it after each phase to make sure nothing broke):\nNone found.\nType a command, or Enter / "-" for no tests\n> `;
 
         // ask() renders its question only through readline; the forced
         // interactive path answers preloaded stdin lines without printing
@@ -1807,7 +1804,7 @@ async function printStartScreen(detectedFrameworks) {
       } else if (editMode) {
         const savedJoined = existingGateCommands.join(" && ");
         const gatePrompt =
-          `Test command (Autopilot runs it after each phase to make sure nothing broke):\n` +
+          `\nTest command (Autopilot runs it after each phase to make sure nothing broke):\n` +
           `Current: ${savedJoined}\n` +
           `Enter = keep it · type another command · "-" = no tests\n> `;
 

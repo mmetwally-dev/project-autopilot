@@ -23,7 +23,15 @@ function check(name, condition, evidence) {
   failed += 1;
 }
 
+const tempDirs = new Set();
+process.on('exit', () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, {recursive: true, force: true}); } catch { /* best-effort */ }
+  }
+});
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-outofband-'));
+tempDirs.add(tmp);
 const autopilotDir = path.join(tmp, '.autopilot');
 fs.mkdirSync(autopilotDir, { recursive: true });
 const configFile = path.join(autopilotDir, 'config.json');

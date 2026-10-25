@@ -85,7 +85,7 @@ function runSetupWizard({repo, binDir}) {
 async function main() {
   const binDir = makeFakeCliDir();
   const repo = makeRepo();
-  // Backlog #4: a .planning/ repo must show GSD as found but never offer it.
+  // Backlog #4: a .planning/ repo must never show GSD in Framework availability.
   fs.mkdirSync(path.join(repo, '.planning'), {recursive: true});
   fs.writeFileSync(path.join(repo, '.planning', 'ROADMAP.md'), '# Roadmap\n');
   fs.writeFileSync(path.join(repo, '.planning', 'STATE.md'), '# State\n');
@@ -105,7 +105,8 @@ async function main() {
     check('wizard Playwright lines are not under Framework availability', !/Playwright module/.test(wizardFrameworkSlice), wizardFrameworkSlice);
     check('wizard start screen uses the plain reviewer line', /[✓·✗] Reviewers (can run|will work|cannot run)/.test(r.out), r.out.slice(0, 2500));
     check('wizard start screen does not use the old reviewer wording', !r.out.includes("Current reviewer mode:") && !r.out.includes("filesystem containment available"), r.out.slice(0, 2500));
-    check('a .planning/ repo shows GSD as found but not supported', r.out.includes("· GSD: found (.planning/) — support comes in a future version"), r.out.slice(0, 2000));
+    check('a .planning/ repo shows no GSD availability line', !/^[✓·] GSD:/m.test(wizardFrameworkSlice), wizardFrameworkSlice);
+    check('a .planning/ repo still lists Standalone and SpecKit availability', /^✓ Standalone: built in/m.test(wizardFrameworkSlice) && /^[✓·] SpecKit: (?:available|not detected)$/m.test(wizardFrameworkSlice), wizardFrameworkSlice);
     check('GSD is not offered as a framework choice', !r.out.includes("GSD — use this project") && !r.out.includes("GSD — current value"), r.out.slice(0, 3000));
 
     const configPath = path.join(repo, '.autopilot', 'config.json');

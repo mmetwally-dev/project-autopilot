@@ -28,6 +28,13 @@ function mode(id, available, supportedFrameworks, extra = {}) {
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skillRoot = path.resolve(here, "..");
 
+const tempDirs = new Set();
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, {recursive: true, force: true}); } catch { /* best-effort */ }
+  }
+});
+
 let failures = 0;
 function check(name, condition, detail) {
   if (condition) { console.log(`PASS ${name}`); return; }
@@ -226,6 +233,7 @@ if (process.platform === "win32") {
 // result.json.
 function makeRepo() {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "ap-task42-"));
+  tempDirs.add(repo);
   const git = (args) => spawnSync("git", args, {cwd: repo, encoding: "utf8", stdio: "pipe", env: withoutOuterGitGuard(process.env), shell: false});
   git(["init", "-q"]);
   git(["config", "user.email", "task42@example.invalid"]);
@@ -237,6 +245,7 @@ function makeRepo() {
 }
 function makeBin() {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "ap-task42-bin-"));
+  tempDirs.add(binDir);
   const cursorAgentPath = path.join(binDir, "cursor-agent");
   fs.copyFileSync(path.join(here, "test-fixtures", "relay-scratch-probe-adapter.sh"), cursorAgentPath);
   fs.chmodSync(cursorAgentPath, 0o755);
