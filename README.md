@@ -30,6 +30,18 @@ planning and review and a free opencode model for coding. The reviewers run
 read-only, and **Autopilot never commits or pushes**: when the mission is done,
 the changes wait in your working tree for you to review and commit.
 
+**Works with:**
+
+- **[SpecKit](https://github.com/github/spec-kit)** — if your project uses
+  SpecKit (`.specify/`, `specs/*/tasks.md`), Autopilot picks up its tasks and
+  implements, reviews and tests them. Without SpecKit it writes its own plan
+  (`PLAN.md` + `TASKS.md`) — nothing else to install.
+- **[Playwright](https://playwright.dev)** — built in: the verifier checks
+  browser tasks in a real browser (install the browser once with
+  `npm run playwright:install`).
+- **Agent CLIs** — Claude Code, opencode, Codex and Antigravity, mixed freely
+  across the roles.
+
 ## Install
 
 Needs Node.js 18+, Git and at least one signed-in agent CLI
@@ -313,7 +325,7 @@ Every command takes `--repo <path>`; the default is the current folder.
 | `ap reset [--scope <key>]` | Give spent retry counters a fresh start |
 | `ap rebase [--note "<why>"] [--yes]` | Accept your own edits made while a mission was paused |
 | `ap finding list` / `ap finding drop <n> [--note "<why>"] [--yes]` | List the current review findings / drop one you disagree with |
-| `ap config [--role <role>]` | Change roles, models and options interactively |
+| `ap config [--role <role>]` | Change roles, models, the test command and other options interactively |
 | `ap config show [--path <key.path>]` | Print the effective settings, each marked `[default]` or `[from config.json]` |
 | `ap config fill [--dry-run]` | Add every missing setting at its default (after an upgrade) |
 | `ap commands` | Re-install the `/ap.*` slash-command files |
@@ -734,7 +746,8 @@ phase/plan/wave/dependencies), runs PLAN tasks through the same engine, can revi
 each planning stage (`frameworks.gsd.planning_review`), and can run independent
 PLANs of one wave in separate worktrees. It requires Strong mode. It has not been
 reviewed and tested end to end for this release, so it is not documented as
-supported yet; full documentation will follow in a future version.
+supported yet, and `ap setup` / `ap config` do not offer it; full documentation
+will follow in a future version.
 
 ## Configuration
 
@@ -829,7 +842,8 @@ setting if your tools are slow to print.
 
 **The gate fails on tests the mission did not touch.** Tests that also fail
 on the code before the phase are not blamed on the phase. Fix them separately,
-or narrow `tests.gate_commands`.
+or change the test command with `ap config` (Enter keeps it, type a new command,
+or `-` for no tests).
 
 **I edited `state.json` and now it is confused.** Do not edit it by hand. Use
 `ap reset`, `ap rebase`, `ap finding drop` or `ap cancel`; they keep the state

@@ -1,6 +1,6 @@
 ---
 name: project-autopilot
-description: "Multi-agent delivery orchestrator: give a request and it plans, codes, reviews and tests it with your coding-agent CLIs (Planning -> Plan Review -> Implementation -> Code Review -> Gate -> Verification -> Final Review), then leaves the change for a human to commit. Works with standalone and SpecKit projects and the Claude Code, opencode, Codex and Antigravity CLIs. Runs directly with Node; no installer or certification."
+description: "Multi-agent delivery orchestrator: give a request and it plans, codes, reviews and tests it with your coding-agent CLIs (Planning -> Plan Review -> Implementation -> Code Review -> Gate -> Verification -> Final Review), then leaves the change for a human to commit. Works with standalone and SpecKit projects, checks browser tasks with Playwright, and uses the Claude Code, opencode, Codex and Antigravity CLIs. Runs directly with Node; no installer or certification."
 ---
 # Project Autopilot
 
@@ -10,7 +10,9 @@ agent CLI and model, and every result is checked before the next step:
 
 **Planning → Plan Review → Implementation → Code Review → Gate (tests) → Verification → Final Review → Human Review/Commit**
 
-It is standalone: no other skill is required. The human-facing guide with all
+**Works with SpecKit** (drives an existing SpecKit project's tasks) **and Playwright**
+(built in; the verifier checks browser tasks in a real browser). Without SpecKit
+it writes its own plan. It is standalone: no other skill is required. The human-facing guide with all
 details is `README.md`; this file is the operating summary for an agent.
 
 ## Rules for an agent using this skill
@@ -278,10 +280,11 @@ aliases) marked non-live, else manual entry.
 ## Setup and configuration
 
 `ap setup` detects installed CLIs (`claude`, `codex`, `opencode`, `agy`,
-`cursor-agent`), SpecKit/GSD, Playwright and bubblewrap, then configures each
+`cursor-agent`), SpecKit, Playwright and bubblewrap, then configures each
 role, fallbacks, escalation models, gate commands (it suggests `npm test`,
 `pytest`, `go test ./...`, `cargo test` or `make test` when found) and the
-runtime mode. On Native Windows the only question is WSL2 Strong vs Windows
+runtime mode. `ap config` can later keep, change or clear the saved test
+command. On Native Windows the only question is WSL2 Strong vs Windows
 Compatibility, asked when both are usable; the gate network setting follows the
 mode (isolated in WSL, network allowed in Compatibility).
 
@@ -318,7 +321,8 @@ Every setting with its default is in README → Configuration reference
 - **GSD — not yet reviewed in this version; coming in a future version.** The
   adapter exists (`.planning/` phases, PLAN frontmatter for phase/plan/wave,
   planning-review stages, worktree waves; Strong mode only) but is not reviewed
-  or tested end to end for this release.
+  or tested end to end for this release; `ap setup` / `ap config` do not offer
+  it.
 - **Cursor — not yet reviewed in this version; coming in a future version.**
   `cursor-agent` is accepted as a role CLI but has not been reviewed or tested.
 
