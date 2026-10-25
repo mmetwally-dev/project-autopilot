@@ -1044,11 +1044,11 @@ Which review and approval stages run, and how work is committed.
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
 | `workflow.plan_review` | `true` | — | Run the GSD plan-review stage before implementation (true) or skip it (false); only GSD reads this setting. (GSD is not yet reviewed in this version). |
-| `workflow.plan_review_rounds_converge` | `true` | — | Intended to make the first plan-review round exhaustive and later rounds check only the fixes. Not used by this version; changing it has no effect. |
+| `workflow.plan_review_rounds_converge` | `true` | — | Make the first plan-review round review the whole plan and later rounds check only the requested fixes (true), or re-review the whole plan every round (false); default true. Applies to standalone and SpecKit planning; GSD uses its own plan-review settings. The legacy name plan_review_convergence is still read and migrated. |
 | `workflow.gsd_planning_review` | `false` | — | Use the GSD planning-review stages (true) or skip them (false). (GSD is not yet reviewed in this version). |
 | `workflow.spec_review` | `true` | — | Intended to run a spec review stage before planning. Not used by this version; changing it has no effect. |
-| `workflow.code_review_per_phase` | `true` | — | Intended to run code review after each implementation phase instead of only at the end. Not used by this version; changing it has no effect. |
-| `workflow.final_review` | `true` | — | Intended to run a final review over the whole mission at the end. Not used by this version; changing it has no effect. |
+| `workflow.code_review_per_phase` | `true` | — | Run a code review after each implementation phase (true), or skip the per-phase review and rely on the end-of-mission review (false); default true. The legacy name implementationReview is still read and migrated. |
+| `workflow.final_review` | `true` | — | Run a final review over the whole mission at the end, including its fix rounds (true), or skip it and complete the mission after implementation (false); default true. The legacy name finalReview is still read and migrated. |
 | `workflow.analysis_after_tasks` | `true` | — | Intended to run an analysis pass after all tasks complete. Not used by this version; changing it has no effect. |
 | `workflow.approve_spec_myself` | `false` | — | Intended to approve the spec automatically without asking you. Not used by this version; changing it has no effect. |
 | `workflow.approve_plan_myself` | `false` | — | Intended to approve the plan automatically without asking you. Not used by this version; changing it has no effect. |

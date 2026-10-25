@@ -994,6 +994,18 @@ case "$ROLE" in
       echo "adapter transport exploded: unexpected EOF from backend" >&2
       exit 1
     fi
+    if [ "$SCENARIO" = "speckit_unchecked_task_left" ] && printf '%s\n' "$PROMPT" | grep -q 'phase 2/3' && ! grep -q 'Injected unchecked task' specs/*/tasks.md 2>/dev/null; then
+      # Mission 098 task 1.6: append a NEW phase to the feature's tasks.md
+      # while the per-phase loop is already running. The loop's phaseList
+      # was parsed before this write, so the injected phase is never
+      # executed; the mission-final unchecked-task guard re-reads disk and
+      # must refuse to complete. The append happens once, on Phase 2's
+      # Implementer, and leaves the real Phase 2/3 work untouched.
+      for f in specs/*/tasks.md; do
+        [ -f "$f" ] || continue
+        printf '\n## Phase 4: Injected after planning\n\n- [ ] Injected unchecked task\n' >> "$f"
+      done
+    fi
     if [ "$SCENARIO" = "speckit_git_invisible_phase" ]; then
       # TASK 15.6F: the real incident replay — creates ONLY the empty docs/
       # directory (a filesystem change Git cannot represent: no counter

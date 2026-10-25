@@ -722,6 +722,31 @@ export function validateTransition(from, to) {
   };
 }
 
+// Explicitly skip the current stage and advance to `to` (e.g. skipping the
+// per-phase code review when the workflow switch is off). The destination is
+// still validated against the same transition table as every normal advance,
+// so a skip can never invent an edge. A skipped stage is not an attempt, so
+// the revision and attempts counters are returned unchanged; the transition
+// carries no approval fields (`clearApprovals`, findings, run ids), because a
+// skip neither grants nor consumes an approval.
+export function skipCheckpointStage(checkpoint, to, reason) {
+  const structural = validateCheckpoint(checkpoint);
+  if (!structural.ok) {
+    return {ok: false, code: structural.code, reason: structural.reason, evidence: structural.evidence};
+  }
+  const current = resumeStage(checkpoint);
+  if (!isStage(current)) {
+    return {ok: false, code: INVALID_CODE, reason: "checkpoint has no valid current stage", evidence: {}};
+  }
+  const edge = validateTransition(current, to);
+  if (!edge.ok) return {ok: false, code: edge.code, reason: edge.reason, evidence: edge.evidence};
+  return {
+    ok: true, action: "advance", nextStage: to, revision: checkpoint.revision,
+    attempts: {...(checkpoint.attempts ?? {})},
+    reason: reason ?? `skip ${current} -> ${to}`,
+  };
+}
+
 // Create the revision-1 checkpoint for a phase with no checkpoint yet.
 // Pure construction only — the caller persists it.
 //

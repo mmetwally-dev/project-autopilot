@@ -452,7 +452,7 @@ function buildPlanningRuns(runs, { status: missionStatus } = {}) {
 
 // Final review rounds: each code_reviewer/verifier opens a round; fix-pass
 // implementer runs between reviews belong to the preceding round.
-function buildFinalReview(runs, { status: missionStatus } = {}) {
+function buildFinalReview(runs, { status: missionStatus, skipped } = {}) {
   const rounds = [];
   let current = null;
   for (const run of runs) {
@@ -466,7 +466,8 @@ function buildFinalReview(runs, { status: missionStatus } = {}) {
   }
   const terminal = terminalStageStatus(missionStatus);
   let status;
-  if (!runs.length) status = "not_started";
+  if (skipped && !runs.length) status = "skipped";
+  else if (!runs.length) status = "not_started";
   else if (runs.some(isRunning) && !terminal) status = "in_progress";
   else {
     const reviewers = runs.filter((r) => REVIEW_ROLES.has(roleOf(r)));
@@ -500,6 +501,7 @@ function classifyStage(state, planning, phases, finalReview) {
   if (statePhase === "final_review") return "FINAL REVIEW";
   if (statePhase === "planning" || /planning/.test(String(state?.step || ""))) return "PLANNING";
   if (statePhase === "implementing" || statePhase === "verifying" || statePhase === "tasks_ready") return "IMPLEMENTATION";
+  if (finalReview.status === "skipped") return "FINAL REVIEW";
   if (finalReview.runs.length > 0 && (finalReview.status === "in_progress" || finalReview.status === "passed")) return "FINAL REVIEW";
   const anyImpl = phases.some((p) => p.runs.length > 0);
   if (!anyImpl && planning.runs.length > 0) return "PLANNING";
@@ -1236,7 +1238,7 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
   }
 
   const planning = buildPlanningRuns(planningRuns, { status: statusInfo.status });
-  const finalReview = buildFinalReview(finalReviewRuns, { status: statusInfo.status });
+  const finalReview = buildFinalReview(finalReviewRuns, { status: statusInfo.status, skipped: Boolean(state?.finalReviewSkipped) });
 
   const mission = typeof state?.mission === "string" && state.mission ? state.mission : null;
   const framework = state?.planningDetection?.framework ?? null;
@@ -2492,6 +2494,8 @@ export function renderFinalReviewStage(model) {
   const limitRaw = Number(model?.policy?.final_review_fix_rounds);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : null;
   const runs = fr.runs || [];
+  // workflow.final_review=false: state carries the marker and there are no runs.
+  if (fr.status === "skipped") return "=== FINAL REVIEW STAGE ===  – SKIPPED (workflow.final_review=false)";
   // Rule 7 (backlog #7): the final-review section does not exist until the
   // stage starts - no `○ NOT STARTED` placeholder while implementation runs.
   if (fr.status === "not_started" && !runs.length) return "";

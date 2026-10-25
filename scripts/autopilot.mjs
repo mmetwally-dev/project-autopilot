@@ -109,7 +109,7 @@ import {runFailedBeforeFirstStep, isSessionNotFound, storedSessionMatches} from 
 import {failedRunDidWork, appendFailureHandoff} from "./failure-handoff.mjs";
 import {decideRoleFallback, resolveEffectiveRoleModel, formatRoleFallbackLog, decideRoleFallbackRetry, stampStickyFallback, staleStickyFallback, markExhausted, isExhausted, skipExhaustedRoleModel} from "./role-fallback.mjs";
 import {setTaskCheckboxes, applyTaskCheckboxStates} from "./speckit-task-state.mjs";
-import {CHECKPOINT_STATE_KEY, createCheckpoint, validateCheckpoint, isCheckpointForPhase, resumeStage, isApprovalReuseStage, phaseTaskDigest, deltaDigest, evaluatePlanningGate, decideTransition, emptyRoleProgress, retryPauseStageOf, shouldRetryPause, getCachedGateResult, setCachedGateResult, recordContinuationGateResult, takeContinuationGateResult, clearContinuationGateResult, getLastGateResult, recordLastGateResult} from "./phase-stage-checkpoint.mjs";
+import {CHECKPOINT_STATE_KEY, createCheckpoint, validateCheckpoint, isCheckpointForPhase, resumeStage, isApprovalReuseStage, phaseTaskDigest, deltaDigest, evaluatePlanningGate, decideTransition, emptyRoleProgress, retryPauseStageOf, shouldRetryPause, getCachedGateResult, setCachedGateResult, recordContinuationGateResult, takeContinuationGateResult, clearContinuationGateResult, getLastGateResult, recordLastGateResult, skipCheckpointStage} from "./phase-stage-checkpoint.mjs";
 import {validatePendingCheckboxSnapshot} from "./pending-checkbox-snapshot.mjs";
 import {rebasePhaseCheckpointDrift} from "./phase-delta-rebase.mjs";
 import {buildSecurityChecklistSection} from "./security-checklist.mjs";
@@ -319,6 +319,9 @@ const MISSION_SCOPED_STATE_KEYS=Object.freeze([
   // the next fallback (see the choke point after the idleBreach override
   // below). Mission-scoped so a new mission starts on primaries again.
   "activeRoleModels",
+  // Backlog #13: workflow.final_review=false recorded a skipped mission-final
+  // review for THIS mission only — never inherited by the next one.
+  "finalReviewSkipped",
   // Pending #22: one-round escalation model bookkeeping + verifier round history.
   "escalationSwitches","escalationPending","verifierHistory",
   // Backlog #95: free models already rate-limited this mission (per role).
@@ -5124,8 +5127,9 @@ async function runPlanningPhase(c, step, request, s){
   // review verdict, and without it a revision is asked to fix an unnamed
   // problem.
   const gateFindings=feedbackText(loadReviewFeedback(s,speckitStageFeedbackKey(step)));
+  const gateEarlierRounds=plannerEarlierRoundsText(s,speckitStageFeedbackKey(step),c.workflow?.plan_review_convergence!==false);
   const gateNote=gateFindings
-    ? `\n\nThe plan reviewer REJECTED the previous attempt at this stage. Address every finding; do not repeat the same output:\n${gateFindings}${plannerEarlierRoundsText(s,speckitStageFeedbackKey(step)) ? `\n\n${plannerEarlierRoundsText(s,speckitStageFeedbackKey(step))}` : ""}`
+    ? `\n\nThe plan reviewer REJECTED the previous attempt at this stage. Address every finding; do not repeat the same output:\n${gateFindings}${gateEarlierRounds ? `\n\n${gateEarlierRounds}` : ""}`
     : "";
   // Phase 9 task 9.1: absolute sandbox-visible SpecKit artifact paths cited
   // in the prompt itself, so PLANNER_PATHS_LINE's "read the exact paths
@@ -5633,7 +5637,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       plannerHandoffNoteText,
       `Project request/context: ${request}`,
       `Keep a hand-off note at ${handoffNoteRelPath(mission, 'standalone-planning-planner')}. OVERWRITE it (never append) at each milestone — after every important finding, before writing PLAN.md/TASKS.md — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${plannerBudgetReminder ? ` ${plannerBudgetReminder}` : ""}`,
-      plannerEarlierRoundsText(s,STANDALONE_PLAN_FEEDBACK_KEY),
+      plannerEarlierRoundsText(s,STANDALONE_PLAN_FEEDBACK_KEY,c.workflow?.plan_review_convergence!==false),
       `Plan reviewer feedback that MUST be addressed:\n${feedback}`
     ].filter(Boolean).join("\n\n"):[
       "Create or continue an implementation plan for this project without relying on SpecKit or GSD.",
@@ -5792,7 +5796,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       taskSizeReviewText(resolveTaskSizeTargetTurns(c.policy))+"; cite the oversized task by its numeric ID exactly as written in the file (e.g. 'TASKS.md 2.3').",
       `FAIL any phase with more than ${MAX_PHASE_TASKS} tasks, citing the phase (e.g. 'TASKS.md Phase 2'); it must be split into additional phases.`,
       "FAIL a task that changes no files (only runs tests / regression-checks), citing the task ID (e.g. 'TASKS.md 2.3'). Do NOT FAIL small tasks for being small or for not being merged — small one-action tasks are deliberate. Do not FAIL a phase merely for having few tasks: phases are cut by deliverable, and task size wins over phase count.",
-      ...planReviewerRoundLines(s,STANDALONE_PLAN_FEEDBACK_KEY),
+      ...planReviewerRoundLines(s,STANDALONE_PLAN_FEEDBACK_KEY,c.workflow?.plan_review_convergence!==false),
       "Do not modify either file. End with the required AUTOPILOT_REVIEW sentinel.",
       `Keep a hand-off note at ${scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, 'standalone-planning-plan_reviewer')}. OVERWRITE it (never append) at each milestone — after every important finding and before the review verdict — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${planReviewerBudgetReminder ? ` ${planReviewerBudgetReminder}` : ""}`,
       feedback?`Prior findings to re-check:\n${feedback}`:"",
@@ -6130,7 +6134,7 @@ async function runSpecKitPlanning(c,s,request,opts={}){
         `Review the current artifact state at the SpecKit gate "${step.id}".
 Message: ${step.message||""}${tasksGateNote}
 ${REVIEWER_ALL_FINDINGS_LINE}
-${planReviewerRoundLines(s,speckitStageFeedbackKey(gateStage)).join("\n")}
+${planReviewerRoundLines(s,speckitStageFeedbackKey(gateStage),c.workflow?.plan_review_convergence!==false).join("\n")}
 Return PASS or FAIL with findings.`;
       let rr;
       if(resumingAtPlannerRevision || resumingAtReReview){
@@ -6226,7 +6230,7 @@ Return PASS or FAIL with findings.`;
           writeSpeckitGateCheckpoint(s,{feature:s.speckitFeatureDir,gate:step.id,gateIndex:idx,substage:SPECKIT_POST_REVISION_REVIEW});
           saveState(s);
         }
-        const reReviewPrompt=`Re-review the SpecKit gate "${step.id}" after revision.\n${rr.review?.findings?.join("\n")||""}${tasksGateNote}\n${planReviewerRoundLines(s,speckitStageFeedbackKey(gateStage)).join("\n")}\n${REVIEWER_ALL_FINDINGS_LINE}`;
+        const reReviewPrompt=`Re-review the SpecKit gate "${step.id}" after revision.\n${rr.review?.findings?.join("\n")||""}${tasksGateNote}\n${planReviewerRoundLines(s,speckitStageFeedbackKey(gateStage),c.workflow?.plan_review_convergence!==false).join("\n")}\n${REVIEWER_ALL_FINDINGS_LINE}`;
         // Mission 038 task 1.4: re-run the deterministic tasks-text scan on
         // the REVISED tasks.md before paying for another reviewer call. A
         // revision that still runs a forbidden command fails
@@ -7455,6 +7459,17 @@ async function runStandaloneImplementation(c,s){
     // last phase — it must not survive its completed mission.
     if(Object.hasOwn(s,CHECKPOINT_STATE_KEY)){ delete s[CHECKPOINT_STATE_KEY];saveState(s); }
     s.phase="final_review";s.step="final_review";saveState(s);
+    if(c.workflow?.finalReview===false){
+      // Backlog #13: workflow.final_review=false skips the whole-mission
+      // final reviewer (and its fix rounds) entirely. The marker is
+      // mission-scoped so the report can show the skip for this mission
+      // without any later mission inheriting it.
+      s.finalReviewSkipped=true;saveState(s);
+      console.log("Final review skipped (workflow.final_review=false)");
+      finalizeMissionComplete(s);
+      console.log("ALL WORK COMPLETE — HUMAN COMMIT REQUIRED");
+      return;
+    }
     const finalHandoff=buildStandaloneHandoff({kind:"MISSION_FINAL",
       deltaChunks:scopedDeltaChunks(repo,missionBaselineKey,{mission,declaredPaths}),
       baselineKey:missionBaselineKey,declaredPaths,
@@ -8178,6 +8193,19 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
 
       // Code Review gates Verification: no gate/Verifier until Code Review PASS.
       if(stage==="code_reviewer"){
+        // Backlog #14: workflow.code_review_per_phase=false (camelCase
+        // implementationReview) skips the per-phase code review entirely and
+        // advances straight to Verification through the same transition
+        // application code every other stage advance uses. The skip is not
+        // an attempt: revision/attempts stay untouched and no approval is
+        // granted or consumed.
+        if(c.workflow?.implementationReview===false){
+          const skipped=skipCheckpointStage(checkpoint,"verifier","workflow.code_review_per_phase=false");
+          checkpoint=applyCheckpointTransition(skipped);
+          s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+          console.log(`  Code review skipped for phase ${s.phaseIndex+1} (workflow.code_review_per_phase=false)`);
+          continue;
+        }
         if(checkpoint.attempts.code_reviewer>0){ s.attempt+=1;saveState(s);await maybeRetryPause(c,s,checkpoint,"code_reviewer"); }
         s.step="code_review";checkpoint.runningStage="code_reviewer";s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
         // TASK-23: snapshot the tree at the start of EVERY code review, so
@@ -8740,7 +8768,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         }
         for(const t of phaseTasks) t.done=true;
         passed=true;
-        s.lastReview={decision:checkpoint.codeReviewer?.decision??"PASS",findings:checkpoint.codeReviewer?.findings??[]};
+        s.lastReview={decision:checkpoint.codeReviewer?.decision??"SKIPPED",findings:checkpoint.codeReviewer?.findings??[]};
         s.feedback="";clearRoleSession(s,"implementer");
         // TASK-20: the finding→task record is cleared with the findings it
         // describes — a PASS must never leave a FAIL's map readable.
@@ -8788,6 +8816,16 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
     return;
   }
   s.phase="final_review";s.step="final_review";saveState(s);
+  if(c.workflow?.finalReview===false){
+    // Backlog #13: same skip as the no-pending early path above — set the
+    // mission-scoped marker, persist the final_review phase/step, and go
+    // straight to completion without launching the reviewer or fix rounds.
+    s.finalReviewSkipped=true;saveState(s);
+    console.log("Final review skipped (workflow.final_review=false)");
+    finalizeMissionComplete(s);
+    console.log("ALL WORK COMPLETE — HUMAN COMMIT REQUIRED");
+    return;
+  }
   const finalHandoff=buildStandaloneHandoff({kind:"MISSION_FINAL",
     deltaChunks:scopedDeltaChunks(repo,missionBaselineKey,{mission,declaredPaths}),
     baselineKey:missionBaselineKey,declaredPaths,
@@ -9850,6 +9888,19 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
       // Code Review gates Verification: no gate command or Verifier may run
       // until Code Review has returned PASS.
       if(stage==="code_reviewer"){
+        // Backlog #14: workflow.code_review_per_phase=false (camelCase
+        // implementationReview) skips the per-phase code review entirely and
+        // advances straight to Verification through the same transition
+        // application code every other stage advance uses. The skip is not
+        // an attempt: revision/attempts stay untouched and no approval is
+        // granted or consumed.
+        if(c.workflow?.implementationReview===false){
+          const skipped=skipCheckpointStage(checkpoint,"verifier","workflow.code_review_per_phase=false");
+          checkpoint=applyCheckpointTransition(skipped);
+          s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+          console.log(`  Code review skipped for phase ${phase.name} (workflow.code_review_per_phase=false)`);
+          continue;
+        }
         if(checkpoint.attempts.code_reviewer>0){ s.attempt+=1;saveState(s);await maybeRetryPause(c,s,checkpoint,"code_reviewer"); }
         s.step="code_review";checkpoint.runningStage="code_reviewer";s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
         // TASK-23: snapshot the tree at the start of EVERY code review, so
@@ -10316,7 +10367,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         // for as long as this phase stays "current" (i.e. until the next
         // phase overwrites it, or the mission completes and clears it).
         for(const t of phaseTasks) t.done=true;
-        passed=true;s.lastReview={decision:checkpoint.codeReviewer?.decision??"PASS",findings:checkpoint.codeReviewer?.findings??[]};s.feedback="";clearRoleSession(s,"implementer");
+        passed=true;s.lastReview={decision:checkpoint.codeReviewer?.decision??"SKIPPED",findings:checkpoint.codeReviewer?.findings??[]};s.feedback="";clearRoleSession(s,"implementer");
         // TASK-20: the finding→task record is cleared with the findings it
         // describes — a PASS must never leave a FAIL's map readable.
         clearReviewFeedback(s,speckitPhaseFeedbackKey(s.phaseIndex));
@@ -10343,6 +10394,33 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
   }
 
   s.phase="final_review";s.step="final_review";saveState(s);
+  // Belt-and-suspenders: re-read tasks.md fresh from disk (never the
+  // in-memory phaseList, which could be stale) and refuse to declare the
+  // mission complete while any task belonging to this SpecKit feature is
+  // still unchecked. Every phase above already marks its own tasks "[x]"
+  // immediately after that phase's Verification PASS, so this should never
+  // actually find anything — it exists to fail closed instead of silently
+  // completing if that invariant is ever violated.
+  const refuseIfSpecKitTasksUnchecked=()=>{
+    const stillUnchecked=specKitPhases(c).flatMap(p=>p.tasks).filter(t=>!t.done);
+    if(stillUnchecked.length){
+      s.phase="escalated";s.step="task_marking_incomplete";saveState(s);
+      die(`Refusing to complete: ${stillUnchecked.length} SpecKit task(s) remain unchecked in tasks.md: ${stillUnchecked.map(t=>`${t.text} (${t.file}:${t.line})`).join("; ")}. STOP — human intervention required.`);
+    }
+  };
+  if(c.workflow?.finalReview===false){
+    // Backlog #13 / mission 098 task 1.6: workflow.final_review=false skips
+    // the whole-mission final reviewer (and its fix rounds) entirely. The
+    // marker is mission-scoped so the report can show the skip for this
+    // mission without any later mission inheriting it. The unchecked-task
+    // guard still runs before finalizeMissionComplete.
+    s.finalReviewSkipped=true;saveState(s);
+    console.log("Final review skipped (workflow.final_review=false)");
+    refuseIfSpecKitTasksUnchecked();
+    finalizeMissionComplete(s);
+    console.log("ALL WORK COMPLETE — HUMAN COMMIT REQUIRED");
+    return;
+  }
   // TASK-26: the mission-final review gets a measured deadline too.
   const speckitFinalBudget=roleDeadline(c,s,"code_reviewer");
   const speckitFinalNoParallel=formatHeavySuiteNoParallelNote();
@@ -10431,18 +10509,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
     else{s.phase="escalated";s.step=speckitFinalFix.step||"final_review";saveState(s);die(speckitFinalFix.message||"Final review failed.");}
   }
 
-  // Belt-and-suspenders: re-read tasks.md fresh from disk (never the
-  // in-memory phaseList, which could be stale) and refuse to declare the
-  // mission complete while any task belonging to this SpecKit feature is
-  // still unchecked. Every phase above already marks its own tasks "[x]"
-  // immediately after that phase's Verification PASS, so this should never
-  // actually find anything — it exists to fail closed instead of silently
-  // completing if that invariant is ever violated.
-  const stillUnchecked=specKitPhases(c).flatMap(p=>p.tasks).filter(t=>!t.done);
-  if(stillUnchecked.length){
-    s.phase="escalated";s.step="task_marking_incomplete";saveState(s);
-    die(`Refusing to complete: ${stillUnchecked.length} SpecKit task(s) remain unchecked in tasks.md: ${stillUnchecked.map(t=>`${t.text} (${t.file}:${t.line})`).join("; ")}. STOP — human intervention required.`);
-  }
+  refuseIfSpecKitTasksUnchecked();
 
   finalizeMissionComplete(s);
   console.log("ALL WORK COMPLETE — HUMAN COMMIT REQUIRED");

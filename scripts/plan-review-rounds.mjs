@@ -15,6 +15,9 @@ export const PLAN_REVIEW_EXHAUSTIVE_LINE =
 export const PLAN_REVIEW_VERIFY_LINE =
   'This is a later review round. First verify each previous finding listed below was fixed (go through them one by one) and report the outcome in the final sentinel as "previous":[{"finding":"<the previous finding text, shortened>","status":"fixed"|"not_fixed"}] (one entry per previous finding; keep a not_fixed one in "findings" too). Raise NEW findings only if this revision introduced them, or if they would actually break execution; do not raise new style, preference or nice-to-have findings about content that was already reviewed.';
 
+export const PLAN_REVIEW_FULL_LINE =
+  "Review the whole plan again from scratch. Report every problem you can find in the current revision, across all categories you check, not just whether the previously reported ones were fixed. Earlier fixes stay in scope: a regression or a newly visible problem anywhere in the plan is a valid finding.";
+
 function slot(state, key) {
   const list = state?.[STATE_KEY]?.[key];
   return Array.isArray(list) ? list : [];
@@ -53,7 +56,9 @@ function render(rounds) {
 }
 
 // Reviewer brief lines for the NEXT review (rounds already recorded = previous).
-export function planReviewerRoundLines(state, key) {
+// With convergence disabled every round is a full-plan re-review.
+export function planReviewerRoundLines(state, key, converge = true) {
+  if (converge === false) return [PLAN_REVIEW_FULL_LINE];
   const rounds = slot(state, key);
   if (!rounds.length) return [PLAN_REVIEW_EXHAUSTIVE_LINE];
   return [PLAN_REVIEW_VERIFY_LINE, `Previous findings from all earlier review rounds (verify each):\n${render(rounds)}`];
@@ -61,7 +66,8 @@ export function planReviewerRoundLines(state, key) {
 
 // Planner revision brief: findings of all rounds BEFORE the latest (the latest
 // is already quoted as the feedback that must be addressed).
-export function plannerEarlierRoundsText(state, key) {
+export function plannerEarlierRoundsText(state, key, converge = true) {
+  if (converge === false) return "";
   const rounds = slot(state, key).slice(0, -1);
   if (!rounds.length) return "";
   return `Findings from ALL earlier review rounds (already addressed once — keep them fixed; your fixes for the current findings must not reopen any of them):\n${render(rounds)}`;

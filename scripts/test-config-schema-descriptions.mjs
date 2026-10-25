@@ -47,6 +47,19 @@ for (const role of ["planner", "plan_reviewer", "implementer", "code_reviewer", 
   }
 }
 
+// Backlog #16: these three implemented settings used to claim they had no
+// effect. Each description must now state the real true/false behavior.
+const implementedSettings = {
+  "workflow.plan_review_rounds_converge": ["(true)", "(false)"],
+  "workflow.code_review_per_phase": ["(true)", "(false)"],
+  "workflow.final_review": ["(true)", "(false)"],
+};
+for (const [path, markers] of Object.entries(implementedSettings)) {
+  const description = leaf(schema, path);
+  if (description.includes("Not used by this version")) fail(`${path} still says it is not used`);
+  for (const marker of markers) includes(description, marker, `${path} ${marker}`);
+}
+
 const bad = [];
 function walk(node, path) {
   if (!node || typeof node !== "object") return;

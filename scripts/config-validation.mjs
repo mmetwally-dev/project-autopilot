@@ -963,6 +963,12 @@ function validateWorkflowConfig(workflow, path, errors, warnings) {
       validateType(workflow[key], "boolean", `${path}.${key}`, errors);
     }
   }
+  // With both review switches off nothing reviews the work: the per-phase
+  // code review is skipped and so is the mission-final review. That is legal
+  // but worth one warning; the default and one-switch-off configs stay quiet.
+  if (workflow.final_review === false && workflow.code_review_per_phase === false) {
+    warnings.push(`${path}.final_review: no code review will run when both final_review and code_review_per_phase are false.`);
+  }
 }
 
 function validateTestsConfig(tests, path, errors, warnings) {

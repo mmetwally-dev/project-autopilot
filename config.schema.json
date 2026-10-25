@@ -1239,7 +1239,7 @@
         },
         "plan_review_rounds_converge": {
           "type": "boolean",
-          "description": "Intended to make the first plan-review round exhaustive and later rounds check only the fixes. Not used by this version; changing it has no effect.",
+          "description": "Make the first plan-review round review the whole plan and later rounds check only the requested fixes (true), or re-review the whole plan every round (false); default true. Applies to standalone and SpecKit planning; GSD uses its own plan-review settings. The legacy name plan_review_convergence is still read and migrated.",
           "default": true
         },
         "gsd_planning_review": {
@@ -1254,12 +1254,12 @@
         },
         "code_review_per_phase": {
           "type": "boolean",
-          "description": "Intended to run code review after each implementation phase instead of only at the end. Not used by this version; changing it has no effect.",
+          "description": "Run a code review after each implementation phase (true), or skip the per-phase review and rely on the end-of-mission review (false); default true. The legacy name implementationReview is still read and migrated.",
           "default": true
         },
         "final_review": {
           "type": "boolean",
-          "description": "Intended to run a final review over the whole mission at the end. Not used by this version; changing it has no effect.",
+          "description": "Run a final review over the whole mission at the end, including its fix rounds (true), or skip it and complete the mission after implementation (false); default true. The legacy name finalReview is still read and migrated.",
           "default": true
         },
         "analysis_after_tasks": {

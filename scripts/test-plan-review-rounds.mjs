@@ -1,9 +1,9 @@
 // Backlog #100: plan-review round discipline (no hard round limit).
 import fs from "node:fs";
 import {
-  PLAN_REVIEW_EXHAUSTIVE_LINE, PLAN_REVIEW_VERIFY_LINE, planReviewerRoundLines,
-  plannerEarlierRoundsText, recordPlanReviewRound, seedPlanReviewHistory,
-  clearPlanReviewHistory, planReviewRoundCount,
+  PLAN_REVIEW_EXHAUSTIVE_LINE, PLAN_REVIEW_VERIFY_LINE, PLAN_REVIEW_FULL_LINE,
+  planReviewerRoundLines, plannerEarlierRoundsText, recordPlanReviewRound,
+  seedPlanReviewHistory, clearPlanReviewHistory, planReviewRoundCount,
 } from "./plan-review-rounds.mjs";
 
 let failed = 0;
@@ -33,6 +33,20 @@ check("planner brief contains rounds 1 and 2 findings", pl.includes("alpha probl
 check("planner brief leaves latest round to the feedback block", !pl.includes("gamma problem"));
 check("no earlier rounds -> empty planner text", plannerEarlierRoundsText({}, K) === "");
 
+// Convergence enabled explicitly (and by default) keeps today's behaviour.
+check("explicit convergence keeps round-1 brief unchanged", planReviewerRoundLines({}, K, true).join("\n") === planReviewerRoundLines({}, K).join("\n") && planReviewerRoundLines({}, K, true).join("\n").includes(PLAN_REVIEW_EXHAUSTIVE_LINE));
+check("explicit convergence keeps round-2+ brief unchanged", planReviewerRoundLines(s, K, true).join("\n") === planReviewerRoundLines(s, K).join("\n") && planReviewerRoundLines(s, K, true).join("\n").includes(PLAN_REVIEW_VERIFY_LINE));
+check("explicit convergence keeps planner carry-over", plannerEarlierRoundsText(s, K, true) === plannerEarlierRoundsText(s, K) && plannerEarlierRoundsText(s, K, true).includes("alpha problem"));
+
+// Convergence disabled: full-plan re-review every round, no convergence-only lines.
+const sFull = {};
+const full1 = planReviewerRoundLines(sFull, K, false).join("\n");
+recordPlanReviewRound(sFull, K, ["divergent finding"]);
+const full2 = planReviewerRoundLines(sFull, K, false).join("\n");
+check("convergence off: full-review line on rounds 1 and 2", full1.includes(PLAN_REVIEW_FULL_LINE) && full2.includes(PLAN_REVIEW_FULL_LINE));
+check("convergence off: no exhaustive or verify-only lines", !full1.includes(PLAN_REVIEW_EXHAUSTIVE_LINE) && !full2.includes(PLAN_REVIEW_EXHAUSTIVE_LINE) && !full1.includes(PLAN_REVIEW_VERIFY_LINE) && !full2.includes(PLAN_REVIEW_VERIFY_LINE));
+check("convergence off: empty planner carry-over", plannerEarlierRoundsText(sFull, K, false) === "");
+
 // Seed from legacy resume state only when empty.
 const s2 = {};
 seedPlanReviewHistory(s2, K, ["legacy finding"]);
@@ -48,12 +62,12 @@ check("PASS clears the plan key only", planReviewRoundCount(s, K) === 0 && planR
 const src = fs.readFileSync(new URL("./autopilot.mjs", import.meta.url), "utf8");
 check("new mission clears the cumulative list", src.includes("delete s.reviewFeedback;\n    delete s.planReviewHistory;"));
 check("standalone reviewer + planner briefs use the round helpers",
-  src.includes("...planReviewerRoundLines(s,STANDALONE_PLAN_FEEDBACK_KEY)") && src.includes("plannerEarlierRoundsText(s,STANDALONE_PLAN_FEEDBACK_KEY)"));
+  src.includes("...planReviewerRoundLines(s,STANDALONE_PLAN_FEEDBACK_KEY,c.workflow?.plan_review_convergence!==false)") && src.includes("plannerEarlierRoundsText(s,STANDALONE_PLAN_FEEDBACK_KEY,c.workflow?.plan_review_convergence!==false)"));
 check("standalone records both deterministic and reviewer FAIL rounds",
   (src.match(/recordPlanReviewRound\(s,STANDALONE_PLAN_FEEDBACK_KEY/g) || []).length === 2);
 check("speckit gate uses round helpers and records both rounds",
   (src.match(/recordPlanReviewRound\(s,speckitStageFeedbackKey\(gateStage\)/g) || []).length === 2
-  && (src.match(/planReviewerRoundLines\(s,speckitStageFeedbackKey\(gateStage\)\)/g) || []).length === 2
-  && src.includes("plannerEarlierRoundsText(s,speckitStageFeedbackKey(step))"));
+  && (src.match(/planReviewerRoundLines\(s,speckitStageFeedbackKey\(gateStage\),c\.workflow\?\.plan_review_convergence!==false\)/g) || []).length === 2
+  && src.includes("plannerEarlierRoundsText(s,speckitStageFeedbackKey(step),c.workflow?.plan_review_convergence!==false)"));
 
 process.exit(failed ? 1 : 0);
