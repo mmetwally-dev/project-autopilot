@@ -194,10 +194,11 @@ async function main() {
     check('time_limits.retry_wait_seconds', config.time_limits.retry_wait_seconds === 60);
 
     // workflow section
-    const workflowKeys = ['plan_review', 'plan_review_rounds_converge', 'gsd_planning_review', 'spec_review', 'code_review_per_phase', 'final_review', 'analysis_after_tasks', 'approve_spec_myself', 'approve_plan_myself', 'parallel_independent_tasks', 'use_worktrees', 'commit_by_human'];
+    const workflowKeys = ['plan_review', 'plan_review_rounds_converge', 'gsd_planning_review', 'spec_review', 'code_review_per_phase', 'final_review', 'analysis_after_tasks', 'approve_spec_myself', 'pause_for_plan_approval', 'parallel_independent_tasks', 'use_worktrees', 'commit_by_human'];
     for (const key of workflowKeys) {
       check(`workflow.${key}`, key in config.workflow);
     }
+    check('workflow.pause_for_plan_approval is false', config.workflow.pause_for_plan_approval === false, `got ${JSON.stringify(config.workflow.pause_for_plan_approval)}`);
 
     // tests section - gate_commands gets the detected command "1" from our test input
     check('tests.gate_commands', Array.isArray(config.tests.gate_commands));

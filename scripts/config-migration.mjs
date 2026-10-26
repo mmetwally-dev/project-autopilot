@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { PER_TASK_MAX_TURNS_DEFAULT, PER_TASK_MAX_TOKENS_DEFAULT, CONTINUATION_ALLOWANCE_DEFAULT, HANDOFF_MAX_CHARS_DEFAULT, HANDOFF_NOTE_MAX_CHARS_DEFAULT, HANDOFF_WRAPUP_TOKENS_DEFAULT, NO_PROGRESS_GENERATIONS_DEFAULT, FINAL_REVIEW_FIX_ROUNDS_DEFAULT, RELAY_TIMEOUT_DEFAULT_MS, PER_TASK_TIMEOUT_DEFAULT_MS, resolveIdleHangMs, PER_ROLE_CAPS_DEFAULT, PER_ROLE_WRAPUP_TOKENS_DEFAULT, BACKSTOP_RAW_TOKENS_DEFAULT, LEGACY_MAX_TURNS_DEFAULT, PREVIOUS_MAX_TURNS_DEFAULT } from "./per-task-budget.mjs";
-import { CONFIG_SCHEMA_VERSION, toNewLayoutConfig, toRuntimeConfig, migrateTimeLimitNames } from "./config-layout.mjs";
+import { CONFIG_SCHEMA_VERSION, toNewLayoutConfig, toRuntimeConfig, migrateTimeLimitNames, migratePlanApprovalKey } from "./config-layout.mjs";
 import { fillLayout } from "./config-fill.mjs";
 
 // Backlog #1 (mission 096 Phase 1 task 1.3): migration now yields the v4
@@ -337,7 +337,12 @@ export function migrateConfig(input, existingMeta = {}) {
     // carries `time_limits.mission_timeout_minutes`; migration rewrites it to
     // `call_backstop_minutes` (and then persists/backs up the file).
     const renamed = migrateTimeLimitNames(input);
-    const v4Layout = renamed.layout;
+    // Backlog #099 follow-up: the old `workflow.approve_plan_myself` key is
+    // dropped in memory (value ignored) and never arms the new pause. Unlike
+    // the time-limit rename this is not reported as a migration change; `ap
+    // config fill` is what removes it from the file.
+    const planApproval = migratePlanApprovalKey(renamed.layout);
+    const v4Layout = planApproval.layout;
     // For v4 configs, machine-written fields are in config.meta.json, not in the
     // config file itself. Merge existingMeta (from meta file) with any meta
     // extracted from the config (should be empty for true v4).
@@ -353,6 +358,12 @@ export function migrateConfig(input, existingMeta = {}) {
   }
   const legacy = migrateLegacyRuntime(input, existingMeta);
   const meta = extractMeta(legacy.runtime);
+  // Backlog #099 follow-up: plans continue without a pause by default in v4.
+  // A pre-v4 config's `workflow.autoApprovePlan` was the old pause switch and
+  // is ignored entirely, so dropping it lets the upgraded config take the new
+  // `pause_for_plan_approval:false` default. Only an explicit v4
+  // `pause_for_plan_approval:true` arms the pause.
+  if (isObject(legacy.runtime.workflow)) delete legacy.runtime.workflow.autoApprovePlan;
   const layout = toNewLayoutConfig(legacy.runtime);
   layout.schema_version = CURRENT_SCHEMA;
   // Never fabricate a runtime section the operator never set: toNewLayoutConfig

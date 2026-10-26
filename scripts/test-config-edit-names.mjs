@@ -258,7 +258,7 @@ async function main() {
         final_review: true,
         analysis_after_tasks: true,
         approve_spec_myself: false,
-        approve_plan_myself: false,
+        pause_for_plan_approval: false,
         parallel_independent_tasks: false,
         use_worktrees: true,
         commit_by_human: true

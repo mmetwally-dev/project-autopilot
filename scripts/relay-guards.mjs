@@ -798,6 +798,216 @@ function gitGuardRealGitExecPrologue(realGit){
   ].join("\n");
 }
 
+// 20 Phase 1 task 1.1 — dash-compatible strict read-only fast-path classifier
+// emitted into the POSIX PATH shim (never the deny hooks, which stay as they
+// are). `_apg_fast` drops the single leading `-c core.autocrlf=input` pair the
+// Node wrapper's stripOverridingConfigArgs removes too, so the exec'd git sees
+// the same argv as the wrapper's spawnSync call, then admits the
+// unconditional read-only subcommands plus the narrowly classified `config`,
+// `symbolic-ref`, `worktree list`, `cat-file` and `diff`/`log`/`show` read
+// shapes. Every other subcommand/token returns 1 so the shim falls through to
+// the Node wrapper. Each branch scans its own argv with an explicit `--`-aware
+// loop, because a `case` pattern cannot be built from a variable holding
+// alternatives (`a|b` from `$var` is matched literally).
+export function gitGuardFastPathShellFragment(){
+  return [
+    "# --- strict read-only fast path -------------------------------------",
+    "_apg_fast() {",
+    "  if [ \"${1:-}\" = \"-c\" ] && [ \"${2:-}\" = \"core.autocrlf=input\" ]; then",
+    "    shift 2",
+    "  fi",
+    "  _apg_fast_sub=\"${1:-}\"",
+    "  case \"$_apg_fast_sub\" in",
+    "    status|rev-parse|ls-files|count-objects|for-each-ref)",
+    "      autopilot_guard_exec_git \"$@\" || return 2",
+    "      return 0",
+    "      ;;",
+    "    config)",
+    "      _apg_cfg_ok=0",
+    "      _apg_cfg_bad=0",
+    "      _apg_cfg_operands=0",
+    "      _apg_cfg_first=\"\"",
+    "      _apg_cfg_action=\"\"",
+    "      _apg_cfg_seen=0",
+    "      _apg_cfg_sep=0",
+    "      for _apg_cfg_arg in \"$@\"; do",
+    "        if [ \"$_apg_cfg_seen\" = 0 ]; then",
+    "          _apg_cfg_seen=1",
+    "          continue",
+    "        fi",
+    "        if [ \"$_apg_cfg_sep\" = 1 ]; then",
+    "          _apg_cfg_operands=$((_apg_cfg_operands+1))",
+    "          if [ \"$_apg_cfg_operands\" = 1 ]; then _apg_cfg_first=\"$_apg_cfg_arg\"; fi",
+    "          continue",
+    "        fi",
+    "        if [ \"$_apg_cfg_arg\" = \"--\" ]; then",
+    "          _apg_cfg_sep=1",
+    "          continue",
+    "        fi",
+    "        case \"$_apg_cfg_arg\" in",
+    "          --get|--get-all|--get-regexp|--get-urlmatch|--list|-l)",
+    "            if [ -n \"$_apg_cfg_action\" ]; then _apg_cfg_bad=1; fi",
+    "            _apg_cfg_action=\"$_apg_cfg_arg\"",
+    "            ;;",
+    "          --local|--global|--system|--worktree|--path|--show-origin|--show-scope|--name-only|--null|-z|--includes|--no-includes)",
+    "            ;;",
+    "          -*)",
+    "            _apg_cfg_bad=1",
+    "            ;;",
+    "          *)",
+    "            _apg_cfg_operands=$((_apg_cfg_operands+1))",
+    "            if [ \"$_apg_cfg_operands\" = 1 ]; then _apg_cfg_first=\"$_apg_cfg_arg\"; fi",
+    "            ;;",
+    "        esac",
+    "      done",
+    "      if [ \"$_apg_cfg_bad\" = 0 ]; then",
+    "        case \"$_apg_cfg_action\" in",
+    "          --list|-l)",
+    "            if [ \"$_apg_cfg_operands\" -eq 0 ]; then _apg_cfg_ok=1; fi",
+    "            ;;",
+    "          --get|--get-all|--get-regexp)",
+    "            if [ \"$_apg_cfg_operands\" -ge 1 ] && [ \"$_apg_cfg_operands\" -le 2 ]; then _apg_cfg_ok=1; fi",
+    "            ;;",
+    "          --get-urlmatch)",
+    "            if [ \"$_apg_cfg_operands\" -eq 2 ]; then _apg_cfg_ok=1; fi",
+    "            ;;",
+    "          \"\")",
+    "            if [ \"$_apg_cfg_operands\" -eq 1 ]; then",
+    "              case \"$_apg_cfg_first\" in",
+    "                -*) ;;",
+    "                ?*.?*) _apg_cfg_ok=1 ;;",
+    "              esac",
+    "            fi",
+    "            ;;",
+    "        esac",
+    "      fi",
+    "      if [ \"$_apg_cfg_ok\" = 1 ]; then",
+    "        autopilot_guard_exec_git \"$@\" || return 2",
+    "        return 0",
+    "      fi",
+    "      ;;",
+    "    symbolic-ref)",
+    "      _apg_sym_ok=0",
+    "      _apg_sym_bad=0",
+    "      _apg_sym_operands=0",
+    "      _apg_sym_operand=\"\"",
+    "      _apg_sym_seen=0",
+    "      for _apg_sym_arg in \"$@\"; do",
+    "        if [ \"$_apg_sym_seen\" = 0 ]; then",
+    "          _apg_sym_seen=1",
+    "          continue",
+    "        fi",
+    "        case \"$_apg_sym_arg\" in",
+    "          --quiet|-q|--short|--no-recurse)",
+    "            ;;",
+    "          -*)",
+    "            _apg_sym_bad=1",
+    "            ;;",
+    "          *)",
+    "            _apg_sym_operands=$((_apg_sym_operands+1))",
+    "            _apg_sym_operand=\"$_apg_sym_arg\"",
+    "            ;;",
+    "        esac",
+    "      done",
+    "      if [ \"$_apg_sym_bad\" = 0 ] && [ \"$_apg_sym_operands\" -eq 1 ]; then",
+    "        case \"$_apg_sym_operand\" in",
+    "          HEAD|refs/?*) _apg_sym_ok=1 ;;",
+    "        esac",
+    "      fi",
+    "      if [ \"$_apg_sym_ok\" = 1 ]; then",
+    "        autopilot_guard_exec_git \"$@\" || return 2",
+    "        return 0",
+    "      fi",
+    "      ;;",
+    "    worktree)",
+    "      if [ \"${2:-}\" = \"list\" ]; then",
+    "        autopilot_guard_exec_git \"$@\" || return 2",
+    "        return 0",
+    "      fi",
+    "      ;;",
+    "    cat-file)",
+    "      _apg_cat_ok=0",
+    "      _apg_cat_bad=0",
+    "      _apg_cat_operands=0",
+    "      _apg_cat_seen=0",
+    "      _apg_cat_sep=0",
+    "      for _apg_cat_arg in \"$@\"; do",
+    "        if [ \"$_apg_cat_seen\" = 0 ]; then",
+    "          _apg_cat_seen=1",
+    "          continue",
+    "        fi",
+    "        if [ \"$_apg_cat_sep\" = 1 ]; then",
+    "          _apg_cat_operands=$((_apg_cat_operands+1))",
+    "          continue",
+    "        fi",
+    "        if [ \"$_apg_cat_arg\" = \"--\" ]; then",
+    "          _apg_cat_sep=1",
+    "          continue",
+    "        fi",
+    "        case \"$_apg_cat_arg\" in",
+    "          -t|-s|-e|-p|--batch|--batch=*|--batch-check|--batch-check=*|--batch-all-objects|--buffer|--unordered|--allow-unknown-type|--follow-symlinks|--use-mailmap)",
+    "            ;;",
+    "          -*)",
+    "            _apg_cat_bad=1",
+    "            ;;",
+    "          *)",
+    "            _apg_cat_operands=$((_apg_cat_operands+1))",
+    "            ;;",
+    "        esac",
+    "      done",
+    "      if [ \"$_apg_cat_bad\" = 0 ] && [ \"$_apg_cat_operands\" -ge 1 ]; then",
+    "        _apg_cat_ok=1",
+    "      fi",
+    "      if [ \"$_apg_cat_ok\" = 1 ]; then",
+    "        autopilot_guard_exec_git \"$@\" || return 2",
+    "        return 0",
+    "      fi",
+    "      ;;",
+    "    diff|log|show)",
+    "      _apg_dls_ok=0",
+    "      _apg_dls_bad=0",
+    "      _apg_dls_seen=0",
+    "      _apg_dls_sep=0",
+    "      for _apg_dls_arg in \"$@\"; do",
+    "        if [ \"$_apg_dls_seen\" = 0 ]; then",
+    "          _apg_dls_seen=1",
+    "          continue",
+    "        fi",
+    "        if [ \"$_apg_dls_sep\" = 1 ]; then",
+    "          continue",
+    "        fi",
+    "        if [ \"$_apg_dls_arg\" = \"--\" ]; then",
+    "          _apg_dls_sep=1",
+    "          continue",
+    "        fi",
+    "        case \"$_apg_dls_arg\" in",
+    "          --output*|--ext*|--text*)",
+    "            _apg_dls_bad=1",
+    "            ;;",
+    "        esac",
+    "      done",
+    "      if [ \"$_apg_dls_bad\" = 0 ]; then",
+    "        _apg_dls_ok=1",
+    "      fi",
+    "      if [ \"$_apg_dls_ok\" = 1 ]; then",
+    "        autopilot_guard_exec_git \"$@\" || return 2",
+    "        return 0",
+    "      fi",
+    "      ;;",
+    "  esac",
+    "  return 1",
+    "}"
+  ].join("\n");
+}
+
+// Windows .cmd shim fast list: exactly the five unconditional read-only
+// subcommands the Unix classifier admits without inspecting any further
+// argument. Every form that needs an argv check (diff/log/show, cat-file,
+// config, symbolic-ref, worktree) stays on the Node wrapper, because cmd.exe
+// cannot express the POSIX option/operand rules. Compare with `_apg_fast` in
+// gitGuardFastPathShellFragment().
+export const GIT_GUARD_WINDOWS_FAST_SUBCOMMANDS=["status","rev-parse","ls-files","count-objects","for-each-ref"];
+
 // Windows equivalent for the .cmd shim. cmd.exe cannot express an allowlist as
 // a static environment, so it enumerates the current environment and deletes
 // every name that is not on the list. Delayed expansion is used only to carry a
@@ -1185,27 +1395,29 @@ export function createGitMutationGuard(runDir,repositoryRoot=null){
   const envPrologue=gitGuardEnvPrologue(envBinary);
   if(process.platform!=="win32"){
     const unixShim=path.join(guardDir,"git");
-    // Read-only fast path: taken only when the FIRST argument is exactly one
-    // of the read-only subcommands (case-sensitive shell case; anything else,
-    // including any leading option like -C/-c/--git-dir, falls through to the
-    // Node wrapper for the full decision). All six are always allowed by the
-    // Node wrapper regardless of arguments: none is in BLOCKED_SUBCOMMANDS,
-    // none is one of the checkout/restore/switch/stash worktree-discard cases,
-    // and stripOverridingConfigArgs is a no-op when the subcommand is argv[0]
-    // (it only strips -c/--config-env core.autocrlf overrides BEFORE the
-    // subcommand), so the fast path passes args through verbatim. Layer 2
-    // (hooks) is unchanged and applies to every git run, fast path included.
-    fs.writeFileSync(unixShim,`#!/bin/sh\n# AUTOPILOT GIT GUARD — PATH shim. Fails closed if the sanitized environment\n# cannot be built (autopilot_guard_exec returns non-zero).\n${envPrologue}\n${gitGuardRealGitExecPrologue(realGit)}\ncase "\${1:-}" in\n  status|diff|log|show|rev-parse|ls-files)\n    autopilot_guard_exec_git "$@" || {\n      echo "AUTOPILOT GIT GUARD: refusing to run without a sanitized environment." >&2\n      exit 97\n    }\n    exit 97\n    ;;\nesac\nautopilot_guard_exec "${process.execPath}" "$(dirname "$0")/git-guard.mjs" "$@" || {\n  echo "AUTOPILOT GIT GUARD: refusing to run without a sanitized environment." >&2\n  exit 97\n}\nexit 97\n`);
+    // Read-only fast path: gitGuardFastPathShellFragment() renders the strict
+    // POSIX classifier into the shim. It drops one leading
+    // `-c core.autocrlf=input` pair (mirroring stripOverridingConfigArgs),
+    // then execs the baked real git for the five unconditional reads plus the
+    // narrow config / symbolic-ref / worktree-list / cat-file / diff-log-show
+    // shapes that pass its argv checks. Anything else returns 1 and falls
+    // through to the Node wrapper for the full decision; a fast attempt whose
+    // sanitized environment cannot be built returns 2 and fails closed with
+    // exit 97. Layer 2 (hooks) is unchanged and applies to every git run,
+    // fast path included.
+    fs.writeFileSync(unixShim,`#!/bin/sh\n# AUTOPILOT GIT GUARD — PATH shim. Fails closed if the sanitized environment\n# cannot be built (autopilot_guard_exec returns non-zero).\n${envPrologue}\n${gitGuardRealGitExecPrologue(realGit)}\n${gitGuardFastPathShellFragment()}\n_apg_fast "$@"\n_apg_fast_status=$?\nif [ "$_apg_fast_status" = 0 ]; then\n  exit 0\nfi\nif [ "$_apg_fast_status" != 1 ]; then\n  echo "AUTOPILOT GIT GUARD: refusing to run without a sanitized environment." >&2\n  exit 97\nfi\nautopilot_guard_exec "${process.execPath}" "$(dirname "$0")/git-guard.mjs" "$@" || {\n  echo "AUTOPILOT GIT GUARD: refusing to run without a sanitized environment." >&2\n  exit 97\n}\nexit 97\n`);
     fs.chmodSync(unixShim,0o755);
   } else {
-    // Windows: the SAME fast path. %~1 comparison in cmd is case-sensitive
-    // (no /i), so only an exact match skips Node. The windowsShimSanitizer()
-    // loop above has already reduced this process environment to
-    // GUARD_ENV_ALLOWLIST, so the baked real git runs under exactly the
-    // sanitized environment the Node wrapper would inherit. Arguments are
-    // forwarded verbatim via %* exactly as the Node path receives them.
-    // Layer 2 (hooks) is unchanged.
-    const fast = ["status","diff","log","show","rev-parse","ls-files"]
+    // Windows: only the five unconditional read-only subcommands skip Node.
+    // %~1 comparison in cmd is case-sensitive (no /i), so only an exact match
+    // takes the fast path; every subcommand that needs an argv check
+    // (diff/log/show, cat-file, config, symbolic-ref, worktree) falls through
+    // to the Node wrapper. The windowsShimSanitizer() loop above has already
+    // reduced this process environment to GUARD_ENV_ALLOWLIST, so the baked
+    // real git runs under exactly the sanitized environment the Node wrapper
+    // would inherit. Arguments are forwarded verbatim via %* exactly as the
+    // Node path receives them. Layer 2 (hooks) is unchanged.
+    const fast = GIT_GUARD_WINDOWS_FAST_SUBCOMMANDS
       .map(sub=>`if "%~1"=="${sub}" goto :apg_fast\r\n`).join("");
     fs.writeFileSync(path.join(guardDir,"git.cmd"),`${windowsShimSanitizer()}\r\n${fast}"${process.execPath}" "${wrapper}" %*\r\nexit /b %errorlevel%\r\n:apg_fast\r\n"${realGit}" %*\r\nexit /b %errorlevel%\r\n`);
   }

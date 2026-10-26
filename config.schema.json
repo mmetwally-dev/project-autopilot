@@ -30,7 +30,7 @@
       "properties": {
         "repo": {
           "type": "string",
-          "description": "Intended repository root the mission runs in. Not used by this version; changing it has no effect.",
+          "description": "Intended repository root the mission runs in. Fixed in this version; changing it has no effect. Autopilot uses the folder you run it in, or --repo.",
           "default": "."
         },
         "planning_framework": {
@@ -1043,19 +1043,19 @@
       "properties": {
         "plan_revisions": {
           "type": "number",
-          "description": "Planner and plan reviewer revision rounds before planning stops; at the limit the plan is escalated for help.",
+          "description": "Plan-review escalation point, not a revision count. In standalone, 0 escalates at the first plan-review FAIL without a Planner revision and it runs one fewer revision than the number (the number is one higher than the revisions run), so 1 behaves like 0; SpecKit runs at most one revision per gate for any value above 0; GSD planning still treats 0 or an absent value as 8; an absent value uses the built-in default of 8.",
           "default": 8,
           "minimum": 0
         },
         "implementation": {
           "type": "number",
-          "description": "Implementer fix rounds per phase before the phase stops; at the limit the mission stops and asks you.",
+          "description": "Implementer fix rounds per phase before the phase stops; 0 stops the phase on the first fix-requiring review with no fix round, at the limit the mission stops and asks you, and an absent value uses the built-in default of 4.",
           "default": 4,
           "minimum": 0
         },
         "verification": {
           "type": "number",
-          "description": "Verifier FAIL rounds per phase before the phase stops; at the limit the mission stops and asks you.",
+          "description": "Verifier FAIL rounds per phase before the phase stops; 0 stops the phase on the first verifier FAIL with no retry, at the limit the mission stops and asks you, and an absent value uses the built-in default of 4.",
           "default": 4,
           "minimum": 0
         },
@@ -1067,13 +1067,13 @@
         },
         "cli_errors": {
           "type": "number",
-          "description": "Same-model retries after a CLI error before the run gives up; at the limit the run fails over or stops.",
+          "description": "Same-model retries after a CLI error before the run gives up; 0 skips same-model retries and fails over or stops on the first CLI error, at the limit the run fails over or stops, and an absent value uses the built-in default of 3.",
           "default": 3,
           "minimum": 0
         },
         "infrastructure": {
           "type": "number",
-          "description": "Retries after an infrastructure error such as a snapshot, sandbox or gate failure; at the limit the mission stops.",
+          "description": "Retries after an infrastructure error such as a snapshot, sandbox or gate failure; 0 stops on the first infrastructure error, at the limit the mission stops, and an absent value uses the built-in default of 3.",
           "default": 3,
           "minimum": 0
         },
@@ -1085,7 +1085,7 @@
         },
         "extra_sessions_per_task": {
           "type": "number",
-          "description": "Extra sessions the implementer may start per task after a cap; the caps.implementer.extra_sessions value wins when both are set.",
+          "description": "Extra sessions the implementer may start per task after a cap; 0 starts no extra session and an absent value uses the built-in default of 5. The caps.implementer.extra_sessions value wins when both are set.",
           "default": 5,
           "minimum": 0
         },
@@ -1226,7 +1226,7 @@
         "final_review": true,
         "analysis_after_tasks": true,
         "approve_spec_myself": false,
-        "approve_plan_myself": false,
+        "pause_for_plan_approval": false,
         "parallel_independent_tasks": false,
         "use_worktrees": true,
         "commit_by_human": true
@@ -1249,7 +1249,7 @@
         },
         "spec_review": {
           "type": "boolean",
-          "description": "Intended to run a spec review stage before planning. Not used by this version; changing it has no effect.",
+          "description": "Intended to run a spec review stage before planning. Controlled by your SpecKit workflow.yml — add or remove the step there; this setting has no effect.",
           "default": true
         },
         "code_review_per_phase": {
@@ -1264,17 +1264,17 @@
         },
         "analysis_after_tasks": {
           "type": "boolean",
-          "description": "Intended to run an analysis pass after all tasks complete. Not used by this version; changing it has no effect.",
+          "description": "Intended to run an analysis pass after all tasks complete. Controlled by your SpecKit workflow.yml — add or remove the step there; this setting has no effect.",
           "default": true
         },
         "approve_spec_myself": {
           "type": "boolean",
-          "description": "Intended to approve the spec automatically without asking you. Not used by this version; changing it has no effect.",
+          "description": "Intended to approve the spec automatically without asking you. Controlled by your SpecKit workflow.yml — add or remove the step there; this setting has no effect.",
           "default": false
         },
-        "approve_plan_myself": {
+        "pause_for_plan_approval": {
           "type": "boolean",
-          "description": "Intended to approve the plan automatically without asking you. Not used by this version; changing it has no effect.",
+          "description": "Approve the plan automatically without asking you (true) or pause after planning and wait for you to approve it (false); default false. Applies to standalone and SpecKit planning. When paused, a following `ap run` continues as the approval.",
           "default": false
         },
         "parallel_independent_tasks": {
@@ -1334,7 +1334,7 @@
         },
         "require_reviewer": {
           "type": "boolean",
-          "description": "Intended to require a reviewer verdict before a phase passes. Not used by this version; changing it has no effect.",
+          "description": "Intended to require a reviewer verdict before a phase passes. Fixed in this version; changing it has no effect.",
           "default": true
         },
         "browser": {
@@ -1407,22 +1407,22 @@
         },
         "block_git_in_roles": {
           "type": "boolean",
-          "description": "Intended to block git commit and push inside role sessions. Not used by this version; changing it has no effect.",
+          "description": "Blocks git commit and push inside role sessions. Always on — cannot be turned off; changing it has no effect.",
           "default": true
         },
         "check_read_only_roles": {
           "type": "boolean",
-          "description": "Intended to check that read-only roles changed no file by comparing before and after snapshots. Not used by this version; changing it has no effect.",
+          "description": "Checks that read-only roles changed no file by comparing before and after snapshots. Always on — cannot be turned off; changing it has no effect.",
           "default": true
         },
         "record_touched_files": {
           "type": "boolean",
-          "description": "Intended to record the files each role touches. Not used by this version; changing it has no effect.",
+          "description": "Records the files each role touches. Always on — cannot be turned off; changing it has no effect.",
           "default": true
         },
         "keep_role_sessions": {
           "type": "boolean",
-          "description": "Intended to keep role sessions on disk so a later run can resume them. Not used by this version; changing it has no effect.",
+          "description": "Keeps role sessions on disk so a later run can resume them. Always on — cannot be turned off; changing it has no effect.",
           "default": true
         }
       },
@@ -1520,7 +1520,7 @@
           "properties": {
             "workflow_file": {
               "type": "string",
-              "description": "Intended path to the SpecKit workflow definition. Not used by this version; changing it has no effect.",
+              "description": "Intended path to the SpecKit workflow definition. Fixed in this version; changing it has no effect. Autopilot always reads .specify/workflows/speckit/workflow.yml.",
               "default": ".specify/workflows/speckit/workflow.yml"
             },
             "task_files": {
@@ -1742,12 +1742,12 @@
       "properties": {
         "state_file": {
           "type": "string",
-          "description": "Intended path to the mission state file. Not used by this version; changing it has no effect.",
+          "description": "Intended path to the mission state file. Fixed in this version; changing it has no effect.",
           "default": ".autopilot/state.json"
         },
         "runs_dir": {
           "type": "string",
-          "description": "Intended directory holding run records. Not used by this version; changing it has no effect.",
+          "description": "Intended directory holding run records. Fixed in this version; changing it has no effect.",
           "default": ".autopilot/runs"
         },
         "handoff_max_chars": {
@@ -1776,12 +1776,12 @@
         },
         "checkpoint_after_task": {
           "type": "boolean",
-          "description": "Intended to write a checkpoint after each task. Not used by this version; changing it has no effect.",
+          "description": "Intended to write a checkpoint after each task. Fixed in this version; changing it has no effect.",
           "default": true
         },
         "checkpoint_after_phase": {
           "type": "boolean",
-          "description": "Intended to write a checkpoint after each phase. Not used by this version; changing it has no effect.",
+          "description": "Intended to write a checkpoint after each phase. Fixed in this version; changing it has no effect.",
           "default": true
         },
         "capabilities": {
@@ -1820,7 +1820,7 @@
             },
             "safety_denied": {
               "type": "array",
-              "description": "Intended to deny capabilities for safety. Not used by this version; changing it has no effect.",
+              "description": "Intended to deny capabilities for safety. Fixed in this version; changing it has no effect.",
               "default": [],
               "items": {
                 "type": "string"

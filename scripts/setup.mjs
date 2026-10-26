@@ -1994,7 +1994,7 @@ async function printStartScreen(detectedFrameworks) {
           true,
         autoApproveSpec:
           false,
-        autoApprovePlan:
+        pauseForPlanApproval:
           false,
         parallelIndependentTasks:
           gsd,

@@ -450,8 +450,9 @@ await withFixtures(async ({skillCopy, trackRepo}) => {
   check("DEFECT 3: SKILL.md no longer claims Windows-without-WSL is unsupported for the same reason", !/does not currently support these roles/.test(skillMd), null);
   check("DEFECT 3: SKILL.md documents Windows Compatibility disposable-copy isolation", /windows-compatibility/.test(skillMd) && /disposable-copy isolation/.test(skillMd), null);
   const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+  const safety = fs.readFileSync(path.join(root, "docs", "safety.md"), "utf8");
   check("DEFECT 3: README.md no longer claims those roles are simply unsupported on Windows", !/those three roles are not currently supported there/.test(readme) && !/does not currently support these roles/.test(readme), null);
-  check("DEFECT 3: README.md documents Windows Compatibility disposable-copy isolation", /[Dd]isposable-copy isolation/.test(readme), null);
+  check("DEFECT 3: docs/safety.md documents Windows Compatibility disposable-copy isolation", /[Dd]isposable-copy isolation/.test(safety), null);
 }
 
 // ---------------------------------------------------------------------

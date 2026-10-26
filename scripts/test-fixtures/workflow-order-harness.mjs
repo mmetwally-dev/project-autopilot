@@ -13,6 +13,7 @@ import path from "node:path";
 import {spawnSync} from "node:child_process";
 import {fileURLToPath} from "node:url";
 import {runTreeUntilMarker} from "./posix-process-runner.mjs";
+import {fixtureGit} from "./fixture-git.mjs";
 import {CLAUDE_MD_MARKER_BEGIN, CLAUDE_MD_MARKER_END} from "../planning-boundary.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -355,7 +356,7 @@ export function makeInventedFeatureJsonFixture(repo, featureDirValue = "specs/99
 }
 
 function git(cwd, args) {
-  const r = spawnSync("git", args, {cwd, encoding: "utf8", shell: false});
+  const r = fixtureGit(args, {cwd});
   if (r.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${(r.stderr || r.stdout || "").trim()}`);
   return (r.stdout || "").trim();
 }
@@ -460,10 +461,19 @@ export function withoutOuterGitGuard(env) {
   const delimiter = process.platform === "win32" ? ";" : ":";
   const out = {...env};
   const isGuardDir = (dir) => {
+    const shim = path.join(dir, process.platform === "win32" ? "git.cmd" : "git");
+    let fd;
     try {
-      const shim = path.join(dir, process.platform === "win32" ? "git.cmd" : "git");
-      return fs.existsSync(shim) && fs.readFileSync(shim, "utf8").includes("AUTOPILOT GIT GUARD");
+      fd = fs.openSync(shim, "r");
+      const buffer = Buffer.alloc(4096);
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+      return buffer.subarray(0, bytesRead).includes("AUTOPILOT GIT GUARD");
     } catch { return false; }
+    finally {
+      if (fd !== undefined) {
+        try { fs.closeSync(fd); } catch { /* best-effort */ }
+      }
+    }
   };
   out.PATH = String(env.PATH || "").split(delimiter).filter((dir) => dir && !isGuardDir(dir)).join(delimiter);
   const count = Number(env.GIT_CONFIG_COUNT) || 0;
@@ -474,14 +484,17 @@ export function withoutOuterGitGuard(env) {
   return out;
 }
 
-export function runAutopilot(repo, binDir, {request = "fixture request", timeoutMs = 60000, extraPath = ""} = {}) {
+export function runAutopilot(repo, binDir, {request = "fixture request", timeoutMs = 60000, extraPath = "", stage = null} = {}) {
   const delimiter = process.platform === "win32" ? ";" : ":";
   const base = withoutOuterGitGuard(process.env);
   const env = {
     ...base,
     PATH: `${binDir}${delimiter}${extraPath ? extraPath + delimiter : ""}${base.PATH || ""}`
   };
-  const result = spawnSync(process.execPath, [path.join(skillRoot, "scripts", "autopilot.mjs"), "run", request, "--repo", repo], {
+  const args = [path.join(skillRoot, "scripts", "autopilot.mjs"), "run"];
+  if (stage != null) args.push("--stage", stage);
+  args.push(request, "--repo", repo);
+  const result = spawnSync(process.execPath, args, {
     cwd: repo, encoding: "utf8", env, timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"], shell: false
   });
   return {status: result.status, timedOut: !!result.error && result.error.code === "ETIMEDOUT", stdout: result.stdout || "", stderr: result.stderr || ""};

@@ -128,7 +128,7 @@ layout.time_limits = {
   read_only_max_silence_minutes: 16,
   retry_wait_seconds: 75,
 };
-layout.workflow.approve_plan_myself = true;
+layout.workflow.pause_for_plan_approval = true;
 layout.workflow.plan_review_rounds_converge = false;
 layout.tests.gate_commands = ["node scripts/test-all.mjs"];
 layout.tests.gate_network = true;
@@ -186,7 +186,7 @@ eq(rt.policy.fallback_retry_primary_minutes, 320, "policy.fallback_retry_primary
 // workflow / safety / runtime / tests / planning / capabilities / project
 eq(rt.workflow.planReview, true, "workflow.planReview");
 eq(rt.workflow.plan_review_convergence, false, "workflow.plan_review_convergence");
-eq(rt.workflow.autoApprovePlan, true, "workflow.autoApprovePlan");
+eq(rt.workflow.pauseForPlanApproval, true, "workflow.pauseForPlanApproval");
 eq(rt.workflow.relaySafety.block_git_commit_push, false, "workflow.relaySafety.block_git_commit_push");
 eq(rt.policy.fail_closed_on_relay_violation, false, "policy.fail_closed_on_relay_violation");
 eq(rt.policy.require_human_commit, true, "policy.require_human_commit");
@@ -225,7 +225,7 @@ eq(layout2.time_limits.call_backstop_minutes, 200, "layout2.time_limits.call_bac
 deep(layout2.time_limits.role_timeout_minutes, {default: 70, verifier: 185}, "layout2.time_limits.role_timeout_minutes");
 eq(layout2.time_limits.retry_wait_seconds, 75, "layout2.time_limits.retry_wait_seconds");
 eq(layout2.advanced.fallback_retry_primary_minutes, 320, "layout2.advanced.fallback_retry_primary_minutes");
-eq(layout2.workflow.approve_plan_myself, true, "layout2.workflow.approve_plan_myself");
+eq(layout2.workflow.pause_for_plan_approval, true, "layout2.workflow.pause_for_plan_approval");
 eq(layout2.workflow.commit_by_human, true, "layout2.workflow.commit_by_human");
 eq(layout2.tests.gate_network, true, "layout2.tests.gate_network (inverted)");
 eq(layout2.tests.browser, "native", "layout2.tests.browser");
@@ -300,5 +300,62 @@ eq(resumeDefaults.roles.verifier.resume, true, "verifier default resume true");
 const resumeLayout = toNewLayoutConfig(resumeDefaults);
 eq(resumeLayout.roles.implementer.resume_session, false, "implementer resume_session round-trips false");
 eq(resumeLayout.roles.planner.resume_session, true, "planner resume_session round-trips true");
+
+// ---------------------------------------------------------------------------
+// Zero-aware retries: a configured 0 is a real operator value, so every
+// retries.* key set to 0 must reach the runtime policy as 0 (not fall back to
+// a code default).
+// ---------------------------------------------------------------------------
+const zeroRetries = toRuntimeConfig({
+  retries: {
+    plan_revisions: 0,
+    implementation: 0,
+    verification: 0,
+    cli_errors: 0,
+    infrastructure: 0,
+    extra_sessions_per_task: 0,
+  },
+});
+eq(zeroRetries.policy.max_plan_revisions, 0, "zero retries.plan_revisions -> max_plan_revisions");
+eq(zeroRetries.policy.failure_budgets.implementationFailureBudget, 0, "zero retries.implementation -> implementationFailureBudget");
+eq(zeroRetries.policy.failure_budgets.verificationFailureBudget, 0, "zero retries.verification -> verificationFailureBudget");
+eq(zeroRetries.policy.failure_budgets.adapterRetryBudget, 0, "zero retries.cli_errors -> adapterRetryBudget");
+eq(zeroRetries.policy.failure_budgets.infrastructureRetryBudget, 0, "zero retries.infrastructure -> infrastructureRetryBudget");
+eq(zeroRetries.policy.continuation_allowance, 0, "zero retries.extra_sessions_per_task -> continuation_allowance");
+deep(Object.keys(zeroRetries.policy.failure_budgets).sort(), ["adapterRetryBudget", "implementationFailureBudget", "infrastructureRetryBudget", "verificationFailureBudget"], "zero retries cover all four failure budgets");
+
+// Each key set to 0 on its own still passes through.
+for (const [layoutKey, read] of [
+  ["plan_revisions", (p) => p.max_plan_revisions],
+  ["implementation", (p) => p.failure_budgets.implementationFailureBudget],
+  ["verification", (p) => p.failure_budgets.verificationFailureBudget],
+  ["cli_errors", (p) => p.failure_budgets.adapterRetryBudget],
+  ["infrastructure", (p) => p.failure_budgets.infrastructureRetryBudget],
+  ["extra_sessions_per_task", (p) => p.continuation_allowance],
+]) {
+  eq(read(toRuntimeConfig({retries: {[layoutKey]: 0}}).policy), 0, `retries.${layoutKey}=0 alone -> 0`);
+}
+
+// Omitting the keys never fabricates a default in the runtime policy.
+const absentRetries = toRuntimeConfig({retries: {final_review_fix_rounds: 2}});
+eq(absentRetries.policy.final_review_fix_rounds, 2, "unrelated retries key still maps");
+eq("max_plan_revisions" in absentRetries.policy, false, "absent retries.plan_revisions stays omitted");
+eq("failure_budgets" in absentRetries.policy, false, "absent failure budget keys stay omitted");
+eq("continuation_allowance" in absentRetries.policy, false, "absent retries.extra_sessions_per_task stays omitted");
+const emptyRetries = toRuntimeConfig({retries: {}});
+eq("policy" in emptyRetries, false, "empty retries fabricates no policy keys");
+
+// caps.implementer.extra_sessions keeps winning over retries.extra_sessions_per_task,
+// including when the caps value is 0.
+eq(
+  toRuntimeConfig({caps: {implementer: {extra_sessions: 4}}, retries: {extra_sessions_per_task: 0}}).policy.continuation_allowance,
+  4,
+  "caps.implementer.extra_sessions wins over retries.extra_sessions_per_task",
+);
+eq(
+  toRuntimeConfig({caps: {implementer: {extra_sessions: 0}}, retries: {extra_sessions_per_task: 7}}).policy.continuation_allowance,
+  0,
+  "caps.implementer.extra_sessions=0 still wins",
+);
 
 console.log("config layout tests passed (v4 <-> runtime mappings both ways; DEFAULTS match per-task-budget constants)");

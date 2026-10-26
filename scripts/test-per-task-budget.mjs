@@ -160,6 +160,24 @@ const fixture = path.join(here, "test-fixtures", "fake-observable-adapter.mjs");
     CONTINUATION_ALLOWANCE_DEFAULT === 5);
   check("continuation: explicit wins",
     resolveContinuationAllowance({continuation_allowance: 1}) === 1);
+  check("continuation: configured 0 grants no continuation",
+    resolveContinuationAllowance({continuation_allowance: 0}) === 0);
+  check("continuation: configured string \"0\" grants no continuation",
+    resolveContinuationAllowance({continuation_allowance: "0"}) === 0);
+  check("continuation: absent configured value keeps the 5 default",
+    resolveContinuationAllowance({}) === CONTINUATION_ALLOWANCE_DEFAULT);
+  check("continuation: null configured value keeps the 5 default",
+    resolveContinuationAllowance({continuation_allowance: null}) === CONTINUATION_ALLOWANCE_DEFAULT);
+  check("continuation: blank string configured value keeps the 5 default",
+    resolveContinuationAllowance({continuation_allowance: ""}) === CONTINUATION_ALLOWANCE_DEFAULT &&
+    resolveContinuationAllowance({continuation_allowance: " "}) === CONTINUATION_ALLOWANCE_DEFAULT);
+  check("continuation: boolean configured value is absent, not 0/1",
+    resolveContinuationAllowance({continuation_allowance: true}) === CONTINUATION_ALLOWANCE_DEFAULT &&
+    resolveContinuationAllowance({continuation_allowance: false}) === CONTINUATION_ALLOWANCE_DEFAULT);
+  const zeroState = {};
+  const z1 = consumeContinuation(zeroState, {continuation_allowance: 0}, "task:standalone:phase-0:Z0");
+  check("continuation: allowance 0 refuses the first consume at used=1",
+    z1.allowed === false && z1.used === 1 && z1.limit === 0, z1);
   const s = {};
   const c1 = consumeContinuation(s, {}, "task:standalone:phase-0:T0");
   check("continuation: first consume allowed at used=1",
@@ -484,6 +502,10 @@ const fixture = path.join(here, "test-fixtures", "fake-observable-adapter.mjs");
   const implLimits = resolvePerRoleLimits(implRole, {});
   check(`resolvePerRoleLimits: ${implRole} defaults`, implLimits.perTaskMaxTurns === PER_TASK_MAX_TURNS_DEFAULT && implLimits.perTaskMaxTokens === PER_TASK_MAX_TOKENS_DEFAULT && implLimits.continuationAllowance === CONTINUATION_ALLOWANCE_DEFAULT && implLimits.wrapUpTokenThreshold === HANDOFF_WRAPUP_TOKENS_DEFAULT, implLimits);
   check(`resolvePerRoleLimits: ${implRole} wrapUpTokenThreshold < perTaskMaxTokens`, implLimits.wrapUpTokenThreshold < implLimits.perTaskMaxTokens, implLimits);
+  check(`resolvePerRoleLimits: ${implRole} extra_sessions 0 grants no extra session`,
+    resolvePerRoleLimits(implRole, {caps: {[implRole]: {extra_sessions: 0}}}).continuationAllowance === 0);
+  check(`resolvePerRoleLimits: ${implRole} absent extra_sessions keeps the 5 default`,
+    resolvePerRoleLimits(implRole, {caps: {[implRole]: {}}}).continuationAllowance === CONTINUATION_ALLOWANCE_DEFAULT);
 
   // Config overrides via policy.caps.<role> (snake_case keys as stored in config.json)
   const overridePolicy = {

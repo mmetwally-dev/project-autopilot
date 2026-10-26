@@ -15,11 +15,13 @@ import { collectSnapshotGuards, decideSnapshotReuse, getCachedSnapshot, getSnaps
 import { createShellGuard, logShellDecision, networkIsolationPrefix } from "./shell-guard.mjs";
 import { runGuardedCommand } from "./guarded-command.mjs";
 import {loadAndMigrateConfig} from "./config-migration.mjs";
+import {planApprovalRequired, beginPlanApprovalPause, resumePlanApproval, isPlanApprovalPaused, planApprovalPauseLines} from "./plan-approval.mjs";
 import {validateNewConfig} from "./config-validation.mjs";
 import {verifyDenylistFindings, effectiveVerifyDenylist, speckitTaskDenylistFindings, verifyLengthFindings, speckitTaskVerifyLengthFindings, verifyShardFindings, speckitTaskVerifyShardFindings, phaseTaskCountFindings, unrecognizedAnnotationFindings, MAX_PHASE_TASKS} from "./verify-denylist.mjs";
 import {atomicWriteFileSync} from "./atomic-state-write.mjs";
 import {readResetRequests,enqueueResetRequest,removeResetRequest,removeAllResetRequests} from "./reset-request-queue.mjs";
 import {PLAN_REVISION_RESET_SCOPE,PLAN_REVISION_RESET_KEY,clearPlanRevisionCounter,planRevisionResetRequest,applyPendingPlanRevisionReset} from "./reset-plan-revision.mjs";
+import {resolvePlanRevisionBudget} from "./plan-revision-budget.mjs";
 import {ownerPidPath, writeOwnerPid, readOwnerPid, verifyOwnerPid, removeOwnerPid, findRepoLiveRuns} from "./owner-pid.mjs";
 export {ownerPidPath, writeOwnerPid, readOwnerPid, verifyOwnerPid, removeOwnerPid};
 // Exported for offline tests that must build the production manifest argv with
@@ -30,6 +32,9 @@ export {buildRelayArgs as buildRelayArgsForTests, gates as gatesForTests};
 // Exported for offline tests: backlog #1(a) warn-only preflight for OpenCode
 // models that vanished from the live list.
 export {openCodeSandboxModelWarnings as openCodeSandboxModelWarningsForTests};
+// Exported for offline tests of the live reset-request application path, which
+// otherwise only runs inside a live mission.
+export {applyPendingBudgetReset as applyPendingBudgetResetForTests};
 
 // F2b #23b: test-callable handler that records an orchestrator_exit event
 // without re-raising the signal. Accepts (signal, repo, state) or an options
@@ -296,6 +301,9 @@ const MISSION_SCOPED_STATE_KEYS=Object.freeze([
   "currentPhase","currentTask","feedback","pendingCheckboxSnapshot",
   "lastFailure","lastFailureBudget","relayPolicyViolation",
   "standalonePlanningReviewCheckpoint","speckitGateReviewCheckpoint",
+  // The awaiting-approval record is THIS mission's planning outcome: a new
+  // request must not inherit a pause the operator never approved.
+  "planApproval",
   // F3: both describe THIS mission's own outcome, so neither may outlive it.
   // `lastReview` surfaces in the watch report as if the next mission had been
   // reviewed; `planningStateReview` carries a stale `at`.
@@ -1384,8 +1392,9 @@ function applyPendingBudgetReset(s,scope){
     let limit=null;
     try{
       const name=String(key).split(":")[0];
-      const configured=Number(cfg()?.policy?.failure_budgets?.[name]);
-      if(Number.isInteger(configured)&&configured>0) limit=configured;
+      const raw=cfg()?.policy?.failure_budgets?.[name];
+      const configured=(raw===undefined||raw===null||typeof raw==="boolean"||(typeof raw==="string"&&raw.trim()===""))?null:Number(raw);
+      if(Number.isInteger(configured)&&configured>=0) limit=configured;
     }catch{ /* leave as "?" */ }
     delete s.failureBudgets[key];
     const f=s.lastFailure||null;
@@ -4752,17 +4761,44 @@ async function reviewExistingPlanning(c,s,state,request,opts={}){
   return rr.review;
 }
 
+// Mission 099 task 2.4: artifact paths named in the plan-approval pause for
+// the pre-existing complete-planning shortcut. Paths are repo-relative so the
+// stored pause record and the printed message stay portable (see
+// scripts/plan-approval.mjs). Standalone paths come from the resolved mission;
+// SpecKit paths from detection's taskFiles and its sibling plan.md, falling
+// back to the session feature dir. No placeholder is ever emitted: without a
+// resolvable feature dir there is nothing concrete to name.
+function planApprovalArtifacts(repo,state,s,request){
+  const rel=(p)=>path.relative(repo,p);
+  if(state.framework==="standalone"){
+    const mission=resolveStandaloneMission(repo,s,request);
+    return [standalone.planPath(repo,mission),standalone.tasksPath(repo,mission)].map(rel);
+  }
+  if(state.framework==="speckit"){
+    const taskFile=(state.taskFiles||[])[0]||null;
+    if(taskFile) return [path.join(path.dirname(taskFile),"plan.md"),taskFile].map(rel);
+    const featureDir=s.speckitFeatureDir;
+    if(!featureDir) return [];
+    const dir=path.join(repo,"specs",featureDir);
+    return [path.join(dir,"plan.md"),path.join(dir,"tasks.md")].map(rel);
+  }
+  return [];
+}
+
 async function ensurePlanningReady(c,s,request){
   // Backlog #39 task 1.3: a bare `ap run` after a planning-stage stop resumes
   // with the stored request. A bare run arrives here with the placeholder (not
   // usable); when the open mission is still in a planning-stage state and its
   // stored `s.planningRequest` is usable, substitute it BEFORE detection and
   // classification so `missing` artifacts resume planning instead of dying.
+  // An `escalated` mission is an OPEN mission: a planning no-progress stop
+  // (e.g. step `standalone_planning_no_progress`, no PLAN.md yet) prints
+  // `ap reset ... then ap run`, so its stored request must resume it too.
   // Completed/cancelled/idle states never substitute (they keep the die
   // below), and a usable live request (including a genuinely new one) is never
   // replaced. The record guard below still keys on the LIVE request, so the
   // substitution never overwrites `s.planningRequest`.
-  const inPlanningStage=String(s.phase||"")==="planning"||String(s.step||"").startsWith("planning");
+  const inPlanningStage=String(s.phase||"")==="planning"||String(s.phase||"")==="escalated"||String(s.step||"").startsWith("planning");
   const storedPlanningRequest=hasUsableRequest(s.planningRequest)?String(s.planningRequest).trim():"";
   const effectiveRequest=!hasUsableRequest(request)&&storedPlanningRequest&&inPlanningStage?storedPlanningRequest:request;
   if(planningAdapter(c)===standalone){ ensureStandaloneMigrated(repo,s); const r=ensureStandaloneSplit(repo,s); if(r.migrated){ clearReviewFeedbackByPrefix(s,"standalone-task:"); clearFindingTasksByPrefix(s,"standalone-task:"); clearStaleStandaloneBudgets(s); saveState(s); } }
@@ -4966,6 +5002,18 @@ async function ensurePlanningReady(c,s,request){
   // request never takes the artifacts-complete shortcut.
   if(!startNewPlanning && state.status==="complete" && !recoverableCheckpointResume && !standaloneReviewResume && !speckitGateReviewResume && !hasPendingStandalonePlan && !pendingSpeckitStage) {
     await reviewExistingPlanning(c,s,state,effectiveRequest,{allowSkip:true});
+    // Mission 099 task 2.4: the pre-existing complete-planning shortcut is the
+    // same approval boundary as a freshly planned pass. Standalone and SpecKit
+    // pause after the existing-plan review when approval is required; GSD keeps
+    // its unconditional tasks_ready behavior.
+    if((state.framework==="standalone"||state.framework==="speckit") && planApprovalRequired(c.workflow)){
+      const artifacts=planApprovalArtifacts(repo,state,s,effectiveRequest);
+      const lines=beginPlanApprovalPause(s,{framework:state.framework,artifacts});
+      saveState(s);
+      for(const line of lines) console.log(line);
+      refreshWatchReport(s);
+      return state;
+    }
     if(state.framework==="speckit"){ s.phase="tasks_ready";s.step="tasks_ready";saveState(s);return state; }
     s.phase="tasks_ready";s.step="tasks_ready";s.gsdPhase=state.phase;saveState(s);return state;
   }
@@ -5520,7 +5568,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
   // Plan Review gates Implementation: a FAIL returns to Planning (with the
   // reviewer's findings fed back to the Planner) instead of escalating on
   // the first attempt, matching the SpecKit/GSD planning-review loops.
-  const maxRevisions=Math.max(1,Number(c.policy?.max_plan_revisions||8));
+  const maxRevisions=resolvePlanRevisionBudget(c.policy);
   // Restored, not restarted: a stopped/crashed mission used to re-enter this
   // loop with feedback="" even though the reviewer's findings were sitting
   // in state.json, so the next Planner had to rediscover the review from
@@ -6037,6 +6085,13 @@ async function runStandalonePlanning(c,s,request,opts={}){
   if(state.status==="ambiguous" || state.status==="missing")die(`Standalone plan is not executable: ${state.reason}`);
   { const dg=planningArtifactDigest(file,tasksFile);
     s.planningStateReview={status:"passed",framework:"standalone",at:now(),...(dg?{artifactDigest:dg}:{})}; }
+  if(planApprovalRequired(c.workflow)){
+    const lines=beginPlanApprovalPause(s,{framework:"standalone",artifacts:[path.relative(repo,file),path.relative(repo,tasksFile)]});
+    saveState(s);
+    for(const line of lines) console.log(line);
+    refreshWatchReport(s);
+    return state;
+  }
   s.phase="tasks_ready";s.step="tasks_ready";saveState(s);
   return state;
 }
@@ -6064,6 +6119,10 @@ async function runSpecKitPlanning(c,s,request,opts={}){
   const steps=info.steps;
   const start=Math.max(0,Number(s.planningStepIndex||0));
   const total=steps.length;
+  // Backlog #100: a configured plan_revisions of 0 is a real limit, not a
+  // missing value. The gate below still review-fails, but grants no Planner
+  // revision and never pays for the post-revision re-review.
+  const maxPlanRevisions=resolvePlanRevisionBudget(c.policy);
   const persistDetectedMission=(st)=>{
     // Once the specify step has created the feature dir for the current
     // planning session, adopt its NAME (number stripped) and unify the mission
@@ -6200,7 +6259,7 @@ Return PASS or FAIL with findings.`;
         // second revision, so a FAIL on the re-review below escalates exactly
         // as it does today.
         if(!resumingAtReReview){
-          console.log(`  FAIL — revising ${label}`);
+          console.log(maxPlanRevisions>0?`  FAIL — revising ${label}`:`  FAIL — ${label} (plan revision budget is 0)`);
           // Backlog #54: RATE_LIMITED re-check before spending a gate revision —
           // the pre-wiring guard above already escalates, so this never fires in
           // practice; it guarantees no saveReviewFeedback/planner_revision
@@ -6215,20 +6274,33 @@ Return PASS or FAIL with findings.`;
           saveReviewFeedback(s,speckitStageFeedbackKey(gateStage),rr.review?.findings||[]);
           recordPlanReviewRound(s,speckitStageFeedbackKey(gateStage),rr.review?.findings||[],rr.review?.previous);noteEscalationTrigger(s,c,"planner",speckitStageFeedbackKey(gateStage),"plan_reviewer",rr.review?.previous);
           saveState(s);
-          // planner_revision: written immediately before the between-reviews
-          // Planner call. Content is NOT validated on resume (writable stage —
-          // only version/identity/paths), which is what makes a crash here
-          // resume at the Planner instead of jumping to the reviewer.
+          if(maxPlanRevisions>0){
+            // planner_revision: written immediately before the between-reviews
+            // Planner call. Content is NOT validated on resume (writable stage —
+            // only version/identity/paths), which is what makes a crash here
+            // resume at the Planner instead of jumping to the reviewer.
+            writeSpeckitGateCheckpoint(s,{feature:s.speckitFeatureDir,gate:step.id,gateIndex:idx,substage:SPECKIT_PLANNER_REVISION});
+            saveState(s);
+            await runPlanningPhase(c,gateStage,request,s);
+            persistDetectedMission(s);
+            s.planningStepIndex=idx; saveState(s);
+            // post_revision_review: written before the re-review call, after the
+            // Planner's revision completed — a reviewer stage, so the content
+            // digest is recorded and validated on resume.
+            writeSpeckitGateCheckpoint(s,{feature:s.speckitFeatureDir,gate:step.id,gateIndex:idx,substage:SPECKIT_POST_REVISION_REVIEW});
+            saveState(s);
+          }
+        }
+        if(maxPlanRevisions===0){
+          // Backlog #100: the configured budget forbids a gate revision, so
+          // the findings persisted above are the last word. Checkpoint the
+          // failure exactly like an exhausted re-review (so a resume returns
+          // to the Planner position without granting a revision) and stop.
+          if(!s.speckitPlanningCheckpoint) s.speckitPlanningCheckpoint={};
+          s.speckitPlanningCheckpoint={step:step.id,index:idx,failedAt:now()};
           writeSpeckitGateCheckpoint(s,{feature:s.speckitFeatureDir,gate:step.id,gateIndex:idx,substage:SPECKIT_PLANNER_REVISION});
           saveState(s);
-          await runPlanningPhase(c,gateStage,request,s);
-          persistDetectedMission(s);
-          s.planningStepIndex=idx; saveState(s);
-          // post_revision_review: written before the re-review call, after the
-          // Planner's revision completed — a reviewer stage, so the content
-          // digest is recorded and validated on resume.
-          writeSpeckitGateCheckpoint(s,{feature:s.speckitFeatureDir,gate:step.id,gateIndex:idx,substage:SPECKIT_POST_REVISION_REVIEW});
-          saveState(s);
+          die(`SpecKit gate ${step.id} failed.`);
         }
         const reReviewPrompt=`Re-review the SpecKit gate "${step.id}" after revision.\n${rr.review?.findings?.join("\n")||""}${tasksGateNote}\n${planReviewerRoundLines(s,speckitStageFeedbackKey(gateStage),c.workflow?.plan_review_convergence!==false).join("\n")}\n${REVIEWER_ALL_FINDINGS_LINE}`;
         // Mission 038 task 1.4: re-run the deterministic tasks-text scan on
@@ -6319,6 +6391,14 @@ Return PASS or FAIL with findings.`;
     }
   }
   delete s.speckitPlanningCheckpoint;
+  if(planApprovalRequired(c.workflow)){
+    const artifacts=planApprovalArtifacts(repo,{framework:"speckit",taskFiles:s.taskFiles},s,request);
+    const lines=beginPlanApprovalPause(s,{framework:"speckit",artifacts});
+    saveState(s);
+    for(const line of lines) console.log(line);
+    refreshWatchReport(s);
+    return s;
+  }
   s.phase="tasks_ready";s.step="tasks_ready";saveState(s);
 }
 
@@ -6528,7 +6608,30 @@ async function runGsdPlanning(c,s,request){
 async function runSpec(c,s){
   const request=process.env.AUTOPILOT_SPEC || c.project?.spec || "Use the current project request/context.";
   await ensurePlanningReady(c,s,request);
+  // Mission 099 task 2.6: planning can END at the plan-approval pause (the
+  // standalone/SpecKit loops and the existing-plan shortcut all pause), so
+  // this line must not claim the plan is ready to implement while paused.
+  if(isPlanApprovalPaused(s) || isPlanApprovalPaused(loadState())) return;
   console.log("PLANNING STATE RESOLVED — TASKS/PHASE PLAN READY");
+}
+
+// Mission 099 task 2.6: `ap full` and `ap do` run planning and implementation
+// in the SAME process, so they must consume a stored plan-approval pause
+// themselves — otherwise runSpec would plan again (or re-pause via the
+// existing-plan shortcut) before runImplementation's own resume runs. Running
+// the command is the approval; returns true when the pause was consumed.
+// A supplied request that differs from the paused mission's request starts a
+// NEW mission (runImplementation's takeover discards this one), so consuming
+// the pause here would log an approval that never applies — fall through to
+// runSpec/runImplementation instead, exactly like the takeover check.
+function resumePausedPlanForCommand(c,s,commandLabel){
+  if(!isPlanApprovalPaused(s)) return false;
+  if(suppliedRequestStartsNewMission(c,s)) return false;
+  const framework=s.planApproval?.framework||"planning";
+  if(!resumePlanApproval(s)) return false;
+  saveState(s);
+  console.log(`Plan approved by \`ap ${commandLabel}\` (${framework}) — resuming the approved plan.`);
+  return true;
 }
 
 function activeSpecKitFeatureDir(){
@@ -9071,7 +9174,7 @@ async function runImplementation(c){
   // Refusal rule: continuing WITHOUT a message is allowed only when there is
   // open work at some step. If nothing has started, or the previous mission
   // is fully complete, a feature description (or --mission) is required.
-  const activePhases=new Set(["planning","tasks_ready","implementing","final_review","phase_complete","verifying","wave","escalated"]);
+  const activePhases=new Set(["planning","plan_approval","tasks_ready","implementing","final_review","phase_complete","verifying","wave","escalated"]);
   let openWork=activePhases.has(s.phase);
   if(!openWork && (s.phase==="idle"||!s.phase)){
     const ps=detectPlanningState(c,s,rawRequest);
@@ -9135,6 +9238,26 @@ async function runImplementation(c){
     saveState(s);
     clearInheritedFailureCounters(s);
   }
+  // Mission 099 task 2.3: a stored `plan_approval` phase is consumed by the
+  // next `ap run` — running the command is the approval. Convert to
+  // `tasks_ready` BEFORE the planning-bypass decision so the paused mission
+  // resumes straight into implementation instead of re-planning or re-pausing.
+  // `--stage planning` is the exception: it must NOT approve. Re-print the
+  // pause so the operator sees the same boundary instead of the pause being
+  // silently consumed by a command that promises to stop after planning.
+  if(s.phase==="plan_approval"){
+    if(stage==="planning"){
+      const record=s.planApproval||{};
+      for(const line of planApprovalPauseLines({framework:record.framework,artifacts:record.artifacts})) console.log(line);
+      console.log("Stage 'planning' complete — the plan is awaiting approval; run `ap run` (or `--stage implement`) to approve it.");
+      return;
+    }
+    const pausedFramework=s.planApproval?.framework||"planning";
+    if(resumePlanApproval(s)){
+      saveState(s);
+      console.log(`Plan approved by \`ap run\` (${pausedFramework}) — resuming the approved plan.`);
+    }
+  }
   if(s.phase!=="tasks_ready" && s.phase!=="implementing" && s.phase!=="final_review" && s.phase!=="complete" && s.phase!=="phase_complete") {
     // Resolution 3 (TASK-11 task 12): a valid phase checkpoint bypasses
     // planning — decided by the shared pure evaluator, never reimplemented
@@ -9153,6 +9276,7 @@ async function runImplementation(c){
       s=loadState();
     }
   }
+  if(s.phase==="plan_approval") return;
   if(stage==="planning"){
     // Mission 090 task 1.3: planning-only run — planning already persisted
     // state.phase/step via ensurePlanningReady (tasks_ready), so stop
@@ -10530,7 +10654,14 @@ async function reviewPlanCommand(c,s){
 async function doCommand(c,s){
   const request=commandArgs.join(" ").trim()||process.env.AUTOPILOT_SPEC||c.project?.spec||"Use the current project request/context.";
   process.env.AUTOPILOT_SPEC=request;
-  await runSpec(c,s);
+  const stored=loadState();
+  if(!resumePausedPlanForCommand(c,stored,"do")){
+    await runSpec(c,stored);
+    // A same-process command whose planning just paused must STOP here:
+    // runImplementation would otherwise consume the fresh pause in this very
+    // invocation, so the operator would never get to approve the plan.
+    if(isPlanApprovalPaused(loadState())) return;
+  }
   return runImplementation(c);
 }
 
@@ -10670,7 +10801,14 @@ async function main(){
         return await runImplementation(c);
       }
       if(command==="full"){
-        await runSpec(c,s);
+        const stored=loadState();
+        if(!resumePausedPlanForCommand(c,stored,"full")){
+          await runSpec(c,stored);
+          // See doCommand: do not let runImplementation consume the pause that
+          // this very invocation just created — `ap full` must stop at the
+          // approval boundary; a later `ap full` is the approval.
+          if(isPlanApprovalPaused(loadState())) return;
+        }
         return await runImplementation(c);
       }
     }

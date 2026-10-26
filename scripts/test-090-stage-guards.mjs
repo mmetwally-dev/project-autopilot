@@ -73,6 +73,17 @@ check("[map] verify maps to verifier+mark_tasks",
   check("[implement] checkpoint at implementer allows implement",
     got.allowed === true && got.reason === null, JSON.stringify(got));
 }
+{
+  // Mission 099 task 2.3: the plan is written and only awaiting approval, so
+  // `--stage implement` is the approval itself (runImplementation consumes the
+  // pause). Refusing here would make the pause unreachable except through
+  // `--stage planning`, which must never approve.
+  const got = guardStage("implement", {
+    state: {phase: "plan_approval", step: "approve_plan"}, checkpoint: null,
+  });
+  check("[implement] plan_approval allows implement (the pause is the approval)",
+    got.allowed === true && got.reason === null && got.checkpointStage === "implementer", JSON.stringify(got));
+}
 
 // ── review (implementer prerequisite) ───────────────────────────
 {

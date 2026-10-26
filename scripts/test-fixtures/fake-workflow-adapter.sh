@@ -1627,8 +1627,12 @@ case "$ROLE" in
       exit 124
     elif [ "$SCENARIO" = "standalone_verifier_infra_once" ] && phase_review_call && ! prior_role_result verifier; then
       # TASK-11 Phase 4 case 3: infrastructure failure (nonzero exit, no
-      # review sentinel), exactly once. Must retry only the Verifier.
+      # review sentinel), exactly once. Must retry only the Verifier. The
+      # second stderr line matches failure-contract.mjs's serverPattern, so
+      # this is a real SERVER_UNAVAILABLE/infrastructure failure (retryable),
+      # not the generic adapter-domain nonzero exit.
       echo "standalone_verifier_infra_once: simulated infrastructure failure" >&2
+      echo "server unavailable: upstream model endpoint refused the connection" >&2
       exit 1
     elif [ "$SCENARIO" = "standalone_verifier_fail_once" ] && phase_review_call; then
       # TASK-11 Phase 4 case 6: functional FAIL once, keyed off the
@@ -1685,8 +1689,12 @@ case "$ROLE" in
       exit 124
     elif [ "$SCENARIO" = "speckit_verifier_infra_once" ] && phase_review_call && ! prior_role_result verifier; then
       # TASK-11 Phase 5: infrastructure failure (nonzero exit, no
-      # review sentinel), exactly once. Must retry only the Verifier.
+      # review sentinel), exactly once. Must retry only the Verifier. The
+      # second stderr line matches failure-contract.mjs's serverPattern, so
+      # this is a real SERVER_UNAVAILABLE/infrastructure failure (retryable),
+      # not the generic adapter-domain nonzero exit.
       echo "speckit_verifier_infra_once: simulated infrastructure failure" >&2
+      echo "server unavailable: upstream model endpoint refused the connection" >&2
       exit 1
     elif [ "$SCENARIO" = "speckit_verifier_fail_once" ] && phase_review_call; then
       # TASK-11 Phase 5: functional FAIL once, keyed off the

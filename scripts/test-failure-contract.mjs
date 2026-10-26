@@ -158,6 +158,35 @@ assert.equal(adapterBudget.used, 1);
 assert.equal(state.failureBudgets["verificationFailureBudget:task:1"], 2);
 assert.equal(state.failureBudgets["adapterRetryBudget:adapter:codex:verifier"], 1);
 
+// Zero-aware failure budgets: each configured key accepts 0 as a real limit,
+// so the first failure is not retried, while absent keys keep the built-in
+// default (implementation/verification 4, cli_errors/infrastructure 3).
+for (const [label, failureClass, domain, key, absentDefault] of [
+  ["implementation", "IMPLEMENTATION_REJECTED", "implementation", "implementationFailureBudget", 4],
+  ["verification", "VERIFICATION_REJECTED", "verification", "verificationFailureBudget", 4],
+  ["cli_errors", "PROCESS_EXIT_NONZERO", "adapter", "adapterRetryBudget", 3],
+  ["infrastructure", "TIMEOUT", "infrastructure", "infrastructureRetryBudget", 3],
+]) {
+  const zeroState = {};
+  const zero = recordFailureBudget(zeroState, {failure_budgets: {[key]: 0}}, failure(failureClass, domain, true), `zero:${label}`);
+  assert.equal(zero.allowed, false, `${label}: limit 0 must not retry`);
+  assert.equal(zero.used, 1, `${label}: first failure counts`);
+  assert.equal(zero.limit, 0, `${label}: configured limit is 0`);
+
+  const absentState = {};
+  const absent = recordFailureBudget(absentState, {}, failure(failureClass, domain, true), `absent:${label}`);
+  assert.equal(absent.allowed, true, `${label}: absent limit retries`);
+  assert.equal(absent.used, 1, `${label}: first failure counts`);
+  assert.equal(absent.limit, absentDefault, `${label}: absent limit uses built-in default`);
+
+  for (const [nullLabel, nullValue] of [["null", null], ["blank", ""]]) {
+    const legacy = recordFailureBudget({}, {failure_budgets: {[key]: nullValue}}, failure(failureClass, domain, true), `legacy:${label}:${nullLabel}`);
+    assert.equal(legacy.limit, absentDefault, `${label}: ${nullLabel} limit uses built-in default`);
+    assert.equal(legacy.allowed, true, `${label}: ${nullLabel} limit retries`);
+    assert.equal(legacy.used, 1, `${label}: ${nullLabel} first failure counts`);
+  }
+}
+
 // Legacy Run-27 replay (Mission 001): a PERMISSION_DENIED failure evidenced
 // ONLY by file_read_* observations sitting on a genuinely completed,
 // policy-clean result is stale noise, not a failure. Paired with a

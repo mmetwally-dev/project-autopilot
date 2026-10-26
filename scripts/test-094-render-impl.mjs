@@ -84,10 +84,10 @@ const bar = (p, m) => "+".repeat(p) + "-".repeat(m);
   check("example: no not-started phase header", !report.includes("○ NOT STARTED"), report.split("\n").find((l) => l.includes("NOT STARTED")));
   check("example: phase 3 absent", !report.includes("Phase 3/3 — Regression test"), report);
 
-  has("implementer row", "06-implementer-359c6a9c    muse-spark-1.3  T1.1         COMPLETED  00:02:42  2:08/1:04  41.5K   22.6K    6      2026-09-29 00:02:45");
-  has("phase review row", "08-code_reviewer-6676a8bb  opus-5.5        T1.1 > T1.2  APPROVED   00:02:30  2:07/1:01  28.7K   21.9K    3      2026-09-29 00:13:56  phase review");
-  has("gate row", "GATE (orchestrator)        -               T1.1 > T1.2  PASS       00:02:15  -          -       -        -      2026-09-29 00:16:00  full test suite (node scripts/test-all.mjs --skip-live) · 204/204 runs passed");
-  has("verifier row", "09-verifier-7e64e556       nemotron-3      T1.1 > T1.2  APPROVED   00:12:09  2:09/1:03  373.4K  58.7K    24     2026-09-29 00:18:53  phase verify · ⚠ high usage (373.4K of 500K cap)");
+  has("implementer row", "06-implementer-359c6a9c    muse-spark-1.3  T1.1         COMPLETED       00:02:42  2:08/1:04  41.5K   22.6K    6      2026-09-29 00:02:45");
+  has("phase review row", "08-code_reviewer-6676a8bb  opus-5.5        T1.1 > T1.2  APPROVED        00:02:30  2:07/1:01  28.7K   21.9K    3      2026-09-29 00:13:56  phase review");
+  has("gate row", "GATE (orchestrator)        -               T1.1 > T1.2  PASS            00:02:15  -          -       -        -      2026-09-29 00:16:00  full test suite (node scripts/test-all.mjs --skip-live) · 204/204 runs passed");
+  has("verifier row", "09-verifier-7e64e556       nemotron-3      T1.1 > T1.2  APPROVED        00:12:09  2:09/1:03  373.4K  58.7K    24     2026-09-29 00:18:53  phase verify · ⚠ high usage (373.4K of 500K cap)");
 
   has("capped status", "CAPPED (23/22)");
   has("capped session note", "session 1 of 6");
@@ -190,14 +190,14 @@ const bar = (p, m) => "+".repeat(p) + "-".repeat(m);
 
   has("result line", "=== FINAL REVIEW STAGE ===  ✓ PASSED at 2026-09-29 03:31:40 · 268.4K · 00:19:05 (fix rounds 1 of 2)");
   has("round 1", "  Round 1");
-  has("denied review row", "31-code_reviewer-5a1e90c2  opus-5.5  T1.1 > T3.2  DENIED");
+  has("denied review row", "31-code_reviewer-5a1e90c2  opus-5.5        T1.1 > T3.2  DENIED");
   check("finding line hidden after approval", !report.includes("fingerprint exclusion misses refs/notes"), report.includes("fingerprint exclusion misses refs/notes"));
   has("fix round header", "  Fix round 1 of 2");
   has("fix implementer row", "32-implementer-0c7d3e19");
   has("fix implementer note", "fixed 1 of 1 finding");
-  has("fix gate row", "GATE (orchestrator)      -               T1.1 > T3.2  PASS       00:02:20  -          -      -        -      2026-09-29 03:20:00  full test suite · 204/204 runs passed");
+  has("fix gate row", "GATE (orchestrator)        -               T1.1 > T3.2  PASS         00:02:20  -          -       -        -      2026-09-29 03:20:00  full test suite · 204/204 runs passed");
   has("round 2", "  Round 2");
-  has("pass review row", "33-code_reviewer-91b4f6aa  opus-5.5  T1.1 > T3.2  APPROVED");
+  has("pass review row", "33-code_reviewer-91b4f6aa  opus-5.5        T1.1 > T3.2  APPROVED");
   has("pass review note", "final review · 0 findings");
 
   // rule 16: named FINAL REVIEW, never `Phase N`, own `Total:` entry

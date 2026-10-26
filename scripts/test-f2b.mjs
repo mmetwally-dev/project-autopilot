@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {spawnSync} from "node:child_process";
 import {buildTaskPrompt} from "./role-progress-prompt.mjs";
@@ -9,16 +10,29 @@ import { changedFilesStat } from "./changed-files-stat.mjs";
 import {spawnRelayChild} from "./subprocess-relay.mjs";
 import {appendOrchestratorExitEvent} from "./autopilot.mjs";
 import {runDetached} from "../bin/ap.cjs";
+import {withoutOuterGitGuard} from "./test-fixtures/workflow-order-harness.mjs";
 
-const root = process.cwd();
-const scratch = path.join(root, ".f2b-scratch");
-try { fs.rmSync(scratch, {recursive:true, force:true}); } catch {}
-fs.mkdirSync(scratch, {recursive:true});
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "ap-f2b-"));
+process.on("exit", () => {
+  try { fs.rmSync(scratch, {recursive:true, force:true}); } catch {}
+});
 
 let ok = 0, failed = 0;
 function check(name, cond, ev) {
   if (cond) { console.log("PASS " + name); ok += 1; }
   else { console.error("FAIL " + name + (ev !== undefined ? " :: " + JSON.stringify(ev) : "")); failed += 1; }
+}
+
+// Scratch-repo git commands must never inherit an outer mission's repo
+// selection or guard (GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_CONFIG_*,
+// PATH shim) and must not discover any repository above the scratch dir.
+function scratchGitEnv() {
+  const env = withoutOuterGitGuard(process.env);
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("GIT_")) delete env[key];
+  }
+  env.GIT_CEILING_DIRECTORIES = path.dirname(scratch);
+  return env;
 }
 
 // 1. free vs paid
@@ -56,9 +70,13 @@ function makeBrief(extra) {
 {
   const repo = path.join(scratch, "repo1");
   fs.mkdirSync(repo, {recursive:true});
-  const git = (args) => spawnSync("git", args, {cwd: repo, encoding: "utf8", shell: false});
-  git(["init", "-q"]); git(["config", "user.email", "t@e.invalid"]); git(["config", "user.name", "T"]);
-  fs.writeFileSync(path.join(repo, "README.md"), "x\n"); git(["add", "-A"]); git(["commit", "-q", "-m", "init"]);
+  const git = (args) => spawnSync("git", args, {cwd: repo, encoding: "utf8", shell: false, env: scratchGitEnv()});
+  const init = git(["init", "-q"]);
+  check("fixture: git init", init.status === 0, init.stderr);
+  git(["config", "user.email", "t@e.invalid"]); git(["config", "user.name", "T"]);
+  fs.writeFileSync(path.join(repo, "README.md"), "x\n"); git(["add", "-A"]);
+  const initCommit = git(["commit", "-q", "-m", "init"]);
+  check("fixture: git init commit", initCommit.status === 0, initCommit.stderr);
   const editedFile = path.join(repo, "edited.mjs");
   const newFile = path.join(repo, "new.mjs");
   fs.writeFileSync(editedFile, "a\nb\nc\nd\ne\n");

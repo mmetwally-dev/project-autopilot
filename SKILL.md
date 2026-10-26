@@ -305,8 +305,8 @@ migrate automatically with one timestamped backup.
   `$schema`; writes a `.bak-<timestamp>` backup first; never invents a `runtime`
   mode.
 
-Every setting with its default is in README → Configuration reference
-(generated from `config.schema.json`).
+Every setting with its default is in [docs/configuration.md](docs/configuration.md)
+→ Configuration reference (generated from `config.schema.json`).
 
 ## SpecKit, standalone and not-yet-reviewed integrations
 

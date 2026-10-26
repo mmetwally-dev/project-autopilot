@@ -47,12 +47,39 @@ for (const role of ["planner", "plan_reviewer", "implementer", "code_reviewer", 
   }
 }
 
+// Backlog #100: every retries budget must explain an explicit 0 and what an
+// absent value does (it keeps the built-in default).
+const retryDescriptions = {
+  "retries.plan_revisions": "an absent value uses the built-in default of 8.",
+  "retries.implementation": "an absent value uses the built-in default of 4.",
+  "retries.verification": "an absent value uses the built-in default of 4.",
+  "retries.cli_errors": "an absent value uses the built-in default of 3.",
+  "retries.infrastructure": "an absent value uses the built-in default of 3.",
+  "retries.extra_sessions_per_task": "an absent value uses the built-in default of 5.",
+};
+for (const [path, defaultSentence] of Object.entries(retryDescriptions)) {
+  const description = leaf(schema, path);
+  includes(description, "0", `${path} zero`);
+  includes(description, "absent", `${path} absence`);
+  includes(description, defaultSentence, `${path} default sentence`);
+}
+
+// plan_revisions is an escalation point, not a revision count: 0 and 1 both
+// stop at the first FAIL in standalone, SpecKit never runs more than one
+// revision per gate, and GSD planning still treats 0 or absent as 8.
+const planRevisions = leaf(schema, "retries.plan_revisions");
+for (const marker of ["first plan-review FAIL", "one fewer revision", "1 behaves like 0", "at most one revision per gate", "any value above 0", "GSD planning still treats 0 or an absent value as 8"]) {
+  includes(planRevisions, marker, `retries.plan_revisions ${marker}`);
+}
+if (/revision rounds/i.test(planRevisions)) fail("retries.plan_revisions still claims a number of revision rounds");
+
 // Backlog #16: these three implemented settings used to claim they had no
 // effect. Each description must now state the real true/false behavior.
 const implementedSettings = {
   "workflow.plan_review_rounds_converge": ["(true)", "(false)"],
   "workflow.code_review_per_phase": ["(true)", "(false)"],
   "workflow.final_review": ["(true)", "(false)"],
+  "workflow.pause_for_plan_approval": ["(true)", "(false)", "ap run"],
 };
 for (const [path, markers] of Object.entries(implementedSettings)) {
   const description = leaf(schema, path);

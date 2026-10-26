@@ -25,6 +25,15 @@ const PLANNING_ROLES = new Set(["planner", "plan_reviewer"]);
 const REVIEW_ROLES = new Set(["code_reviewer", "verifier"]);
 const IMPLEMENTATION_ROLES = new Set(["implementer"]);
 
+// Every status word a row's STATUS cell can print (runStatusCell/gateStatusText):
+// RUNNING/CAPPED/COMPLETED/INTERRUPTED/FAILED plus the reviewer verdicts and the
+// gate PASS/FAIL. A report keeps the STATUS column at least this wide so every
+// report lines up, even when it has no row with the longest word.
+const REPORT_STATUS_WORDS = [
+  "RUNNING", "CAPPED", "APPROVED", "DENIED", "COMPLETED", "INTERRUPTED",
+  "FAILED", "INCOMPLETE", "PASS", "FAIL",
+];
+
 function roleOf(run) {
   return typeof run?.role === "string" ? run.role : "";
 }
@@ -499,7 +508,7 @@ function classifyStage(state, planning, phases, finalReview) {
   // final review run finished must still read IMPLEMENTATION while the mission
   // is still implementing.
   if (statePhase === "final_review") return "FINAL REVIEW";
-  if (statePhase === "planning" || /planning/.test(String(state?.step || ""))) return "PLANNING";
+  if (statePhase === "planning" || statePhase === "plan_approval" || /planning/.test(String(state?.step || ""))) return "PLANNING";
   if (statePhase === "implementing" || statePhase === "verifying" || statePhase === "tasks_ready") return "IMPLEMENTATION";
   if (finalReview.status === "skipped") return "FINAL REVIEW";
   if (finalReview.runs.length > 0 && (finalReview.status === "in_progress" || finalReview.status === "passed")) return "FINAL REVIEW";
@@ -641,6 +650,7 @@ function statusStopLine(info) {
     case "STOPPED": return info.orchestratorNotRunning
       ? `STOPPED · orchestrator not running (resumable)`
       : `STOPPED${info.at ? ` at ${formatStamp(info.at)}` : ""}`;
+    case "PAUSED": return `AWAITING PLAN APPROVAL${info.at ? ` at ${formatStamp(info.at)}` : ""} — run \`ap run\` to approve and continue`;
     default: return null;
   }
 }
@@ -667,6 +677,11 @@ export function classifyStatus(state, { operatorEvents = [], runs = [], ownerAli
     info.at = state?.lastContinuation?.at ?? null;
   } else if (phase === "idle") {
     info.status = "STOPPED";
+  } else if (phase === "plan_approval") {
+    // Plan-approval pause: the mission is waiting for the operator, not
+    // running and not stopped. Every other status stays untouched.
+    info.status = "PAUSED";
+    info.at = state?.planApproval?.at ?? null;
   } else {
     // Owner liveness takes precedence when known.
     let oa = ownerAlive;
@@ -1038,6 +1053,16 @@ function sumUsed(scopes) {
   return scopes.reduce((sum, s) => sum + s.used, 0);
 }
 
+// A configured budget/allowance value: an integer >= 0, else null. Null,
+// undefined, booleans and blank strings are absent (not 0), matching the
+// budget resolvers.
+function configuredBudgetValue(value) {
+  if (value === undefined || value === null || typeof value === "boolean") return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
 // Sum `state.failureBudgets` entries (`<budgetName>:<scope>`) per domain and
 // pair each with its `policy.failure_budgets` limit (legacy) or `layout.retries.*` (v4).
 // Backlog #38: `used` is the CURRENT scope's spend (current phase for the task
@@ -1096,8 +1121,7 @@ export function buildBudgetEntries(state, policy, layout = null) {
     }
     let limit = configuredLayout[layoutKey];
     if (limit === undefined || limit === null) {
-      const raw = Number(configuredLegacy[legacyKey]);
-      limit = Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_BUDGET_LIMITS[legacyKey];
+      limit = configuredBudgetValue(configuredLegacy[legacyKey]) ?? DEFAULT_BUDGET_LIMITS[legacyKey];
     }
     return { domain, used, limit, earlier };
   });
@@ -1128,15 +1152,13 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
 
   // Enrich every run once: disk extras, display model, provider trouble and
   // the "session k of N" scope label.
-  const allowance = Number.isFinite(Number(policy?.continuation_allowance)) && Number(policy.continuation_allowance) > 0
-    ? Number(policy.continuation_allowance)
-    : null;
+  const allowance = configuredBudgetValue(policy?.continuation_allowance);
   const enrichedRuns = (Array.isArray(runs) ? runs : []).map((raw) => {
     const run = enrichRun(raw);
     run.displayModel = modelDisplay(run);
     run.providerTrouble = providerTroubleLabel(run.note);
     const k = Number(run.sessionNumber);
-    run.sessionLabel = Number.isInteger(k) && k > 0 ? (allowance ? `session ${k} of ${allowance + 1}` : `session ${k}`) : null;
+    run.sessionLabel = Number.isInteger(k) && k > 0 ? (allowance !== null ? `session ${k} of ${allowance + 1}` : `session ${k}`) : null;
     return run;
   });
 
@@ -1601,13 +1623,37 @@ const TABLE_COLUMNS = [
   { header: "NOTE", cell: (r) => r.note ?? "" },
 ];
 
+// The longest run directory name the report can print: `NN-<role>-xxxxxxxx`
+// (two-digit sequence, a real role name, eight hex chars).
+function longestRunName() {
+  const roles = [...new Set([...PLANNING_ROLES, ...REVIEW_ROLES, ...IMPLEMENTATION_ROLES])];
+  return Math.max(...roles.map((role) => `NN-${role}-xxxxxxxx`.length));
+}
+
+// One set of column widths for a whole report, so the planning, implementation
+// and final-review tables line up with each other. ROLE and STATUS also carry
+// report-independent minimums so separate reports line up too.
+function reportColumnWidths(rows) {
+  const widths = TABLE_COLUMNS.map((c, i) => Math.max(
+    c.header.length,
+    ...rows.map((row) => String(c.cell(row) ?? "").length),
+  ));
+  widths[0] = Math.max(widths[0], longestRunName());
+  widths[3] = Math.max(widths[3], ...REPORT_STATUS_WORDS.map((word) => word.length));
+  return widths;
+}
+
 // One aligned table for every stage: the header row repeated above the data
 // rows (rule 2), a leading `›` in the left margin of every running row, and no
-// trailing spaces on the last column.
-function renderRows(rows, { indent = "    " } = {}) {
+// trailing spaces on the last column. A report passes the shared `widths`; a
+// direct caller without them keeps the per-table sizing.
+function renderRows(rows, { indent = "    ", widths: sharedWidths = null, collectRows = null } = {}) {
+  if (typeof collectRows === "function") collectRows(rows);
   const pad = typeof indent === "number" ? " ".repeat(Math.max(0, indent)) : String(indent);
   const cells = rows.map((row) => TABLE_COLUMNS.map((c) => String(c.cell(row) ?? "")));
-  const widths = TABLE_COLUMNS.map((c, i) => Math.max(c.header.length, ...cells.map((row) => row[i].length)));
+  const widths = Array.isArray(sharedWidths) && sharedWidths.length === TABLE_COLUMNS.length
+    ? sharedWidths
+    : TABLE_COLUMNS.map((c, i) => Math.max(c.header.length, ...cells.map((row) => row[i].length)));
   const join = (row) => row.map((cell, i) => (i === TABLE_COLUMNS.length - 1 ? cell : cell.padEnd(widths[i]))).join("  ");
   const lines = [`${pad}${join(TABLE_COLUMNS.map((c) => c.header))}`];
   rows.forEach((row, i) => {
@@ -1670,7 +1716,7 @@ export function renderFindings(findings, { runId = null, indent = "      " } = {
 // `=== PLANNING STAGE ===  ✓ PASSED at <time> · <price> · <time> (N review
 // rounds, R revision of M)`; one `Round N` block per review round, each with
 // its own table and the reviewer's findings under the reviewer row.
-export function renderPlanningStage(model) {
+export function renderPlanningStage(model, { widths = null, collectRows = null } = {}) {
   const planning = model?.planning || { status: "not_started", rounds: [], runs: [], revision: null };
   const runs = Array.isArray(planning.runs) ? planning.runs : [];
   const rounds = Array.isArray(planning.rounds) ? planning.rounds : [];
@@ -1730,7 +1776,7 @@ export function renderPlanningStage(model) {
       header += ` (revision ${round.revision}${max})`;
     }
     out.push(header);
-    out.push(...renderRows((round.runs || []).map((run) => planningRow(run, model))));
+    out.push(...renderRows((round.runs || []).map((run) => planningRow(run, model)), { widths, collectRows }));
     const passed = planning.status === "passed" || rounds.slice(i + 1).some(roundApproved);
     if (passed) return;
     for (const run of round.runs || []) {
@@ -2415,7 +2461,7 @@ function denyingRole(runs) {
 // has more than one), the DENIED attempt's findings + carried-forward +
 // changed-files lines, CAPPED `session k of N`, and GATE rows. Rows appear
 // only once they have started; each sits in the attempt containing its start.
-export function renderImplementationStage(model) {
+export function renderImplementationStage(model, { widths = null, collectRows = null } = {}) {
   // Rule 7 (backlog #7): nothing is shown before it starts - a phase with no
   // runs is omitted entirely, so no `○ NOT STARTED` header and no section while
   // the mission is still planning.
@@ -2446,7 +2492,7 @@ export function renderImplementationStage(model) {
       if (showAttemptHeaders) out.push(`    Attempt ${attempt.number}  ${attemptHeader(attempt, phase, i, model, isLast)}`);
       const entries = attemptRows(attempt, model, phase);
       if (entries.length) {
-        const lines = renderRows(entries.map((e) => e.row), { indent: tableIndent });
+        const lines = renderRows(entries.map((e) => e.row), { indent: tableIndent, widths, collectRows });
         out.push(lines[0]);
         entries.forEach((entry, j) => {
           out.push(lines[j + 1]);
@@ -2489,7 +2535,7 @@ export function renderImplementationStage(model) {
 // `=== FINAL REVIEW STAGE ===` (rule 16; never `Phase N`): result line with
 // fix rounds, then one `Round N` block per review (a denied review's fix pass
 // under `Fix round k of N` with its gate + changed-files lines).
-export function renderFinalReviewStage(model) {
+export function renderFinalReviewStage(model, { widths = null, collectRows = null } = {}) {
   const fr = model?.finalReview || { status: "not_started", rounds: [], runs: [] };
   const limitRaw = Number(model?.policy?.final_review_fix_rounds);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : null;
@@ -2537,7 +2583,7 @@ export function renderFinalReviewStage(model) {
     const reviewers = (round.runs || []).filter((r) => REVIEW_ROLES.has(roleOf(r)));
     const implRuns = (round.runs || []).filter((r) => IMPLEMENTATION_ROLES.has(roleOf(r)));
     out.push(`  Round ${round.number}`);
-    out.push(...renderRows(reviewers.map((r) => implementationRow(r, model, { task: scopeOf(r), noteHint: "final review" }))));
+    out.push(...renderRows(reviewers.map((r) => implementationRow(r, model, { task: scopeOf(r), noteHint: "final review" })), { widths, collectRows }));
     const findingsPassed = fr.status === "passed" || (fr.rounds || []).slice(roundIndex + 1).some(roundApproved);
     if (!findingsPassed) {
       for (const r of reviewers) {
@@ -2554,7 +2600,7 @@ export function renderFinalReviewStage(model) {
         ...finalGates.map((g) => ({ ts: Date.parse(g.at ?? g.resultAt) || 0, seq: 1, row: gateRow(g, model, range ?? "-") })),
       ];
       entries.sort((a, b) => (a.ts - b.ts) || (a.seq - b.seq));
-      out.push(...renderRows(entries.map((e) => e.row)));
+      out.push(...renderRows(entries.map((e) => e.row), { widths, collectRows }));
     }
   });
   return out.join("\n");
@@ -2718,14 +2764,23 @@ export function renderLiveProgress(model) {
 
 // The whole report. Tasks 1.5 append the current-run and live-progress sections.
 export function renderReport(model, { stamp = null } = {}) {
+  // Backlog #23: one width per column for the whole report. Collect every
+  // table's rows first (the stage renderers are pure), then render each stage
+  // with that shared width set so rounds/phases never change the alignment.
+  const allRows = [];
+  const collectRows = (rows) => allRows.push(...rows);
+  renderPlanningStage(model, { collectRows });
+  renderImplementationStage(model, { collectRows });
+  renderFinalReviewStage(model, { collectRows });
+  const widths = reportColumnWidths(allRows);
   // Rule 7 (backlog #7): a stage section that has not started renders nothing
   // and is omitted, so a planning-stage report carries no IMPLEMENTATION or
   // FINAL REVIEW header.
   const stages = [
     renderPipelineState(model, { stamp }),
-    renderPlanningStage(model),
-    renderImplementationStage(model),
-    renderFinalReviewStage(model),
+    renderPlanningStage(model, { widths }),
+    renderImplementationStage(model, { widths }),
+    renderFinalReviewStage(model, { widths }),
   ].filter((section) => section && section.trim());
   const sections = [stages.join("\n\n")];
   const current = renderCurrentRun(model);

@@ -121,6 +121,57 @@ const baseOpts = (io) => ({
   console.log("PASS live-reset-consumed-through-injected-accessors");
 }
 
+// 3b. A live reset under a configured budget of 0 reports a cleared limit of 0
+//     (not null/"?"), then escalates because a 0 budget allows no retry.
+{
+  const resetRequests = [{scope: "mission", key: "infrastructureRetryBudget:mission"}];
+  const io = makeIo({resetRequests, configuredBudgets: {infrastructureRetryBudget: 0}});
+  const state = {failureBudgets: {"infrastructureRetryBudget:mission": 1}};
+  const config = {policy: {retry_delay_ms: 0, failure_budgets: {infrastructureRetryBudget: 0}}};
+  const failedAttempt = {
+    status: "failed",
+    role: "plan_reviewer",
+    adapter: "test-adapter",
+    failure: failure("SERVER_UNAVAILABLE", "infrastructure", true, [{source: "test", type: "server_unavailable"}])
+  };
+  let reruns = 0;
+  await assert.rejects(() => resolvePlanningReviewAttempt(
+    config, state, "standalone-plan-review", failedAttempt,
+    async () => { reruns += 1; return failedAttempt; },
+    baseOpts(io)
+  ), /FATAL:/, "a configured 0 budget must escalate instead of retrying");
+  assert.equal(reruns, 0, "a configured 0 budget must not re-invoke the reviewer");
+  assert.equal(io.calls.consumeResetRequest.length, 1, "the reset request is still consumed");
+  assert.ok(state.lastReset, "live reset must record lastReset evidence");
+  assert.equal(state.lastReset.clearedLimit, 0, "a configured 0 limit must be reported as 0, not null");
+  console.log("PASS live-reset-configured-zero-cleared-limit");
+}
+
+// 3c. A null configured budget is ABSENT, not a configured 0: the recorded
+//     cleared limit stays null (rendered "?") while the resolver falls back to
+//     the built-in default.
+{
+  const resetRequests = [{scope: "mission", key: "infrastructureRetryBudget:mission"}];
+  const io = makeIo({resetRequests, configuredBudgets: {infrastructureRetryBudget: null}});
+  const state = {failureBudgets: {"infrastructureRetryBudget:mission": 1}};
+  const config = {policy: {retry_delay_ms: 0, failure_budgets: {infrastructureRetryBudget: null}}};
+  const failedAttempt = {
+    status: "failed",
+    role: "plan_reviewer",
+    adapter: "test-adapter",
+    failure: failure("SERVER_UNAVAILABLE", "infrastructure", true, [{source: "test", type: "server_unavailable"}])
+  };
+  const retriedPass = {status: "completed", review: {decision: "PASS", findings: []}};
+  await resolvePlanningReviewAttempt(
+    config, state, "standalone-plan-review", failedAttempt,
+    async () => retriedPass,
+    baseOpts(io)
+  );
+  assert.ok(state.lastReset, "live reset must record lastReset evidence");
+  assert.equal(state.lastReset.clearedLimit, null, "a null budget must be reported as absent (null), not 0");
+  console.log("PASS live-reset-null-budget-cleared-limit");
+}
+
 // 4. RATE_LIMITED short-circuits inside the helper to escalation with zero
 //    failure-budget writes: the reviewer is never re-invoked, nothing is
 //    recorded, and the fatal carries the rate-limited step plus the resume

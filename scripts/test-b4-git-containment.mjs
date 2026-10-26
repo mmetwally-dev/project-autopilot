@@ -8,8 +8,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import {spawnSync} from "node:child_process";
 import crypto from "node:crypto";
+import {fixtureGit} from "./test-fixtures/fixture-git.mjs";
 import {gitSnapshot, createGitMutationGuard, guardedEnv, readGuardLog, GIT_STATE_FIELDS, describeGitStateChange} from "./relay-guards.mjs";
 import { skillRoot } from "./paths.mjs";
 
@@ -33,11 +33,11 @@ function makeRepo(name = "repository") {
   fs.mkdirSync(repo, {recursive: true});
   fs.writeFileSync(path.join(repo, ".gitignore"), ".autopilot/\n");
   fs.writeFileSync(path.join(repo, "file.txt"), "baseline");
-  spawnSync("git", ["init"], {cwd: repo, stdio: "ignore"});
-  spawnSync("git", ["config", "user.email", "test@test.com"], {cwd: repo, stdio: "ignore"});
-  spawnSync("git", ["config", "user.name", "Test"], {cwd: repo, stdio: "ignore"});
-  spawnSync("git", ["add", "."], {cwd: repo, stdio: "ignore"});
-  spawnSync("git", ["commit", "-m", "baseline"], {cwd: repo, stdio: "ignore"});
+  fixtureGit(["init"], {cwd: repo, stdio: "ignore"});
+  fixtureGit(["config", "user.email", "test@test.com"], {cwd: repo, stdio: "ignore"});
+  fixtureGit(["config", "user.name", "Test"], {cwd: repo, stdio: "ignore"});
+  fixtureGit(["add", "."], {cwd: repo, stdio: "ignore"});
+  fixtureGit(["commit", "-m", "baseline"], {cwd: repo, stdio: "ignore"});
   return repo;
 }
 
@@ -63,7 +63,7 @@ function safeSnapshot(cwd) {
   {
     const r = makeRepo("sens-detach");
     const before = gitSnapshot(r);
-    spawnSync("git", ["checkout", "--detach", "HEAD"], {cwd: r, stdio: "ignore"});
+    fixtureGit(["checkout", "--detach", "HEAD"], {cwd: r, stdio: "ignore"});
     const after = gitSnapshot(r);
     check("sensitivity: detach HEAD same commit changes snapshot",
       typeof before.fingerprint === "string" && typeof after.fingerprint === "string" && before.fingerprint !== after.fingerprint,
@@ -77,7 +77,7 @@ function safeSnapshot(cwd) {
   {
     const r = makeRepo("sens-tag");
     const before = gitSnapshot(r);
-    spawnSync("git", ["tag", "t"], {cwd: r, stdio: "ignore"});
+    fixtureGit(["tag", "t"], {cwd: r, stdio: "ignore"});
     const after = gitSnapshot(r);
     check("sensitivity: tag changes snapshot",
       typeof before.fingerprint === "string" && typeof after.fingerprint === "string" && before.fingerprint !== after.fingerprint);
@@ -90,7 +90,7 @@ function safeSnapshot(cwd) {
   {
     const r = makeRepo("sens-branch-f");
     const before = gitSnapshot(r);
-    spawnSync("git", ["branch", "-f", "side", "HEAD"], {cwd: r, stdio: "ignore"});
+    fixtureGit(["branch", "-f", "side", "HEAD"], {cwd: r, stdio: "ignore"});
     const after = gitSnapshot(r);
     check("sensitivity: branch -f changes snapshot",
       typeof before.fingerprint === "string" && typeof after.fingerprint === "string" && before.fingerprint !== after.fingerprint);
@@ -103,7 +103,7 @@ function safeSnapshot(cwd) {
   {
     const r = makeRepo("sens-update-ref");
     const before = gitSnapshot(r);
-    spawnSync("git", ["update-ref", "refs/heads/x", "HEAD"], {cwd: r, stdio: "ignore"});
+    fixtureGit(["update-ref", "refs/heads/x", "HEAD"], {cwd: r, stdio: "ignore"});
     const after = gitSnapshot(r);
     check("sensitivity: update-ref changes snapshot",
       typeof before.fingerprint === "string" && typeof after.fingerprint === "string" && before.fingerprint !== after.fingerprint);
@@ -117,7 +117,7 @@ function safeSnapshot(cwd) {
     const r = makeRepo("sens-stash");
     const before = gitSnapshot(r);
     fs.writeFileSync(path.join(r, "file.txt"), "dirty");
-    spawnSync("git", ["stash"], {cwd: r, stdio: "ignore"});
+    fixtureGit(["stash"], {cwd: r, stdio: "ignore"});
     const after = gitSnapshot(r);
     check("sensitivity: stash changes snapshot",
       typeof before.fingerprint === "string" && typeof after.fingerprint === "string" && before.fingerprint !== after.fingerprint);
@@ -127,7 +127,7 @@ function safeSnapshot(cwd) {
   {
     const r = makeRepo("sens-hash-object");
     const before = gitSnapshot(r);
-    spawnSync("git", ["hash-object", "-w", "--stdin"], {cwd: r, input: "new blob", stdio: ["pipe", "ignore", "ignore"]});
+    fixtureGit(["hash-object", "-w", "--stdin"], {cwd: r, input: "new blob", stdio: ["pipe", "ignore", "ignore"]});
     const after = gitSnapshot(r);
     check("sensitivity: hash-object -w changes snapshot (object count)",
       typeof before.fingerprint === "string" && typeof after.fingerprint === "string" && before.fingerprint !== after.fingerprint,
@@ -138,7 +138,7 @@ function safeSnapshot(cwd) {
   {
     const r = makeRepo("sens-config-change");
     const before = gitSnapshot(r);
-    spawnSync("git", ["config", "--local", "user.name", "Changed Name"], {cwd: r, stdio: "ignore"});
+    fixtureGit(["config", "--local", "user.name", "Changed Name"], {cwd: r, stdio: "ignore"});
     const after = gitSnapshot(r);
     check("sensitivity: config --local change alters snapshot",
       typeof before.fingerprint === "string" && typeof after.fingerprint === "string" && before.fingerprint !== after.fingerprint,
@@ -180,7 +180,7 @@ function safeSnapshot(cwd) {
   // 3a. Bare repository
   {
     const bare = path.join(root, "bare.git");
-    spawnSync("git", ["init", "--bare", bare], {stdio: "ignore"});
+    fixtureGit(["init", "--bare", bare], {stdio: "ignore"});
     const snap = safeSnapshot(bare);
     check("topology: bare repository ok is false", snap.ok === false);
     check("topology: bare repository digest contains topology evidence",
@@ -192,20 +192,20 @@ function safeSnapshot(cwd) {
   {
     const mainRepo = makeRepo("worktree-main");
     const linked = path.join(root, "linked-worktree");
-    spawnSync("git", ["worktree", "add", linked], {cwd: mainRepo, stdio: "ignore"});
+    fixtureGit(["worktree", "add", linked], {cwd: mainRepo, stdio: "ignore"});
     const snap = safeSnapshot(linked);
     check("topology: linked worktree ok is false", snap.ok === false);
     check("topology: linked worktree digest contains topology evidence",
       typeof snap.digest === "string" && snap.digest.length > 0,
       snap.digest?.slice(0, 200));
-    spawnSync("git", ["worktree", "remove", linked], {cwd: mainRepo, stdio: "ignore"});
+    fixtureGit(["worktree", "remove", linked], {cwd: mainRepo, stdio: "ignore"});
   }
 
   // 3c. Repository containing a submodule
   {
     const outer = makeRepo("submodule-outer");
     const inner = makeRepo("submodule-inner");
-    spawnSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", inner, "inner"], {cwd: outer, stdio: "ignore"});
+    fixtureGit(["-c", "protocol.file.allow=always", "submodule", "add", inner, "inner"], {cwd: outer, stdio: "ignore"});
     const snap = safeSnapshot(outer);
     check("topology: submodule present ok is false", snap.ok === false);
     check("topology: submodule present digest contains failure evidence",
@@ -358,7 +358,7 @@ function safeSnapshot(cwd) {
   {
     const r = makeRepo("parity-tag");
     const before = gitSnapshot(r);
-    spawnSync("git", ["tag", "release-1"], {cwd: r, stdio: "ignore"});
+    fixtureGit(["tag", "release-1"], {cwd: r, stdio: "ignore"});
     const after = gitSnapshot(r);
     check("parity: gitSnapshot refs contains tag after git tag",
       after.refs.includes("refs/tags/release-1"),
@@ -371,7 +371,7 @@ function safeSnapshot(cwd) {
   {
     const r = makeRepo("parity-branch-f");
     const before = gitSnapshot(r);
-    spawnSync("git", ["branch", "-f", "feature", "HEAD"], {cwd: r, stdio: "ignore"});
+    fixtureGit(["branch", "-f", "feature", "HEAD"], {cwd: r, stdio: "ignore"});
     const after = gitSnapshot(r);
     check("parity: gitSnapshot refs contains branch after branch -f",
       after.refs.includes("refs/heads/feature"),
@@ -407,7 +407,7 @@ function safeSnapshot(cwd) {
   // Tag adds a ref entry
   const rTag = makeRepo("indep-tag");
   const tagBefore = gitSnapshot(rTag);
-  spawnSync("git", ["tag", "v1"], {cwd: rTag, stdio: "ignore"});
+  fixtureGit(["tag", "v1"], {cwd: rTag, stdio: "ignore"});
   const tagAfter = gitSnapshot(rTag);
   check("independence: tag mutation visible in refs dimension",
     tagAfter.refs.includes("refs/tags/v1") && !tagBefore.refs.includes("refs/tags/v1"));
@@ -415,7 +415,7 @@ function safeSnapshot(cwd) {
   // Branch -f adds a ref entry
   const rBranch = makeRepo("indep-branch");
   const branchBefore = gitSnapshot(rBranch);
-  spawnSync("git", ["branch", "-f", "topic", "HEAD"], {cwd: rBranch, stdio: "ignore"});
+  fixtureGit(["branch", "-f", "topic", "HEAD"], {cwd: rBranch, stdio: "ignore"});
   const branchAfter = gitSnapshot(rBranch);
   check("independence: branch -f mutation visible in refs dimension",
     branchAfter.refs.includes("refs/heads/topic") && !branchBefore.refs.includes("refs/heads/topic"));
@@ -423,7 +423,7 @@ function safeSnapshot(cwd) {
   // Detach changes headSymbolic
   const rDetach = makeRepo("indep-detach");
   const detachBefore = gitSnapshot(rDetach);
-  spawnSync("git", ["checkout", "--detach", "HEAD"], {cwd: rDetach, stdio: "ignore"});
+  fixtureGit(["checkout", "--detach", "HEAD"], {cwd: rDetach, stdio: "ignore"});
   const detachAfter = gitSnapshot(rDetach);
   check("independence: detach mutation visible in headSymbolic dimension",
     detachBefore.headSymbolic !== "DETACHED" && detachAfter.headSymbolic === "DETACHED");
@@ -431,7 +431,7 @@ function safeSnapshot(cwd) {
   // Config change visible in config dimension
   const rConfig = makeRepo("indep-config");
   const configBefore = gitSnapshot(rConfig);
-  spawnSync("git", ["config", "--local", "user.name", "Independent Name"], {cwd: rConfig, stdio: "ignore"});
+  fixtureGit(["config", "--local", "user.name", "Independent Name"], {cwd: rConfig, stdio: "ignore"});
   const configAfter = gitSnapshot(rConfig);
   check("independence: config mutation visible in config dimension",
     configBefore.config?.["--local"] !== configAfter.config?.["--local"],
@@ -440,7 +440,7 @@ function safeSnapshot(cwd) {
   // hash-object changes objects dimension
   const rHash = makeRepo("indep-hash");
   const hashBefore = gitSnapshot(rHash);
-  spawnSync("git", ["hash-object", "-w", "--stdin"], {cwd: rHash, input: "independent blob", stdio: ["pipe", "ignore", "ignore"]});
+  fixtureGit(["hash-object", "-w", "--stdin"], {cwd: rHash, input: "independent blob", stdio: ["pipe", "ignore", "ignore"]});
   const hashAfter = gitSnapshot(rHash);
   check("independence: hash-object mutation visible in objects dimension",
     hashBefore.objects !== hashAfter.objects,
@@ -462,7 +462,7 @@ function safeSnapshot(cwd) {
   {
     const r1 = makeRepo("index-assume-unchanged-a");
     const b1 = gitSnapshot(r1);
-    spawnSync("git", ["update-index", "--assume-unchanged", "file.txt"], {cwd: r1, stdio: "ignore"});
+    fixtureGit(["update-index", "--assume-unchanged", "file.txt"], {cwd: r1, stdio: "ignore"});
     const a1 = gitSnapshot(r1);
     check("index-state: --assume-unchanged changes fingerprint",
       typeof b1.fingerprint === "string" && typeof a1.fingerprint === "string" && b1.fingerprint !== a1.fingerprint,
@@ -475,9 +475,9 @@ function safeSnapshot(cwd) {
   // 11b. git update-index --no-assume-unchanged restores the flag
   {
     const r2 = makeRepo("index-assume-unchanged-b");
-    spawnSync("git", ["update-index", "--assume-unchanged", "file.txt"], {cwd: r2, stdio: "ignore"});
+    fixtureGit(["update-index", "--assume-unchanged", "file.txt"], {cwd: r2, stdio: "ignore"});
     const mid = gitSnapshot(r2);
-    spawnSync("git", ["update-index", "--no-assume-unchanged", "file.txt"], {cwd: r2, stdio: "ignore"});
+    fixtureGit(["update-index", "--no-assume-unchanged", "file.txt"], {cwd: r2, stdio: "ignore"});
     const after = gitSnapshot(r2);
     const original = gitSnapshot(makeRepo("index-assume-unchanged-orig"));
     // Restoring should bring indexState back to the unmodified state
@@ -490,7 +490,7 @@ function safeSnapshot(cwd) {
   {
     const r3 = makeRepo("index-skip-worktree");
     const b3 = gitSnapshot(r3);
-    spawnSync("git", ["update-index", "--skip-worktree", "file.txt"], {cwd: r3, stdio: "ignore"});
+    fixtureGit(["update-index", "--skip-worktree", "file.txt"], {cwd: r3, stdio: "ignore"});
     const a3 = gitSnapshot(r3);
     check("index-state: --skip-worktree changes fingerprint",
       typeof b3.fingerprint === "string" && typeof a3.fingerprint === "string" && b3.fingerprint !== a3.fingerprint,
@@ -703,7 +703,7 @@ function safeSnapshot(cwd) {
     fs.writeFileSync(path.join(customHooksDir, "post-commit"), "#!/bin/sh\necho custom\n");
     fs.chmodSync(path.join(customHooksDir, "post-commit"), 0o755);
     // Configure core.hooksPath
-    spawnSync("git", ["config", "--local", "core.hooksPath", customHooksDir], {cwd: r, stdio: "ignore"});
+    fixtureGit(["config", "--local", "core.hooksPath", customHooksDir], {cwd: r, stdio: "ignore"});
     const before = gitSnapshot(r);
     // Add a hook in the custom directory
     fs.writeFileSync(path.join(customHooksDir, "pre-push"), "#!/bin/sh\necho pre-push\n");
@@ -723,7 +723,7 @@ function safeSnapshot(cwd) {
     fs.mkdirSync(customHooksDir, {recursive: true});
     fs.writeFileSync(path.join(customHooksDir, "commit-msg"), "#!/bin/sh\nexit 0\n");
     fs.chmodSync(path.join(customHooksDir, "commit-msg"), 0o755);
-    spawnSync("git", ["config", "--local", "core.hooksPath", customHooksDir], {cwd: r, stdio: "ignore"});
+    fixtureGit(["config", "--local", "core.hooksPath", customHooksDir], {cwd: r, stdio: "ignore"});
     const snap = gitSnapshot(r);
     check("hooks-path: hook in custom dir visible in hooksDigest",
       snap.hooksDigest?.includes("commit-msg"),
@@ -776,7 +776,7 @@ function safeSnapshot(cwd) {
     const origHome = process.env.HOME;
     process.env.HOME = fakeHome;
     try {
-      spawnSync("git", ["config", "--global", "core.hooksPath", globalHooksDir], {cwd: r, stdio: "ignore"});
+      fixtureGit(["config", "--global", "core.hooksPath", globalHooksDir], {cwd: r, stdio: "ignore"});
       const before = gitSnapshot(r);
       // Add another hook in the global dir
       fs.writeFileSync(path.join(globalHooksDir, "pre-push"), "#!/bin/sh\necho global-pre-push\n");
@@ -805,7 +805,7 @@ function safeSnapshot(cwd) {
     fs.mkdirSync(systemHooksDir, {recursive: true});
     fs.writeFileSync(path.join(systemHooksDir, "commit-msg"), "#!/bin/sh\nexit 0\n");
     fs.chmodSync(path.join(systemHooksDir, "commit-msg"), 0o755);
-    spawnSync("git", ["config", "--system", "core.hooksPath", systemHooksDir], {cwd: r, stdio: "ignore"});
+    fixtureGit(["config", "--system", "core.hooksPath", systemHooksDir], {cwd: r, stdio: "ignore"});
     const snap = gitSnapshot(r);
     // System config may fail due to permissions; just verify the code path
     // doesn't crash and returns a valid snapshot
@@ -908,7 +908,7 @@ function safeSnapshot(cwd) {
     const origHome = process.env.HOME;
     process.env.HOME = fakeHome;
     try {
-      spawnSync("git", ["config", "--local", "core.hooksPath", "~/.git-hooks"], {cwd: r, stdio: "ignore"});
+      fixtureGit(["config", "--local", "core.hooksPath", "~/.git-hooks"], {cwd: r, stdio: "ignore"});
       const snap = gitSnapshot(r);
       check("hooks-tilde: tilde-expanded hooksPath hook detected",
         snap.hooksDigest?.includes("post-commit"),
@@ -938,7 +938,7 @@ function safeSnapshot(cwd) {
     const origHome = process.env.HOME;
     process.env.HOME = fakeHome;
     try {
-      spawnSync("git", ["config", "--local", "core.hooksPath", "~/hooks"], {cwd: r, stdio: "ignore"});
+      fixtureGit(["config", "--local", "core.hooksPath", "~/hooks"], {cwd: r, stdio: "ignore"});
       const snap = gitSnapshot(r);
       check("hooks-tilde-nosub: ~/hooks resolves correctly",
         snap.hooksDigest?.includes("commit-msg"),
@@ -1076,7 +1076,7 @@ function safeSnapshot(cwd) {
     const origHome = process.env.HOME;
     process.env.HOME = fakeHome;
     try {
-      spawnSync("git", ["config", "--local", "core.hooksPath", "~/.git-hooks"], {cwd: r, stdio: "ignore"});
+      fixtureGit(["config", "--local", "core.hooksPath", "~/.git-hooks"], {cwd: r, stdio: "ignore"});
       const snap = gitSnapshot(r);
       check("hooks-tilde-user: tilde-expanded hooksPath hook detected",
         snap.hooksDigest?.includes("post-commit"),
@@ -1109,7 +1109,7 @@ function safeSnapshot(cwd) {
   fs.chmodSync(path.join(hooksDir, "pre-commit"), 0o755);
   fs.writeFileSync(path.join(customDir, "pre-commit"), "#!/bin/sh\nexit 1\n");
   fs.chmodSync(path.join(customDir, "pre-commit"), 0o755);
-  spawnSync("git", ["config", "--local", "core.hooksPath", customDir], {cwd: r, stdio: "ignore"});
+  fixtureGit(["config", "--local", "core.hooksPath", customDir], {cwd: r, stdio: "ignore"});
   const before = gitSnapshot(r);
   // Swap: put B in .git/hooks and A in custom dir
   fs.writeFileSync(path.join(hooksDir, "pre-commit"), "#!/bin/sh\nexit 1\n");
@@ -1142,7 +1142,7 @@ function safeSnapshot(cwd) {
     check("pseudo-ref: before has no ORIG_HEAD",
       before.administrativeDigest?.includes("ORIG_HEAD:ABSENT"),
       `administrativeDigest: ${before.administrativeDigest?.slice(0, 300)}`);
-    spawnSync("git", ["update-ref", "ORIG_HEAD", "HEAD"], {cwd: r, stdio: "ignore"});
+    fixtureGit(["update-ref", "ORIG_HEAD", "HEAD"], {cwd: r, stdio: "ignore"});
     const after = gitSnapshot(r);
     check("pseudo-ref: ORIG_HEAD update changes fingerprint",
       before.fingerprint !== after.fingerprint,
@@ -1158,14 +1158,14 @@ function safeSnapshot(cwd) {
   // 25b. Changing ORIG_HEAD from one SHA to another is detected
   {
     const r = makeRepo("pseudo-ref-orig-head-change");
-    spawnSync("git", ["update-ref", "ORIG_HEAD", "HEAD"], {cwd: r, stdio: "ignore"});
+    fixtureGit(["update-ref", "ORIG_HEAD", "HEAD"], {cwd: r, stdio: "ignore"});
     const before = gitSnapshot(r);
     // Create a new commit to get a different SHA
     fs.writeFileSync(path.join(r, "another.txt"), "another");
-    spawnSync("git", ["add", "another.txt"], {cwd: r, stdio: "ignore"});
-    spawnSync("git", ["commit", "-m", "second"], {cwd: r, stdio: "ignore"});
+    fixtureGit(["add", "another.txt"], {cwd: r, stdio: "ignore"});
+    fixtureGit(["commit", "-m", "second"], {cwd: r, stdio: "ignore"});
     // Update ORIG_HEAD to point to the new commit
-    spawnSync("git", ["update-ref", "ORIG_HEAD", "HEAD"], {cwd: r, stdio: "ignore"});
+    fixtureGit(["update-ref", "ORIG_HEAD", "HEAD"], {cwd: r, stdio: "ignore"});
     const after = gitSnapshot(r);
     check("pseudo-ref: changing ORIG_HEAD SHA changes fingerprint",
       before.fingerprint !== after.fingerprint,
@@ -1238,7 +1238,7 @@ function safeSnapshot(cwd) {
 
 // ---- IGNORED_REF_NAMESPACES (refs/codex/) ----
 {
-  const git = (r, ...a) => spawnSync("git", a, {cwd: r, encoding: "utf8"});
+  const git = (r, ...a) => fixtureGit(a, {cwd: r, encoding: "utf8"});
   const sameRefs = (b, a) => b.refs === a.refs && b.reflogs === a.reflogs && b.fingerprint === a.fingerprint;
   {
     const r = makeRepo("codex-ignored");

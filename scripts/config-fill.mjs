@@ -12,7 +12,7 @@ import fs from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { DEFAULTS, migrateTimeLimitNames } from "./config-layout.mjs";
+import { DEFAULTS, migrateTimeLimitNames, migratePlanApprovalKey } from "./config-layout.mjs";
 import { schemaReferenceFor, schemaReferenceResolves } from "./config-schema-ref.mjs";
 import { loadAndMigrateConfig, CURRENT_SCHEMA } from "./config-migration.mjs";
 
@@ -85,8 +85,10 @@ function withSchemaReference(layout, configPath) {
  * @returns {Record<string, unknown>} a new layout; the input is not mutated
  */
 export function fillLayout(layout, configPath) {
-  // `ap config fill` also rewrites the old `mission_timeout_minutes` name.
-  const source = migrateTimeLimitNames(isPlainObject(layout) ? layout : {}).layout;
+  // `ap config fill` also rewrites the old `mission_timeout_minutes` name and
+  // drops `approve_plan_myself` (replaced by `pause_for_plan_approval`).
+  const timeRenamed = migrateTimeLimitNames(isPlainObject(layout) ? layout : {});
+  const source = migratePlanApprovalKey(timeRenamed.layout).layout;
   const out = {};
 
   for (const [key, value] of Object.entries(source)) {
@@ -136,8 +138,8 @@ function addedPaths(before, after, prefix = "") {
  *
  * A timestamped `config.json.bak-<time>` copy is written before the config is
  * replaced, but only when the layout changes (keys added, old time-limit names
- * renamed, or `$schema` repaired). A dry run prints the changes and touches
- * nothing.
+ * renamed, `approve_plan_myself` removed, or `$schema` repaired). A dry run
+ * prints the changes and touches nothing.
  *
  * If the config is not v4 (schema_version !== "4.0" and no valid $schema),
  * it is migrated first using loadAndMigrateConfig so operator values are
@@ -145,7 +147,7 @@ function addedPaths(before, after, prefix = "") {
  *
  * @param {string} configPath path to the on-disk config
  * @param {{dryRun?: boolean}} [options]
- * @returns {{changed: boolean, added: string[], renamed: {from: string, to: string}[], written: boolean, backupPath: string|null}}
+ * @returns {{changed: boolean, added: string[], renamed: {from: string, to: string}[], removed: string[], written: boolean, backupPath: string|null}}
  */
 export function fillConfigFile(configPath, { dryRun = false } = {}) {
   const raw = fs.readFileSync(configPath, "utf8");
@@ -169,6 +171,7 @@ export function fillConfigFile(configPath, { dryRun = false } = {}) {
   }
 
   const {renamed} = migrateTimeLimitNames(isPlainObject(original) ? original : {});
+  const {removed} = migratePlanApprovalKey(isPlainObject(original) ? original : {});
   const filled = fillLayout(layoutToFill, configPath);
   const renamedTargets = new Set(renamed.map((entry) => entry.to));
   const added = addedPaths(layoutToFill, filled).filter((path) => !renamedTargets.has(path));
@@ -176,13 +179,14 @@ export function fillConfigFile(configPath, { dryRun = false } = {}) {
     layoutToFill.$schema !== filled.$schema || Object.keys(layoutToFill)[0] !== Object.keys(filled)[0];
   // Compare against original to detect migration as a change.
   const changed =
-    added.length > 0 || renamed.length > 0 || schemaChanged
+    added.length > 0 || renamed.length > 0 || removed.length > 0 || schemaChanged
     || JSON.stringify(original) !== JSON.stringify(filled);
-  const result = { changed, added, renamed, written: false, backupPath: null };
+  const result = { changed, added, renamed, removed, written: false, backupPath: null };
 
   if (!changed) return result;
 
   for (const entry of renamed) console.log(`~ renamed ${entry.from} -> ${entry.to}`);
+  for (const entry of removed) console.log(`- removed ${entry} (replaced by workflow.pause_for_plan_approval, default false)`);
   for (const entry of added) console.log(`+ ${entry}`);
   if (schemaChanged) console.log("~ $schema");
   if (dryRun) return result;

@@ -8,7 +8,7 @@
 // numbers cannot drift from the code. scripts/test-config-schema.mjs asserts
 // the checked-in file still matches DEFAULTS and this generator.
 //
-// Run: node scripts/gen-config-schema.mjs   (rewrites ./config.schema.json)
+// Run: node scripts/gen-config-schema.mjs   (rewrites ./config.schema.json and the reference in docs/configuration.md)
 
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -20,29 +20,29 @@ import { renderConfigReference } from "./config-reference.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const SCHEMA_PATH = join(HERE, "..", "config.schema.json");
 export const SCHEMA_ID = "./config.schema.json";
-export const README_PATH = join(HERE, "..", "README.md");
+export const CONFIG_REFERENCE_PATH = join(HERE, "..", "docs", "configuration.md");
 export const CONFIG_REFERENCE_START = "<!-- config-reference:start -->";
 export const CONFIG_REFERENCE_END = "<!-- config-reference:end -->";
 
-// The README block between the markers is generated; everything outside them
+// The docs block between the markers is generated; everything outside them
 // is hand-written and must survive every regeneration untouched.
-export function extractConfigReference(readme) {
-  const start = readme.indexOf(CONFIG_REFERENCE_START);
-  const end = readme.indexOf(CONFIG_REFERENCE_END);
+export function extractConfigReference(document) {
+  const start = document.indexOf(CONFIG_REFERENCE_START);
+  const end = document.indexOf(CONFIG_REFERENCE_END);
   if (start === -1 || end === -1 || end < start) return null;
-  const body = readme.slice(start + CONFIG_REFERENCE_START.length, end);
+  const body = document.slice(start + CONFIG_REFERENCE_START.length, end);
   return body.replace(/^\r?\n/, "");
 }
 
-export function withConfigReference(readme, reference = renderConfigReference()) {
+export function withConfigReference(document, reference = renderConfigReference()) {
   const block = `${CONFIG_REFERENCE_START}\n${reference}${CONFIG_REFERENCE_END}`;
-  const start = readme.indexOf(CONFIG_REFERENCE_START);
-  const end = readme.indexOf(CONFIG_REFERENCE_END);
+  const start = document.indexOf(CONFIG_REFERENCE_START);
+  const end = document.indexOf(CONFIG_REFERENCE_END);
   if (start !== -1 && end > start) {
-    return readme.slice(0, start) + block + readme.slice(end + CONFIG_REFERENCE_END.length);
+    return document.slice(0, start) + block + document.slice(end + CONFIG_REFERENCE_END.length);
   }
-  const separator = readme.endsWith("\n") ? "\n" : "\n\n";
-  return `${readme}${separator}${block}\n`;
+  const separator = document.endsWith("\n") ? "\n" : "\n\n";
+  return `${document}${separator}${block}\n`;
 }
 
 // One-line description per key, by dotted path (a "*" stands for any role
@@ -52,7 +52,7 @@ const DESCRIPTIONS = {
   schema_version: "On-disk config format version; always 4.0 for this layout.",
 
   project: "Project identity and how its work is planned.",
-  "project.repo": "Intended repository root the mission runs in. Not used by this version; changing it has no effect.",
+  "project.repo": "Intended repository root the mission runs in. Fixed in this version; changing it has no effect. Autopilot uses the folder you run it in, or --repo.",
   "project.planning_framework": "How work is planned: standalone, speckit or gsd; auto detects the framework from the repository.",
 
   roles: "The agent CLI, model and session settings for each role.",
@@ -90,14 +90,14 @@ const DESCRIPTIONS = {
   "caps.mission_token_backstop": "Cumulative raw tokens (input, cached input and output) allowed across one task; when exceeded the role wraps up and continues in a new backstop session, and two firings in a row stop the task with BACKSTOP_CONSECUTIVE_FIRINGS.",
 
   retries: "How many times each stage may retry or revise before it stops and asks you.",
-  "retries.plan_revisions": "Planner and plan reviewer revision rounds before planning stops; at the limit the plan is escalated for help.",
-  "retries.implementation": "Implementer fix rounds per phase before the phase stops; at the limit the mission stops and asks you.",
-  "retries.verification": "Verifier FAIL rounds per phase before the phase stops; at the limit the mission stops and asks you.",
+  "retries.plan_revisions": "Plan-review escalation point, not a revision count. In standalone, 0 escalates at the first plan-review FAIL without a Planner revision and it runs one fewer revision than the number (the number is one higher than the revisions run), so 1 behaves like 0; SpecKit runs at most one revision per gate for any value above 0; GSD planning still treats 0 or an absent value as 8; an absent value uses the built-in default of 8.",
+  "retries.implementation": "Implementer fix rounds per phase before the phase stops; 0 stops the phase on the first fix-requiring review with no fix round, at the limit the mission stops and asks you, and an absent value uses the built-in default of 4.",
+  "retries.verification": "Verifier FAIL rounds per phase before the phase stops; 0 stops the phase on the first verifier FAIL with no retry, at the limit the mission stops and asks you, and an absent value uses the built-in default of 4.",
   "retries.final_review_fix_rounds": "Final-review fix rounds per mission before it stops; 1 allows one round, and at the limit the mission stops.",
-  "retries.cli_errors": "Same-model retries after a CLI error before the run gives up; at the limit the run fails over or stops.",
-  "retries.infrastructure": "Retries after an infrastructure error such as a snapshot, sandbox or gate failure; at the limit the mission stops.",
+  "retries.cli_errors": "Same-model retries after a CLI error before the run gives up; 0 skips same-model retries and fails over or stops on the first CLI error, at the limit the run fails over or stops, and an absent value uses the built-in default of 3.",
+  "retries.infrastructure": "Retries after an infrastructure error such as a snapshot, sandbox or gate failure; 0 stops on the first infrastructure error, at the limit the mission stops, and an absent value uses the built-in default of 3.",
   "retries.no_progress_sessions": "Sessions in a row that change no file before the task stops; 1 stops on the first session that changes nothing.",
-  "retries.extra_sessions_per_task": "Extra sessions the implementer may start per task after a cap; the caps.implementer.extra_sessions value wins when both are set.",
+  "retries.extra_sessions_per_task": "Extra sessions the implementer may start per task after a cap; 0 starts no extra session and an absent value uses the built-in default of 5. The caps.implementer.extra_sessions value wins when both are set.",
   "retries.escalate_after_not_fixed": "Reviews in a row that must report the same finding not fixed before the stronger escalation model is used; 1 escalates on the first not-fixed report.",
 
   time_limits: "Wall-clock limits and waits, with the unit in each name.",
@@ -115,12 +115,12 @@ const DESCRIPTIONS = {
   "workflow.plan_review": "Run the GSD plan-review stage before implementation (true) or skip it (false); only GSD reads this setting. (GSD is not yet reviewed in this version).",
   "workflow.plan_review_rounds_converge": "Make the first plan-review round review the whole plan and later rounds check only the requested fixes (true), or re-review the whole plan every round (false); default true. Applies to standalone and SpecKit planning; GSD uses its own plan-review settings. The legacy name plan_review_convergence is still read and migrated.",
   "workflow.gsd_planning_review": "Use the GSD planning-review stages (true) or skip them (false). (GSD is not yet reviewed in this version).",
-  "workflow.spec_review": "Intended to run a spec review stage before planning. Not used by this version; changing it has no effect.",
+  "workflow.spec_review": "Intended to run a spec review stage before planning. Controlled by your SpecKit workflow.yml — add or remove the step there; this setting has no effect.",
   "workflow.code_review_per_phase": "Run a code review after each implementation phase (true), or skip the per-phase review and rely on the end-of-mission review (false); default true. The legacy name implementationReview is still read and migrated.",
   "workflow.final_review": "Run a final review over the whole mission at the end, including its fix rounds (true), or skip it and complete the mission after implementation (false); default true. The legacy name finalReview is still read and migrated.",
-  "workflow.analysis_after_tasks": "Intended to run an analysis pass after all tasks complete. Not used by this version; changing it has no effect.",
-  "workflow.approve_spec_myself": "Intended to approve the spec automatically without asking you. Not used by this version; changing it has no effect.",
-  "workflow.approve_plan_myself": "Intended to approve the plan automatically without asking you. Not used by this version; changing it has no effect.",
+  "workflow.analysis_after_tasks": "Intended to run an analysis pass after all tasks complete. Controlled by your SpecKit workflow.yml — add or remove the step there; this setting has no effect.",
+  "workflow.approve_spec_myself": "Intended to approve the spec automatically without asking you. Controlled by your SpecKit workflow.yml — add or remove the step there; this setting has no effect.",
+  "workflow.pause_for_plan_approval": "Approve the plan automatically without asking you (true) or pause after planning and wait for you to approve it (false); default false. Applies to standalone and SpecKit planning. When paused, a following `ap run` continues as the approval.",
   "workflow.parallel_independent_tasks": "Intended to run independent tasks in parallel. Not used by this version; changing it has no effect.",
   "workflow.use_worktrees": "Intended to run parallel tasks in separate git worktrees. Not used by this version; changing it has no effect.",
   "workflow.commit_by_human": "Stop at \"ready to commit\" and let you commit; false is not supported because Autopilot never commits.",
@@ -129,7 +129,7 @@ const DESCRIPTIONS = {
   "tests.gate_commands": "Commands run after each phase and at the end as the gate; a failing command fails the phase, and an empty list runs no gate.",
   "tests.gate_network": "Allow the gate commands to use the network (true); false keeps them network-isolated.",
   "tests.gate_env_allowlist": "Environment variable names allowed through to gate commands; empty passes no extra variables.",
-  "tests.require_reviewer": "Intended to require a reviewer verdict before a phase passes. Not used by this version; changing it has no effect.",
+  "tests.require_reviewer": "Intended to require a reviewer verdict before a phase passes. Fixed in this version; changing it has no effect.",
   "tests.browser": "Browser capability used for verification: native (the agent's own browser), playwright or both.",
   "tests.require_browser": "How browser capabilities are required for the verifier: always adds them to every call; when-task-requires and never add them only when the task itself needs a browser.",
   "tests.verify_denylist": "Commands or paths that a task or verification step may never run; empty adds no bans beyond the built-in full-suite ban.",
@@ -139,10 +139,10 @@ const DESCRIPTIONS = {
   "safety.allow_git_push": "Setting this true is rejected; Autopilot never pushes, so keep it false.",
   "safety.allow_destructive_operations": "Setting this true is rejected; destructive operations stay blocked, so keep it false.",
   "safety.stop_on_sandbox_violation": "Setting this false is rejected; a sandbox or relay violation always stops the mission, so keep it true.",
-  "safety.block_git_in_roles": "Intended to block git commit and push inside role sessions. Not used by this version; changing it has no effect.",
-  "safety.check_read_only_roles": "Intended to check that read-only roles changed no file by comparing before and after snapshots. Not used by this version; changing it has no effect.",
-  "safety.record_touched_files": "Intended to record the files each role touches. Not used by this version; changing it has no effect.",
-  "safety.keep_role_sessions": "Intended to keep role sessions on disk so a later run can resume them. Not used by this version; changing it has no effect.",
+  "safety.block_git_in_roles": "Blocks git commit and push inside role sessions. Always on — cannot be turned off; changing it has no effect.",
+  "safety.check_read_only_roles": "Checks that read-only roles changed no file by comparing before and after snapshots. Always on — cannot be turned off; changing it has no effect.",
+  "safety.record_touched_files": "Records the files each role touches. Always on — cannot be turned off; changing it has no effect.",
+  "safety.keep_role_sessions": "Keeps role sessions on disk so a later run can resume them. Always on — cannot be turned off; changing it has no effect.",
 
   runtime: "Containment mode and, for WSL2, the distribution to use.",
   "runtime.mode": "How roles are contained: auto, linux-strong, wsl2-strong or windows-compatibility.",
@@ -150,7 +150,7 @@ const DESCRIPTIONS = {
 
   frameworks: "Per-framework planning settings for SpecKit and GSD.",
   "frameworks.speckit": "SpecKit workflow and task-file settings.",
-  "frameworks.speckit.workflow_file": "Intended path to the SpecKit workflow definition. Not used by this version; changing it has no effect.",
+  "frameworks.speckit.workflow_file": "Intended path to the SpecKit workflow definition. Fixed in this version; changing it has no effect. Autopilot always reads .specify/workflows/speckit/workflow.yml.",
   "frameworks.speckit.task_files": "Glob patterns that identify SpecKit task files; empty means no task files are found.",
   "frameworks.gsd": "GSD phase, artifact and parallelism settings. (GSD is not yet reviewed in this version).",
   "frameworks.gsd.phase_root": "Directory holding GSD phase folders. (GSD is not yet reviewed in this version).",
@@ -174,18 +174,18 @@ const DESCRIPTIONS = {
   "frameworks.gsd.parallel.min_plans_for_parallel": "Smallest number of plans that starts GSD parallel execution; below it plans run one at a time. (GSD is not yet reviewed in this version).",
 
   advanced: "Paths, hand-off limits and capability defaults.",
-  "advanced.state_file": "Intended path to the mission state file. Not used by this version; changing it has no effect.",
-  "advanced.runs_dir": "Intended directory holding run records. Not used by this version; changing it has no effect.",
+  "advanced.state_file": "Intended path to the mission state file. Fixed in this version; changing it has no effect.",
+  "advanced.runs_dir": "Intended directory holding run records. Fixed in this version; changing it has no effect.",
   "advanced.handoff_max_chars": "Maximum characters in a role hand-off document; longer text is cut, and values below 500 are rejected.",
   "advanced.handoff_note_max_chars": "Maximum characters in a hand-off note; longer text is cut, and values below 1000 are rejected.",
   "advanced.handoff_wrapup_tokens": "Token count at which a role is told to wrap up its hand-off; it must be below the implementer token cap.",
   "advanced.fallback_retry_primary_minutes": "Minutes to wait before retrying the primary model after a fallback took over; 0 uses the built-in 60-minute wait.",
-  "advanced.checkpoint_after_task": "Intended to write a checkpoint after each task. Not used by this version; changing it has no effect.",
-  "advanced.checkpoint_after_phase": "Intended to write a checkpoint after each phase. Not used by this version; changing it has no effect.",
+  "advanced.checkpoint_after_task": "Intended to write a checkpoint after each task. Fixed in this version; changing it has no effect.",
+  "advanced.checkpoint_after_phase": "Intended to write a checkpoint after each phase. Fixed in this version; changing it has no effect.",
   "advanced.capabilities": "Project-level capability defaults and denials.",
   "advanced.capabilities.project_defaults": "Capabilities assumed present for every role in this project; empty adds none.",
   "advanced.capabilities.role_requirements": "Extra capabilities required per role, keyed by role name; empty adds none.",
-  "advanced.capabilities.safety_denied": "Intended to deny capabilities for safety. Not used by this version; changing it has no effect.",
+  "advanced.capabilities.safety_denied": "Intended to deny capabilities for safety. Fixed in this version; changing it has no effect.",
   "advanced.capabilities.legacy_text_inference": "Infer browser capabilities from task text for the verifier (legacy); false keeps inference off.",
 };
 
@@ -446,9 +446,9 @@ export function serializeSchema(schema = buildConfigSchema()) {
 function main() {
   writeFileSync(SCHEMA_PATH, serializeSchema());
   console.log(`wrote ${SCHEMA_PATH}`);
-  const readme = readFileSync(README_PATH, "utf8");
-  writeFileSync(README_PATH, withConfigReference(readme));
-  console.log(`wrote configuration reference in ${README_PATH}`);
+  const document = readFileSync(CONFIG_REFERENCE_PATH, "utf8");
+  writeFileSync(CONFIG_REFERENCE_PATH, withConfigReference(document));
+  console.log(`wrote configuration reference in ${CONFIG_REFERENCE_PATH}`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

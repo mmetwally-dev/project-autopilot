@@ -32,7 +32,14 @@ export const STAGE_CHECKPOINT_MAP = Object.freeze({
 // Phases at or past planning completion. Mirrors the runImplementation gate
 // in scripts/autopilot.mjs (~line 7993): anything other than these phases
 // still routes through ensurePlanningReady(), i.e. planning is not done.
+// `plan_approval` (mission 099) belongs here: the plan is WRITTEN and only
+// waiting for the operator's approval, and runImplementation consumes that
+// pause on entry (a plain run or `--stage implement` IS the approval). So a
+// paused mission has a plan to implement; refusing the stage would leave the
+// pause reachable only through `ap run --stage planning`, which must not
+// approve.
 const PLANNING_COMPLETE_PHASES = Object.freeze([
+  "plan_approval",
   "tasks_ready",
   "implementing",
   "final_review",

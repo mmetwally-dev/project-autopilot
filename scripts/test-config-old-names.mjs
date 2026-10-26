@@ -212,14 +212,16 @@ test("legacy workflow camelCase fallback", () => {
   const layout = {
     workflow: {
       plan_review_convergence: false,
-      autoApprovePlan: true,
+      pauseForPlanApproval: true,
+      autoApprovePlan: false,
       autoApproveSpec: true,
       parallelIndependentTasks: true,
     },
   };
   const rt = toRuntimeConfig(layout);
   deepEqual(rt.workflow.plan_review_convergence, false);
-  deepEqual(rt.workflow.autoApprovePlan, true);
+  deepEqual(rt.workflow.pauseForPlanApproval, true);
+  deepEqual("autoApprovePlan" in rt.workflow, false);
   deepEqual(rt.workflow.autoApproveSpec, true);
   deepEqual(rt.workflow.parallelIndependentTasks, true);
 });

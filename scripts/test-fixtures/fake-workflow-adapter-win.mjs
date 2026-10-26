@@ -1168,8 +1168,12 @@ async function main() {
       console.error("standalone_verifier_hang: hang window elapsed without interruption");
       process.exit(124);
     } else if (role === "verifier" && scenario === "standalone_verifier_infra_once" && isPhaseReviewCall(prompt) && !priorRoleResult("verifier")) {
-      // TASK-11 Phase 4 case 3: infrastructure failure exactly once.
+      // TASK-11 Phase 4 case 3: infrastructure failure exactly once. The
+      // second stderr line matches failure-contract.mjs's serverPattern, so
+      // this is a real SERVER_UNAVAILABLE/infrastructure failure (retryable),
+      // matching the POSIX fixture.
       console.error("standalone_verifier_infra_once: simulated infrastructure failure");
+      console.error("server unavailable: upstream model endpoint refused the connection");
       process.exit(1);
     } else if (role === "verifier" && scenario === "standalone_verifier_fail_once" && isPhaseReviewCall(prompt) && standaloneAttempt() <= 1) {
       // TASK-11 Phase 4 case 6: functional FAIL once, keyed off the

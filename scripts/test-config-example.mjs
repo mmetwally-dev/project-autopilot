@@ -319,4 +319,12 @@ for (const key of timeLimitsKeys) {
 assert("default" in example.time_limits.role_timeout_minutes, "config.example.json time_limits.role_timeout_minutes must have default");
 assert("verifier" in example.time_limits.role_timeout_minutes, "config.example.json time_limits.role_timeout_minutes must have verifier");
 
+// ---------------------------------------------------------------------------
+// 11. Plan approval default shipped in the example
+// ---------------------------------------------------------------------------
+assert(example.workflow.pause_for_plan_approval === false,
+  `config.example.json workflow.pause_for_plan_approval must be false, got ${JSON.stringify(example.workflow.pause_for_plan_approval)}`);
+assert(!("approve_plan_myself" in example.workflow),
+  "config.example.json must not contain the removed workflow.approve_plan_myself");
+
 console.log("config.example.json validation passed (all schema defaults present, escalation_model absent, \$schema resolves, validateNewConfig passes)");

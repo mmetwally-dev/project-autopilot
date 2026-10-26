@@ -152,7 +152,7 @@ export const DEFAULTS = {
     final_review: true,
     analysis_after_tasks: true,
     approve_spec_myself: false,
-    approve_plan_myself: false,
+    pause_for_plan_approval: false,
     parallel_independent_tasks: false,
     use_worktrees: true,
     commit_by_human: true,
@@ -354,7 +354,7 @@ const WORKFLOW_MAP = [
   ["final_review", "finalReview"],
   ["analysis_after_tasks", "analysisAfterTasks"],
   ["approve_spec_myself", "autoApproveSpec"],
-  ["approve_plan_myself", "autoApprovePlan"],
+  ["pause_for_plan_approval", "pauseForPlanApproval"],
   ["parallel_independent_tasks", "parallelIndependentTasks"],
   ["use_worktrees", "use_worktrees"],
 ];
@@ -453,6 +453,34 @@ export function migrateTimeLimitNames(layout = {}) {
     out[key] = key === "time_limits" ? timeLimits : value;
   }
   return {layout: out, changed: true, renamed};
+}
+
+// The old v4 `workflow.approve_plan_myself` never reached the runtime and its
+// value must never arm the new pause. Migration and `ap config fill` drop it
+// (ignoring the value) and leave `pause_for_plan_approval` at its default
+// false when that key is absent. The input is never mutated; `removed` names
+// the dropped path for the fill report.
+export function migratePlanApprovalKey(layout = {}) {
+  if (!isObject(layout) || !isObject(layout.workflow) || !has(layout.workflow, "approve_plan_myself")) {
+    return {layout, changed: false, removed: []};
+  }
+  const workflow = {};
+  let inserted = false;
+  for (const [key, value] of Object.entries(layout.workflow)) {
+    if (key === "approve_plan_myself") {
+      if (!has(layout.workflow, "pause_for_plan_approval")) {
+        workflow.pause_for_plan_approval = false;
+        inserted = true;
+      }
+      continue;
+    }
+    workflow[key] = value;
+  }
+  const out = {};
+  for (const [key, value] of Object.entries(layout)) {
+    out[key] = key === "workflow" ? workflow : value;
+  }
+  return {layout: out, changed: true, removed: ["workflow.approve_plan_myself"], inserted};
 }
 
 // ---------------------------------------------------------------------------

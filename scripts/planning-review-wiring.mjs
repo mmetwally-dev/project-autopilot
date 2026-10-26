@@ -76,8 +76,9 @@ function applyPendingBudgetReset(s,scope,io){
     let limit=null;
     try{
       const name=String(key).split(":")[0];
-      const configured=Number(io.getConfiguredBudget(name));
-      if(Number.isInteger(configured)&&configured>0) limit=configured;
+      const raw=io.getConfiguredBudget(name);
+      const configured=(raw===undefined||raw===null||typeof raw==="boolean"||(typeof raw==="string"&&raw.trim()===""))?null:Number(raw);
+      if(Number.isInteger(configured)&&configured>=0) limit=configured;
     }catch{ /* leave as "?" */ }
     delete s.failureBudgets[key];
     const f=s.lastFailure||null;

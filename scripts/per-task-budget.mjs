@@ -515,8 +515,12 @@ export function evaluateCapGraceWindow({
 // escalation can neither see nor touch it. One generation consumed per
 // rolled-over relaunch; exhaustion escalates as "task not converging".
 export function resolveContinuationAllowance(policy = {}) {
-  const raw = Number(policy?.continuation_allowance);
-  return Number.isInteger(raw) && raw > 0 ? raw : CONTINUATION_ALLOWANCE_DEFAULT;
+  const configured = policy?.continuation_allowance;
+  if (configured === undefined || configured === null) return CONTINUATION_ALLOWANCE_DEFAULT;
+  if (typeof configured === "boolean") return CONTINUATION_ALLOWANCE_DEFAULT;
+  if (typeof configured === "string" && configured.trim() === "") return CONTINUATION_ALLOWANCE_DEFAULT;
+  const raw = Number(configured);
+  return Number.isInteger(raw) && raw >= 0 ? raw : CONTINUATION_ALLOWANCE_DEFAULT;
 }
 
 // The continuation ledger key prefix. Exported so `ap reset` (TASK-33) can

@@ -402,6 +402,29 @@ try {
     check("R3 reset says out loud that it is counters-only", r.out.includes("counters only"), r.out);
   }
 
+  // ---- R1b: the LIVE reset path reports a configured 0 limit as 0 ----------
+  {
+    const repo = track(makeRepo("mc-reset-zero"));
+    writeConfig(repo, {planningFramework: "standalone", failureBudgets: {adapterRetryBudget: 0}});
+    const requestFile = path.join(repo, ".autopilot", "reset-request.json");
+    fs.writeFileSync(requestFile, JSON.stringify([{key: KEY, scope: SCOPE, at: "2026-01-01T00:00:00.000Z"}]));
+    const moduleUrl = new URL("./autopilot.mjs", import.meta.url).href;
+    const script = `
+      import fs from "node:fs";
+      import {applyPendingBudgetResetForTests} from ${JSON.stringify(moduleUrl)};
+      const s = JSON.parse(fs.readFileSync(".autopilot/state.json", "utf8"));
+      applyPendingBudgetResetForTests(s, ${JSON.stringify(SCOPE)});
+      process.stdout.write("RESULT:" + JSON.stringify(s.lastReset));
+    `;
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], {encoding: "utf8", cwd: repo});
+    const marker = r.stdout.indexOf("RESULT:");
+    let reset = null;
+    if (marker >= 0) { try { reset = JSON.parse(r.stdout.slice(marker + "RESULT:".length)); } catch { reset = null; } }
+    check("R1 live reset under a configured 0 limit reports clearedLimit 0 (not null or \"?\")",
+      r.status === 0 && reset?.scope === KEY && reset?.clearedLimit === 0,
+      {status: r.status, stdout: r.stdout, stderr: r.stderr, reset});
+  }
+
   // ---- R2: named key ------------------------------------------------------
   {
     const repo = track(makeRepo("mc-reset-scope"));

@@ -222,10 +222,12 @@ export function validatePolicyConfig(policy = {}) {
       errors.push("policy.per_task_max_tokens must be a positive integer of tokens.");
     }
     // Backlog 003#17: continuation allowance per task, independent of every
-    // failure budget. Absent means the default of 3, never zero.
+    // failure budget. Absent means the default of 3; a configured 0 is a real
+    // limit (no extra sessions), so the accepted range is a non-negative
+    // integer.
     const contAllowance = policy.continuation_allowance;
-    if (contAllowance != null && (!Number.isInteger(contAllowance) || contAllowance <= 0)) {
-      errors.push("policy.continuation_allowance must be a positive integer.");
+    if (contAllowance != null && (!Number.isInteger(contAllowance) || contAllowance < 0)) {
+      errors.push("policy.continuation_allowance must be a non-negative integer.");
     }
     // Backlog #22: single per-entry rollover-handoff limit. Absent means the
     // code default; when present it must leave room for the digest's
@@ -625,7 +627,7 @@ const WORKFLOW_KEYS = new Set([
   "final_review",
   "analysis_after_tasks",
   "approve_spec_myself",
-  "approve_plan_myself",
+  "pause_for_plan_approval",
   "parallel_independent_tasks",
   "use_worktrees",
   "commit_by_human",

@@ -22,6 +22,8 @@
     "references/",
     "SKILL.md",
     "README.md",
+    "docs/",
+    "!docs/media/",
     "THIRD-PARTY-NOTICES.md",
     "config.example.json",
     "config.schema.json"

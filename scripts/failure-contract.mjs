@@ -646,8 +646,10 @@ export function clearStaleStandaloneBudgets(state) {
 }
 
 function positiveInteger(value, fallback) {
+  if (value === undefined || value === null || typeof value === "boolean") return fallback;
+  if (typeof value === "string" && value.trim() === "") return fallback;
   const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function defaultBudget(name) {
