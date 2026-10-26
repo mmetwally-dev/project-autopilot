@@ -53,7 +53,7 @@ Needs Node.js 18+, Git and at least one signed-in agent CLI
 ([details](#get-started)).
 
 ```bash
-npm install -g github:mmetwally-dev/project-autopilot
+npm install -g project-autopilot
 cd your-project && ap setup
 ap run "your request"
 ```
@@ -113,7 +113,7 @@ On Linux and WSL2 you also need `bubblewrap` for the read-only reviewers
 **1. Install** — one command, then `ap` works in every terminal:
 
 ```bash
-npm install -g github:mmetwally-dev/project-autopilot
+npm install -g project-autopilot
 ```
 
 **2. Set up a project** — from the project folder (a Git repository):
@@ -152,6 +152,7 @@ its output to the mission's `orchestrator.log`.
 - **Update:** run the same `npm install -g …` command again.
 - **Remove the CLI:** `npm uninstall -g project-autopilot`. To remove Autopilot from
   one project instead, run `ap uninstall` there (see [Commands](#commands)).
+- **Latest code from GitHub:** `npm install -g github:mmetwally-dev/project-autopilot`.
 - **From a local folder:** `npm install -g <path-to-project-autopilot>`.
 - **Developing the skill itself:** run `npm link` once inside the checkout; `ap`
   then runs that folder, so every edit is live. `npm unlink -g project-autopilot` undoes it.

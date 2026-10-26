@@ -36,7 +36,7 @@ Requires Node.js 18+, Git, one signed-in agent CLI, and `bubblewrap` on
 Linux/WSL2 for the read-only reviewers.
 
 ```bash
-npm install -g github:mmetwally-dev/project-autopilot   # once; or: node <skill>/bin/ap.cjs …
+npm install -g project-autopilot                        # once; or: node <skill>/bin/ap.cjs …
 ap setup                                                # once per project (wizard)
 ap run "Add a dark-mode toggle to the settings page"    # a full mission
 ```
