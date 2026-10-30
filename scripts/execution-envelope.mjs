@@ -582,6 +582,12 @@ export function classifyBinary(candidate) {
   // Any file that claims to be a PE image (MZ magic) but fails structural
   // validation is denied outright — it never falls back to a benign kind.
   if (inspection.error) return unresolved(inspection.error, symlinkPath);
+  // An ELF image is a native binary whatever its suffix: some npm CLI packages
+  // on Linux ship a real ELF file named <tool>.exe, which must not be mistaken
+  // for a Windows executable by the .exe fallback below.
+  if (header.length >= 4 && header[0] === 0x7f && header[1] === 0x45 && header[2] === 0x4c && header[3] === 0x46) {
+    return resolved(BINARY_KINDS.native, symlinkPath, resolvedTargetPath);
+  }
   const extension = path.extname(resolvedTargetPath).toLowerCase();
   // Conservative fallback: a .exe suffix is treated as a Windows executable
   // even when the content does not carry a recognizable PE signature.
