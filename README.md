@@ -5,7 +5,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"/></a>
-  <img src="https://img.shields.io/badge/version-12.0.1-informational" alt="Version 12.0.1"/>
+  <a href="https://www.npmjs.com/package/project-autopilot"><img src="https://img.shields.io/npm/v/project-autopilot" alt="npm version"/></a>
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node 18 or newer"/>
 </p>
 
