@@ -91,7 +91,15 @@ const MISSION_TIMEOUT_MS = process.platform === "win32" ? 220000 : 90000;
 // review overhead before the marker can even appear, so this needs the same
 // headroom as MISSION_TIMEOUT_MS, not the short deadline that suffices on
 // Linux/WSL2.
-const MARKER_WAIT_TIMEOUT_MS = process.platform === "win32" ? 220000 : 30000;
+// This file waits on real mission subprocesses; under a loaded
+// pool the crash marker can take longer to appear than a short fixed budget.
+// `test-all` sets AP_TEST_TIMEOUT_FACTOR (default 2), standalone runs keep
+// factor 1 unless the operator sets it — scale the marker deadline with it.
+const TIMEOUT_FACTOR = (() => {
+  const value = Number(process.env.AP_TEST_TIMEOUT_FACTOR);
+  return Number.isFinite(value) && value > 0 ? value : 1;
+})();
+const MARKER_WAIT_TIMEOUT_MS = Math.ceil((process.platform === "win32" ? 220000 : 30000) * TIMEOUT_FACTOR);
 
 let failures = 0;
 function check(name, condition, detail) {

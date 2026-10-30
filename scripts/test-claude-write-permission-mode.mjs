@@ -11,7 +11,9 @@
 //   - Planner / Implementer (manifest `write`, driver mode write/scratch)
 //     receive exactly `--permission-mode acceptEdits`.
 //   - Plan Reviewer / Code Reviewer / Verifier (manifest `read_only`,
-//     driver mode read_only) keep exactly `--permission-mode plan`.
+//     driver mode read_only) use `--permission-mode default` with an explicit
+//     read-only allow list (Read/Glob/Grep/Bash) — never plan mode, which
+//     refuses the scratch hand-off note (backlog #2).
 //   - No `--dangerously-skip-permissions`, `bypassPermissions`, or other
 //     broad permission bypass may exist in the manifest or emitted argv.
 //   - Plain-text stdin (`--input-format text`) and stream-json output are
@@ -24,7 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
 import {applyAgentSelections, verifyAgentInvocation} from "./agent-invocation.mjs";
-import {adapterDriver} from "./adapter-drivers.mjs";
+import {adapterDriver, CLAUDE_READ_ONLY_ALLOWED_TOOLS} from "./adapter-drivers.mjs";
 import {validateAdapterContract} from "./agent-contract.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -56,24 +58,35 @@ assert.deepEqual(
   `claude.write manifest must contain exactly one --permission-mode acceptEdits, got: ${claude.write.join(" ")}`
 );
 
-// ── 2. Manifest: read_only keeps plan exactly once ──────────────────────────
+// ── 2. Manifest: read_only uses default mode exactly once (never plan) ──────
 assert.ok(Array.isArray(claude.read_only), "claude.read_only must be an array");
 assert.deepEqual(
   permissionModeOf(claude.read_only),
-  ["plan"],
-  `claude.read_only manifest must contain exactly one --permission-mode plan, got: ${claude.read_only.join(" ")}`
+  ["default"],
+  `claude.read_only manifest must contain exactly one --permission-mode default, got: ${claude.read_only.join(" ")}`
 );
+assert.ok(!claude.read_only.includes("plan"), "claude.read_only manifest must not use plan mode");
 
-// ── 2b. Manifest: write allows Bash (headless acceptEdits denies it); read_only never ──
+// ── 2b. Manifest: read tools + Bash; no bare Write/Edit, no scratch rule yet ──
+// The scratch-specific Write/Edit rules are injected at launch from the real
+// scratch path (autopilot buildRelayArgs), never hard-coded in the manifest.
 const allowedToolsOf = args => {
   const values = [];
   for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "--allowedTools") values.push(args[i + 1]);
+    if (args[i] !== "--allowedTools") continue;
+    for (let j = i + 1; j < args.length && !String(args[j]).startsWith("--"); j += 1) values.push(args[j]);
   }
   return values;
 };
 assert.deepEqual(allowedToolsOf(claude.write), ["Bash"], "claude.write manifest must carry exactly one --allowedTools Bash");
-assert.deepEqual(allowedToolsOf(claude.read_only), [], "claude.read_only manifest must not carry --allowedTools");
+assert.deepEqual(
+  allowedToolsOf(claude.read_only),
+  ["Read", "Glob", "Grep", "Bash"],
+  `claude.read_only manifest must carry the read-only allow list, got: ${claude.read_only.join(" ")}`
+);
+assert.ok(!allowedToolsOf(claude.read_only).includes("Write"), "claude.read_only must not grant a bare Write tool");
+assert.ok(!allowedToolsOf(claude.read_only).includes("Edit"), "claude.read_only must not grant a bare Edit tool");
+assert.ok(!allowedToolsOf(claude.read_only).some(t => /^Write\(|^Edit\(/.test(t)), "claude.read_only manifest must not hard-code a scratch path rule");
 
 // ── 3. Manifest: no dangerous bypass anywhere near claude ──────────────────
 assert.ok(!hasDangerous(claude.write), "claude.write must not contain a dangerous permission bypass");
@@ -104,9 +117,9 @@ assert.ok(contract.ok, `claude adapter contract must be valid: ${contract.errors
 const roleCases = [
   {name: "planner", readOnly: false, expectedMode: "acceptEdits"},
   {name: "implementer", readOnly: false, expectedMode: "acceptEdits"},
-  {name: "plan_reviewer", readOnly: true, expectedMode: "plan"},
-  {name: "code_reviewer", readOnly: true, expectedMode: "plan"},
-  {name: "verifier", readOnly: true, expectedMode: "plan"},
+  {name: "plan_reviewer", readOnly: true, expectedMode: "default"},
+  {name: "code_reviewer", readOnly: true, expectedMode: "default"},
+  {name: "verifier", readOnly: true, expectedMode: "default"},
 ];
 
 for (const {name, readOnly, expectedMode} of roleCases) {
@@ -141,7 +154,7 @@ for (const {name, readOnly, expectedMode} of roleCases) {
 }
 
 // ── 7. Driver-level path (scripts/adapter-drivers.mjs) ─────────────────────
-// ── 2c. Foreground-only: write disables background tasks; read_only untouched ──
+// ── 2c. Foreground-only: both modes disable background tasks ──
 const FG_SETTINGS = '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}';
 const foregroundOnlyOf = args => {
   const at = args.indexOf("--disallowedTools");
@@ -156,12 +169,15 @@ const mfw = foregroundOnlyOf(claude.write);
 assert.deepEqual(mfw.disallowed, ["Monitor", "TaskStop"], "claude.write manifest must disallow Monitor and TaskStop");
 assert.ok(mfw.followedByFlag, "claude.write manifest: --disallowedTools list must be followed by a flag (variadic)");
 assert.equal(mfw.settings, FG_SETTINGS, "claude.write manifest must disable background tasks via --settings env");
-assert.ok(!claude.read_only.includes("--disallowedTools") && !claude.read_only.includes("--settings"), "claude.read_only manifest must stay unchanged (no foreground-only flags)");
+const mfr = foregroundOnlyOf(claude.read_only);
+assert.deepEqual(mfr.disallowed, ["Monitor", "TaskStop"], "claude.read_only manifest must disallow Monitor and TaskStop");
+assert.ok(mfr.followedByFlag, "claude.read_only manifest: --disallowedTools list must be followed by a flag (variadic)");
+assert.equal(mfr.settings, FG_SETTINGS, "claude.read_only manifest must disable background tasks via --settings env");
 
 const driver = adapterDriver("claude");
 assert.ok(driver, 'adapterDriver("claude") must resolve to a driver');
 
-for (const [mode, expectedMode] of [["write", "acceptEdits"], ["scratch", "acceptEdits"], ["read_only", "plan"]]) {
+for (const [mode, expectedMode] of [["write", "acceptEdits"], ["scratch", "acceptEdits"], ["read_only", "default"]]) {
   const invocation = driver.buildInvocation({binary: "claude", mode, model: "sonnet", reasoning: "low", args: []});
   assert.deepEqual(
     permissionModeOf(invocation.args),
@@ -171,21 +187,20 @@ for (const [mode, expectedMode] of [["write", "acceptEdits"], ["scratch", "accep
   assert.ok(!hasDangerous(invocation.args), `driver mode=${mode} must not contain a dangerous bypass`);
   assert.deepEqual(
     allowedToolsOf(invocation.args),
-    mode === "read_only" ? [] : ["Bash"],
+    mode === "read_only" ? [...CLAUDE_READ_ONLY_ALLOWED_TOOLS] : ["Bash"],
     `driver mode=${mode} --allowedTools mismatch: ${invocation.args.join(" ")}`
   );
-  if (mode !== "read_only") {
-    const at = invocation.args.indexOf("--allowedTools");
-    assert.ok(String(invocation.args[at + 2]).startsWith("--"), `driver mode=${mode}: --allowedTools Bash must be followed by another flag (variadic)`);
-  }
-  const fg = foregroundOnlyOf(invocation.args);
   if (mode === "read_only") {
-    assert.deepEqual(fg, {disallowed: [], followedByFlag: false, settings: null}, "driver read_only must not carry foreground-only flags");
-  } else {
-    assert.deepEqual(fg.disallowed, ["Monitor", "TaskStop"], `driver mode=${mode} must disallow Monitor and TaskStop`);
-    assert.ok(fg.followedByFlag, `driver mode=${mode}: --disallowedTools must be followed by a flag`);
-    assert.equal(fg.settings, FG_SETTINGS, `driver mode=${mode} must disable background tasks via --settings env`);
+    assert.ok(!allowedToolsOf(invocation.args).includes("Write"), "driver read_only must not grant a bare Write tool");
+    assert.ok(!allowedToolsOf(invocation.args).includes("Edit"), "driver read_only must not grant a bare Edit tool");
   }
+  const at = invocation.args.indexOf("--allowedTools");
+  const firstAfterAllowed = at + 1 + allowedToolsOf(invocation.args).length;
+  assert.ok(String(invocation.args[firstAfterAllowed]).startsWith("--"), `driver mode=${mode}: --allowedTools list must be followed by another flag (variadic)`);
+  const fg = foregroundOnlyOf(invocation.args);
+  assert.deepEqual(fg.disallowed, ["Monitor", "TaskStop"], `driver mode=${mode} must disallow Monitor and TaskStop`);
+  assert.ok(fg.followedByFlag, `driver mode=${mode}: --disallowedTools must be followed by a flag`);
+  assert.equal(fg.settings, FG_SETTINGS, `driver mode=${mode} must disable background tasks via --settings env`);
   assert.ok(
     invocation.args.includes("--input-format") && invocation.args[invocation.args.indexOf("--input-format") + 1] === "text",
     `driver mode=${mode} must keep --input-format text`
@@ -202,6 +217,18 @@ for (const [mode, expectedMode] of [["write", "acceptEdits"], ["scratch", "accep
     invocation.args.includes("--effort") && invocation.args[invocation.args.indexOf("--effort") + 1] === "low",
     `driver mode=${mode} must keep --effort low`
   );
+}
+
+// ── 7b. Driver read_only scratch grant: only the named scratch tree ────────
+{
+  const invocation = driver.buildInvocation({binary: "claude", mode: "read_only", model: "sonnet", reasoning: "low", args: [], scratchDir: "/workspace/scratch"});
+  const tools = allowedToolsOf(invocation.args);
+  assert.ok(tools.includes("Write(//workspace/scratch/**)"), `driver read_only must grant Write only under the scratch dir, got: ${invocation.args.join(" ")}`);
+  assert.ok(tools.includes("Edit(//workspace/scratch/**)"), `driver read_only must grant Edit only under the scratch dir, got: ${invocation.args.join(" ")}`);
+  assert.ok(!tools.includes("Write") && !tools.includes("Edit"), "driver read_only must not grant bare Write/Edit");
+  assert.ok(!tools.some(t => /^Write\(|^Edit\(/.test(t) && !t.includes("/workspace/scratch/")), "driver read_only Write/Edit must stay inside the scratch dir");
+  const noScratch = driver.buildInvocation({binary: "claude", mode: "read_only", model: "sonnet", reasoning: "low", args: []});
+  assert.ok(!allowedToolsOf(noScratch.args).some(t => /^Write\(|^Edit\(/.test(t)), "driver read_only without a scratch dir must not grant any write rule");
 }
 
 // ── 8. Fail-closed: unknown modes ───────────────────────────────────────────

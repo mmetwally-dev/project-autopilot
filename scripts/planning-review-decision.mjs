@@ -41,6 +41,9 @@
 const NON_RETRYABLE_ESCALATE_CLASSES = Object.freeze([
   "PATH_UNSUPPORTED",
   "PERMISSION_DENIED",
+  // The CLI is logged out: another reviewer attempt on the same adapter
+  // cannot succeed any more than another path/permission attempt can.
+  "AUTH_REQUIRED",
 ]);
 
 // Functional class that is never intercepted here: the caller runs its

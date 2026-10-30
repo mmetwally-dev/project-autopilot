@@ -19,13 +19,15 @@ const reviewRoles = ['planner', 'plan_reviewer', 'code_reviewer', 'verifier'];
 const LEGACY_DEFAULTS = {max_turns: 22, max_tokens: 150000, extra_sessions: 2, wrap_up_tokens_threshold: 135000};
 const LEGACY_PLANNER_DEFAULTS = {max_turns: 30, max_tokens: 200000, extra_sessions: 2, wrap_up_tokens_threshold: 180000};
 const LEGACY_VERIFIER_DEFAULTS = {...LEGACY_DEFAULTS, max_turns: 30};
-const legacyDefaultsFor = (role) => (role === "planner" ? LEGACY_PLANNER_DEFAULTS : (role === "verifier" || role === "plan_reviewer") ? LEGACY_VERIFIER_DEFAULTS : LEGACY_DEFAULTS);
+const LEGACY_PLAN_REVIEWER_DEFAULTS = {...LEGACY_VERIFIER_DEFAULTS, max_tokens: 250000, extra_sessions: 4, wrap_up_tokens_threshold: 225000};
+const legacyDefaultsFor = (role) => (role === "planner" ? LEGACY_PLANNER_DEFAULTS : role === "plan_reviewer" ? LEGACY_PLAN_REVIEWER_DEFAULTS : role === "verifier" ? LEGACY_VERIFIER_DEFAULTS : LEGACY_DEFAULTS);
 // v4 format (from toNewLayoutConfig) uses wrap_up_at_tokens
 const V4_DEFAULTS = {max_turns: 22, max_tokens: 150000, extra_sessions: 2, wrap_up_at_tokens: 135000};
 const V4_PLANNER_DEFAULTS = {max_turns: 30, max_tokens: 200000, extra_sessions: 2, wrap_up_at_tokens: 180000};
 const V4_VERIFIER_DEFAULTS = {...V4_DEFAULTS, max_turns: 30};
+const V4_PLAN_REVIEWER_DEFAULTS = {...V4_VERIFIER_DEFAULTS, max_tokens: 250000, extra_sessions: 4, wrap_up_at_tokens: 225000};
 const V4_IMPLEMENTER_DEFAULTS = {max_turns: 40, max_tokens: 180000, extra_sessions: 5, wrap_up_at_tokens: 160000};
-const v4DefaultsFor = (role) => (role === "planner" ? V4_PLANNER_DEFAULTS : (role === "verifier" || role === "plan_reviewer") ? V4_VERIFIER_DEFAULTS : (role === "implementer" ? V4_IMPLEMENTER_DEFAULTS : V4_DEFAULTS));
+const v4DefaultsFor = (role) => (role === "planner" ? V4_PLANNER_DEFAULTS : role === "plan_reviewer" ? V4_PLAN_REVIEWER_DEFAULTS : role === "verifier" ? V4_VERIFIER_DEFAULTS : (role === "implementer" ? V4_IMPLEMENTER_DEFAULTS : V4_DEFAULTS));
 
 let passed = 0;
 let failed = 0;
@@ -79,11 +81,11 @@ function checkEqual(name, actual, expected) {
 // the per-turn defaults, genuine operator values are preserved.
 {
   const legacy = mergeRoleCaps({plan_reviewer: {max_tokens: 500000, wrap_up_tokens_threshold: 450000}});
-  checkEqual('legacy review caps rewritten to per-turn defaults', legacy.plan_reviewer, {...LEGACY_DEFAULTS, max_turns: 30});
+  checkEqual('legacy review caps rewritten to per-turn defaults', legacy.plan_reviewer, LEGACY_PLAN_REVIEWER_DEFAULTS);
   const legacyPlanner = mergeRoleCaps({planner: {max_tokens: 1000000, wrap_up_tokens_threshold: 950000}});
   checkEqual('legacy planner caps rewritten to per-turn defaults', legacyPlanner.planner, LEGACY_PLANNER_DEFAULTS);
   const kept = mergeRoleCaps({plan_reviewer: {max_tokens: 300000, wrap_up_tokens_threshold: 450000}});
-  checkEqual('operator max_tokens 300K kept, legacy wrap-up rewritten', kept.plan_reviewer, {...LEGACY_DEFAULTS, max_turns: 30, max_tokens: 300000});
+  checkEqual('operator max_tokens 300K kept, legacy wrap-up rewritten', kept.plan_reviewer, {...LEGACY_PLAN_REVIEWER_DEFAULTS, max_tokens: 300000});
 }
 
 // ---- Part 2: setup.mjs end to end ----
@@ -190,7 +192,7 @@ try {
     const caps = readCaps(repo) || {};
     checkEqual('setup partial planner', caps.planner, {...V4_PLANNER_DEFAULTS, max_turns: 30});
     checkEqual('setup full verifier', caps.verifier, full);
-    checkEqual('setup default plan_reviewer', caps.plan_reviewer, {...V4_DEFAULTS, max_turns: 30});
+    checkEqual('setup default plan_reviewer', caps.plan_reviewer, V4_PLAN_REVIEWER_DEFAULTS);
     checkEqual('setup default code_reviewer', caps.code_reviewer, V4_DEFAULTS);
     checkEqual('setup implementer unchanged', caps.implementer, V4_IMPLEMENTER_DEFAULTS);
   }

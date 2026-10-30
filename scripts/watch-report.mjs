@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { normalizeFindings } from "./review-feedback.mjs";
+
 // Mission 094 Phase 1 task 1.1 — the core report model.
 //
 // `buildReportModel` normalizes the three live data sources of a watch report
@@ -65,16 +67,20 @@ function attemptNumberOf(run) {
 function readRunExtras(dir) {
   const extras = {
     findings: [],
+    notes: [],
     carriedForwardTasks: null,
     sessionNumber: null,
     configuredModel: null,
     resolvedModel: null,
     modelMismatch: null,
+    reasoning: null,
+    variant: null,
     snapshotBeforeStartedAt: null,
     snapshotBeforeAt: null,
     snapshotAfterStartedAt: null,
     snapshotAfterAt: null,
     planRevision: null,
+    planningStage: null,
     note: null,
     policyViolation: null,
     failureClass: null,
@@ -90,12 +96,15 @@ function readRunExtras(dir) {
       if (st.carriedForwardTasks !== undefined) extras.carriedForwardTasks = st.carriedForwardTasks;
       if (st.configuredModel !== undefined) extras.configuredModel = st.configuredModel;
       if (st.resolvedModel !== undefined) extras.resolvedModel = st.resolvedModel;
+      if (typeof st.reasoning === "string" && st.reasoning) extras.reasoning = st.reasoning;
+      if (typeof st.variant === "string" && st.variant) extras.variant = st.variant;
       if (st.modelMismatch !== undefined) extras.modelMismatch = st.modelMismatch;
       if (st.snapshotBeforeStartedAt !== undefined) extras.snapshotBeforeStartedAt = st.snapshotBeforeStartedAt;
       if (st.snapshotBeforeAt !== undefined) extras.snapshotBeforeAt = st.snapshotBeforeAt;
       if (st.snapshotAfterStartedAt !== undefined) extras.snapshotAfterStartedAt = st.snapshotAfterStartedAt;
       if (st.snapshotAfterAt !== undefined) extras.snapshotAfterAt = st.snapshotAfterAt;
       if (st.planRevision !== undefined) extras.planRevision = st.planRevision;
+      if (st.planningStage !== undefined) extras.planningStage = st.planningStage;
       if (st.note !== undefined) extras.note = st.note;
       if (st.interrupted_at !== undefined) extras.interrupted_at = st.interrupted_at;
       if (st.interruption_reason !== undefined) extras.interruption_reason = st.interruption_reason;
@@ -104,10 +113,20 @@ function readRunExtras(dir) {
   try {
     const rs = JSON.parse(fs.readFileSync(path.join(dir, "result.json"), "utf8"));
     if (rs && typeof rs === "object") {
-      if (Array.isArray(rs.review?.findings)) extras.findings = rs.review.findings.map(String);
-      else if (Array.isArray(rs.findings)) extras.findings = rs.findings.map(String);
+      if (extras.planningStage == null && rs.planningStage !== undefined) extras.planningStage = rs.planningStage;
+      if (Array.isArray(rs.review?.findings) && rs.review.findings.length) extras.findings = rs.review.findings.map(String);
+      else if (Array.isArray(rs.findings) && rs.findings.length) extras.findings = rs.findings.map(String);
+      // A plan-review FAIL can record its findings only on verdict.findings
+      // (review.findings is null/empty); the watch summary must still show
+      // the reason, so fall back to the verdict array.
+      else if (Array.isArray(rs.verdict?.findings) && rs.verdict.findings.length) extras.findings = normalizeFindings(rs.verdict.findings);
+      // Backlog #8: minor notes never fail a plan review; show their count.
+      if (Array.isArray(rs.review?.notes) && rs.review.notes.length) extras.notes = rs.review.notes.map(String);
+      else if (Array.isArray(rs.verdict?.notes) && rs.verdict.notes.length) extras.notes = rs.verdict.notes.map(String);
       if (extras.carriedForwardTasks == null && Array.isArray(rs.carriedForwardTasks)) extras.carriedForwardTasks = rs.carriedForwardTasks.slice();
       if (extras.resolvedModel == null && typeof rs.resolvedModel === "string") extras.resolvedModel = rs.resolvedModel;
+      if (extras.reasoning == null && typeof rs.reasoning === "string" && rs.reasoning) extras.reasoning = rs.reasoning;
+      if (extras.variant == null && typeof rs.variant === "string" && rs.variant) extras.variant = rs.variant;
       extras.policyViolation = (typeof rs.policyViolation === "string" && rs.policyViolation)
         || (typeof rs.policy?.violation === "string" && rs.policy.violation)
         || null;
@@ -126,7 +145,7 @@ function readRunExtras(dir) {
 // (e.g. `resolvedModel`) silently dropped those extras (backlog #4).
 const RUN_EXTRA_KEYS = [
   "carriedForwardTasks", "sessionNumber", "resolvedModel", "configuredModel",
-  "modelMismatch", "snapshotBeforeStartedAt", "snapshotBeforeAt", "snapshotAfterStartedAt", "snapshotAfterAt", "planRevision", "note",
+  "modelMismatch", "reasoning", "variant", "snapshotBeforeStartedAt", "snapshotBeforeAt", "snapshotAfterStartedAt", "snapshotAfterAt", "planRevision", "planningStage", "note", "notes",
   "policyViolation", "failureClass", "escalated", "interrupted_at", "interruption_reason",
 ];
 function enrichRun(run) {
@@ -459,6 +478,32 @@ function buildPlanningRuns(runs, { status: missionStatus } = {}) {
   };
 }
 
+// The revision counter the planning header shows. Standalone keeps the
+// planner-run `planRevision` high-water mark; SpecKit and GSD gate loops keep
+// their own counters in `state.planReviewRevisions` (keys such as
+// `speckit-stage:specify`, or `gsd-*`), so read those too. GSD also records
+// the latest stage revision in `state.gsdPlanningReview.revision`. Each gate
+// has its own budget, so the header reports the highest counter used, never a
+// sum that could exceed `max_plan_revisions`.
+function statePlanningRevision(state, framework) {
+  if (framework !== "speckit" && framework !== "gsd") return null;
+  const values = [];
+  const revisions = state?.planReviewRevisions;
+  if (revisions && typeof revisions === "object") {
+    for (const [key, value] of Object.entries(revisions)) {
+      if (!Number.isInteger(value) || value < 0) continue;
+      if (framework === "speckit" && !key.startsWith("speckit-")) continue;
+      if (framework === "gsd" && !key.startsWith("gsd")) continue;
+      values.push(value);
+    }
+  }
+  if (framework === "gsd") {
+    const latest = state?.gsdPlanningReview?.revision;
+    if (Number.isInteger(latest) && latest >= 0) values.push(latest);
+  }
+  return values.length ? Math.max(...values) : null;
+}
+
 // Final review rounds: each code_reviewer/verifier opens a round; fix-pass
 // implementer runs between reviews belong to the preceding round.
 function buildFinalReview(runs, { status: missionStatus, skipped } = {}) {
@@ -502,19 +547,32 @@ function isFinalReviewRun(run, phaseCount) {
   return true;
 }
 
-function classifyStage(state, planning, phases, finalReview) {
+function classifyStage(state, planning, phases, finalReview, runs = []) {
   const statePhase = typeof state?.phase === "string" ? state.phase : "";
+  const stateStep = typeof state?.step === "string" ? state.step : "";
   // The recorded state wins when it names a stage: a report rendered after a
   // final review run finished must still read IMPLEMENTATION while the mission
-  // is still implementing.
+  // is still implementing. A plan-phase step (standalone-plan, plan_review, …)
+  // is a real stage signal even before state.phase has been written.
   if (statePhase === "final_review") return "FINAL REVIEW";
-  if (statePhase === "planning" || statePhase === "plan_approval" || /planning/.test(String(state?.step || ""))) return "PLANNING";
+  if (statePhase === "planning" || statePhase === "plan_approval" || /plan/i.test(stateStep)) return "PLANNING";
   if (statePhase === "implementing" || statePhase === "verifying" || statePhase === "tasks_ready") return "IMPLEMENTATION";
   if (finalReview.status === "skipped") return "FINAL REVIEW";
   if (finalReview.runs.length > 0 && (finalReview.status === "in_progress" || finalReview.status === "passed")) return "FINAL REVIEW";
   const anyImpl = phases.some((p) => p.runs.length > 0);
-  if (!anyImpl && planning.runs.length > 0) return "PLANNING";
-  return "IMPLEMENTATION";
+  if (anyImpl) return "IMPLEMENTATION";
+  if (planning.runs.length > 0) return "PLANNING";
+  // Last resort before STARTING: the newest run's role says what the mission
+  // is doing even when state.json has no phase/step yet (the first seconds of
+  // a run). An impl/verify/review role is known work, not an unknown state.
+  const latest = [...(Array.isArray(runs) ? runs : [])]
+    .sort((a, b) => (Date.parse(a?.started_at ?? a?.startedAt) || 0) - (Date.parse(b?.started_at ?? b?.startedAt) || 0))
+    .pop();
+  const role = roleOf(latest);
+  if (PLANNING_ROLES.has(role)) return "PLANNING";
+  if (IMPLEMENTATION_ROLES.has(role) || REVIEW_ROLES.has(role)) return "IMPLEMENTATION";
+  // Nothing has started yet: never pretend the mission is implementing.
+  return "STARTING";
 }
 
 // ── Mission 094 task 1.2 — enrichment helpers ───────────────────────────────
@@ -589,6 +647,7 @@ export function modelDisplay(run) {
 export function providerTroubleLabel(text) {
   const s = String(text ?? "");
   if (/ProviderHeaderTimeout/.test(s)) return "ProviderHeaderTimeout";
+  if (/free usage limit reached|usage limit reached/i.test(s) || /insufficient[_\s-]?quota|quota[_\s-]?(?:exceeded|exhausted)/i.test(s)) return "Free quota used up";
   if (/Rate limit exceeded/i.test(s) || /rate_limit_exceeded/.test(s)) return "Rate limit exceeded";
   const silent = s.match(/silent\s+(\d+)\s*m[,\s]+no child process/i);
   if (silent) return `silent ${silent[1]}m, no child process`;
@@ -883,6 +942,10 @@ function decodeProgressEntry(raw) {
     const text = String(m[2] ?? "").split("\n")[0].trim();
     return { at, kind, text: text || m[1] };
   }
+  if (/^PREPARE \|/.test(rest)) {
+    const text = rest.replace(/^PREPARE \|\s*/, "").trim();
+    return { at, kind: "PREP", text: text || "preparing" };
+  }
   const prep = rest.match(/^PREP\b\s*(.*)$/);
   if (prep) return { at, kind: "PREP", text: prep[1] || "pre-run snapshot started" };
   const warn = rest.match(/^WARN\b\s*(.*)$/);
@@ -992,6 +1055,8 @@ export function detectCurrent({ runs = [], gates = [], status = "RUNNING", gateL
     attempt: attemptNumberOf(r),
     status: "running",
     model: r.displayModel ?? modelDisplay(r),
+    reasoning: typeof r.reasoning === "string" && r.reasoning ? r.reasoning : null,
+    variant: typeof r.variant === "string" && r.variant ? r.variant : null,
     sessionNumber: r.sessionNumber ?? null,
     session: r.sessionLabel ?? null,
     pid: r.pid ?? null,
@@ -1001,6 +1066,7 @@ export function detectCurrent({ runs = [], gates = [], status = "RUNNING", gateL
     snapshotAfterAt: r.snapshotAfterAt ?? null,
     usage: r.usage ?? null,
     note: r.note ?? null,
+    lastAction: r.last_action ?? null,
   };
 }
 
@@ -1145,7 +1211,7 @@ function missionStartedAt(state, runs) {
   return earliest;
 }
 
-export function buildReportModel({ state = null, runs = [], events = [], phases = [], policy = {}, layout = null, progress = [], gateLog = null, now = null, skill = null, missionFallback = null, ownerAlive } = {}) {
+export function buildReportModel({ state = null, runs = [], events = [], phases = [], policy = {}, layout = null, progress = [], gateLog = null, now = null, skill = null, command = null, missionFallback = null, ownerAlive } = {}) {
   const eventList = Array.isArray(events) ? events : [];
   const progressList = Array.isArray(progress) ? progress : [];
   const phaseDefs = normalizePhases(phases);
@@ -1264,6 +1330,11 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
 
   const mission = typeof state?.mission === "string" && state.mission ? state.mission : null;
   const framework = state?.planningDetection?.framework ?? null;
+  const storedRevision = statePlanningRevision(state, framework);
+  if (storedRevision != null) {
+    const runRevision = typeof planning.revision === "number" ? planning.revision : 0;
+    planning.revision = Math.max(runRevision, storedRevision);
+  }
 
   // For ended missions, compute the end time from statusInfo.at (cancel/stop/escalation)
   // or from the last run's end time for COMPLETED missions.
@@ -1308,7 +1379,7 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
     status: statusInfo.status,
     statusInfo,
     stopLine: statusInfo.stopLine,
-    stage: classifyStage(state, planning, phasesOut, finalReview),
+    stage: classifyStage(state, planning, phasesOut, finalReview, enrichedRuns),
     phaseIndex,
     phaseNumber: phaseIndex != null ? phaseIndex + 1 : null,
     phaseName: phaseIndex != null ? (phasesOut[phaseIndex]?.name ?? null) : null,
@@ -1321,7 +1392,8 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
     missionStartedAt: missionStartedAt(state, enrichedRuns),
     missionEndedAt,
     missionFallback,
-    skill: skill && typeof skill === "object" ? skill : null,
+    skill: skill && typeof skill === "object" ? skill : (state?.skill && typeof state.skill === "object" ? state.skill : null),
+    command: command ?? state?.command ?? null,
     continuationAllowance: allowance,
     gateCommand,
     gates,
@@ -1598,6 +1670,8 @@ function planningNote(run, model) {
   } else if (roleOf(run) === "plan_reviewer") {
     const n = Array.isArray(run.findings) ? run.findings.length : 0;
     parts.push(`${n} finding${n === 1 ? "" : "s"}`);
+    const notes = Array.isArray(run.notes) ? run.notes.length : 0;
+    if (notes) parts.push(`notes: ${notes} minor`);
   }
   const failureReason = failureReasonText(run, model?.runs);
   if (failureReason) parts.push(failureReason);
@@ -1665,14 +1739,40 @@ function renderRows(rows, { indent = "    ", widths: sharedWidths = null, collec
   return lines;
 }
 
-// A planning run as a shared-table row: both planning roles write and review
-// PLAN.md + TASKS.md, so their TASK is always `plan/tasks`.
+// The planning TASK cell. Standalone planning keeps the historical
+// `plan/tasks` label (its planner writes and its reviewer reads both files).
+// SpecKit rows name the stage the run worked on (`spec`/`plan`/`tasks`) and
+// GSD rows their stage (`discuss`/`research`/`plan`/`plan-check`), both from
+// the stage recorded on the run at launch. A legacy run without that field
+// keeps the old `plan/tasks` label rather than inventing a stage.
+const PLANNING_STAGE_LABELS = {
+  specify: "spec", spec: "spec", "review-spec": "spec", "spec-review": "spec",
+  plan: "plan", "review-plan": "plan", "plan-review": "plan",
+  tasks: "tasks", "review-tasks": "tasks", "tasks-review": "tasks",
+  discuss: "discuss", research: "research",
+  "plan-check": "plan-check", "review-plan-check": "plan-check",
+};
+function planningStageLabel(run) {
+  const raw = run?.planningStage ?? run?.stage ?? run?.planningStep ?? null;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const key = raw.trim().toLowerCase()
+    .replace(/^(?:speckit|gsd)-/, "")
+    .replace(/-revision-\d+$/, "")
+    .replace(/-review-failed$/, "");
+  return PLANNING_STAGE_LABELS[key] ?? key;
+}
+function planningTaskLabel(run) {
+  return planningStageLabel(run) ?? "plan/tasks";
+}
+
+// A planning run as a shared-table row: standalone keeps `plan/tasks`, while
+// SpecKit/GSD rows show the stage the run actually worked on.
 function planningRow(run, model) {
   return {
     running: isRunning(run),
     role: run?.dirName || run?.id || "-",
     model: run?.displayModel ?? modelDisplay(run),
-    task: "plan/tasks",
+    task: planningTaskLabel(run),
     status: runStatusCell(run),
     duration: durationCell(run, model?.now ?? null),
     snapshot: snapshotCell(run),
@@ -1836,6 +1936,7 @@ export function stageText(model) {
   const status = String(model?.status ?? "").toUpperCase();
   if (status === "COMPLETED" || status === "CANCELLED") return "done";
   const stage = model?.stage;
+  if (stage === "STARTING") return "STARTING";
   if (stage === "PLANNING") return "PLANNING";
   if (stage === "FINAL REVIEW") {
     const limit = Number(model?.policy?.final_review_fix_rounds);
@@ -1845,6 +1946,7 @@ export function stageText(model) {
     }
     return "FINAL REVIEW";
   }
+  if (stage !== "IMPLEMENTATION") return "STARTING";
   const phase = model?.phaseNumber;
   const total = Array.isArray(model?.phases) ? model.phases.length : 0;
   const name = stripPhasePrefix(model?.phaseName);
@@ -2038,29 +2140,42 @@ export function capsText(model) {
   return result;
 }
 
-// `Skill:` names the skill copy the orchestrator runs. No skill-copy/sync value
-// is recorded anywhere (PLAN.md:50), so this degrades to a best-effort value:
-// the passed `model.skill` when available, else an explicit not-recorded label.
+// `Skill:` names the skill copy the orchestrator runs. autopilot records it on
+// the mission state (`skill-copy.mjs`) at run start as {version, mode, path};
+// older runs have no record and keep the explicit not-recorded label.
 export function skillText(model) {
   const skill = model?.skill;
-  if (skill && (skill.mode || skill.path)) {
+  if (skill && (skill.version || skill.mode || skill.path)) {
     const mode = skill.mode || "production";
     const at = skill.syncedAt ? formatStamp(skill.syncedAt).slice(0, 16) : null;
-    return `${mode} · ${skill.path || "-"}${at ? ` (synced ${at})` : ""}`;
+    const head = [skill.version, mode, skill.path || "-"].filter((value) => value != null && value !== "").join(" · ");
+    return `${head}${at ? ` (synced ${at})` : ""}`;
   }
   return "unknown · skill copy location not recorded";
 }
 
+// `Command:` names the entry command that started the run. autopilot records
+// it on the mission state (`skill-copy.mjs` recordCommand) at run start as
+// {name, stopAfter}; older runs have no record and print nothing.
+export function commandText(model) {
+  const name = model?.command?.name;
+  if (!name) return null;
+  const stopAfter = model.command.stopAfter;
+  return `ap ${name} (${stopAfter ? `stops after ${stopAfter}` : "full loop"})`;
+}
+
 // `=== [<stamp> — ]PIPELINE STATE ===` block (watcher.md Sections): mission,
-// status, stage, budgets used/limit, retries, totals, caps, skill copy and the Events
+// status, command, stage, budgets used/limit, retries, totals, caps, skill copy and the Events
 // line. No current-run detail leaks in here.
 export function renderPipelineState(model, { stamp = null } = {}) {
   const head = stamp ? `=== ${stamp} — PIPELINE STATE ===` : "=== PIPELINE STATE ===";
   const missionName = model?.mission ?? model?.missionFallback ?? "-";
+  const commandLine = commandText(model);
   const lines = [
     head,
     `Mission: ${missionName}`,
     label("Status") + statusText(model),
+    ...(commandLine ? [label("Command") + commandLine] : []),
     label("Stage") + stageText(model),
     label("Budgets") + budgetsText(model),
     label("Retries") + retriesText(model),
@@ -2107,6 +2222,7 @@ const FAILURE_CLASS_LABELS = {
   COMMAND_FAILED: "command failed",
   SERVER_UNAVAILABLE: "server unavailable",
   RATE_LIMITED: "rate limited",
+  AUTH_REQUIRED: "authentication required (log in)",
   PROVIDER_ERROR: "provider error",
   IDLE_HANG: "idle hang",
   IMPLEMENTATION_REJECTED: "implementation rejected",
@@ -2624,6 +2740,7 @@ function capForRole(model, role) {
 // those). FINAL REVIEW may add its fix round; PLANNING is bare.
 export function currentStageText(model) {
   const stage = model?.stage;
+  if (stage === "STARTING") return "STARTING";
   if (stage === "PLANNING") return "PLANNING";
   if (stage === "FINAL REVIEW") {
     const limit = Number(model?.policy?.final_review_fix_rounds);
@@ -2703,6 +2820,10 @@ export function renderCurrentRun(model) {
   if (current.role) roleParts.push(current.role);
   if (current.taskRef) roleParts.push(`task ${current.taskRef}`);
   if (current.model && current.model !== "-") roleParts.push(`model ${current.model}`);
+  if (current.model && current.model !== "-") {
+    if (current.reasoning) roleParts.push(`reasoning ${current.reasoning}`);
+    if (current.variant && current.variant !== current.reasoning) roleParts.push(`variant ${current.variant}`);
+  }
   if (current.session) roleParts.push(current.session);
   if (roleParts.length) out.push(label("role") + roleParts.join(" · "));
 
@@ -2710,8 +2831,12 @@ export function renderCurrentRun(model) {
   if (current.pid != null) {
     status += ` · pid ${current.pid} (alive)`;
   } else {
+    const preparing = typeof current.lastAction === "string" && /^preparing:\s*/.test(current.lastAction)
+      ? current.lastAction.replace(/^preparing:\s*/, "")
+      : null;
+    if (preparing) status += ` · PREPARING ${preparing} (no CLI process yet)`;
     const silenceMs = current.updatedAt && now ? Date.parse(now) - Date.parse(current.updatedAt) : null;
-    if (Number.isFinite(silenceMs) && silenceMs >= 10 * 60 * 1000) {
+    if (!preparing && Number.isFinite(silenceMs) && silenceMs >= 10 * 60 * 1000) {
       status += ` · ⚠ silent ${Math.floor(silenceMs / 60000)}m, no child process`;
     }
   }

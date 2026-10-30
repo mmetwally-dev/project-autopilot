@@ -118,6 +118,104 @@ try {
   check("findings: later plan approval hides earlier findings", !planReport.includes("plan bad"), planReport);
   check("findings: planning NOTE keeps the count", planReport.includes("1 finding"), planReport);
 
+  // ── backlog #6: planning TASK stage labels + revision counter ────────────
+  // The table cell a report row prints at `taskIndex` (ROLE=0, MODEL=1,
+  // TASK=2). Splitting on the table's two-space column gap keeps a run id
+  // containing "spec"/"plan" from satisfying the assertion by accident.
+  const cells = (report, id) => {
+    const line = String(report).split("\n").find((l) => l.includes(id)) || "";
+    return line.trim().split(/\s{2,}/);
+  };
+  const taskCell = (report, id) => cells(report, id)[2] ?? null;
+
+  // standalone: both planning roles keep the historical plan/tasks label.
+  {
+    const model = buildReportModel({
+      state: { mission: "6-standalone", phase: "planning", step: "plan", planningDetection: { framework: "standalone" } },
+      runs: [
+        run({ id: "01-planner-a", dirName: "01-planner-a", role: "planner", taskRef: "standalone-planning-planner", planRevision: 1, started_at: "2026-10-30T01:00:00.000Z" }),
+        run({ id: "02-plan_reviewer-b", dirName: "02-plan_reviewer-b", role: "plan_reviewer", taskRef: "standalone-planning-plan_reviewer", planRevision: 1, decision: "PASS", started_at: "2026-10-30T01:01:00.000Z" }),
+      ],
+      phases: [], policy: { max_plan_revisions: 8 },
+    });
+    const report = renderPlanningStage(model);
+    check("6: standalone planner TASK stays plan/tasks", taskCell(report, "01-planner-a") === "plan/tasks", cells(report, "01-planner-a"));
+    check("6: standalone reviewer TASK stays plan/tasks", taskCell(report, "02-plan_reviewer-b") === "plan/tasks", cells(report, "02-plan_reviewer-b"));
+  }
+
+  // SpecKit: rows show spec/plan/tasks, read from status.json (the first run
+  // has planningStage only on disk, never inline), and the header revision
+  // counter follows state.planReviewRevisions["speckit-stage:*"].
+  {
+    const specDir = path.join(root, "speckit-stage-run");
+    write(path.join(specDir, "status.json"), {
+      status: "completed", run_id: "01-planner-a", role: "planner",
+      taskRef: "speckit-planning-planner", planningStage: "spec",
+      started_at: "2026-10-30T02:00:00.000Z",
+    });
+    const model = buildReportModel({
+      state: {
+        mission: "6-speckit", phase: "planning", step: "plan",
+        planningDetection: { framework: "speckit" },
+        planReviewRevisions: { "speckit-stage:specify": 2, "speckit-stage:plan": 1 },
+      },
+      runs: [
+        run({ dir: specDir, id: "01-planner-a", dirName: "01-planner-a", role: "planner", taskRef: "speckit-planning-planner", started_at: "2026-10-30T02:00:00.000Z" }),
+        run({ id: "02-plan_reviewer-b", dirName: "02-plan_reviewer-b", role: "plan_reviewer", taskRef: "speckit-planning-plan_reviewer", planningStage: "spec", decision: "PASS", started_at: "2026-10-30T02:01:00.000Z" }),
+        run({ id: "03-planner-c", dirName: "03-planner-c", role: "planner", taskRef: "speckit-planning-planner", planningStage: "plan", started_at: "2026-10-30T02:02:00.000Z" }),
+        run({ id: "04-plan_reviewer-d", dirName: "04-plan_reviewer-d", role: "plan_reviewer", taskRef: "speckit-planning-plan_reviewer", planningStage: "review-plan", decision: "PASS", started_at: "2026-10-30T02:03:00.000Z" }),
+        run({ id: "05-planner-e", dirName: "05-planner-e", role: "planner", taskRef: "speckit-planning-planner", planningStage: "tasks", started_at: "2026-10-30T02:04:00.000Z" }),
+      ],
+      phases: [], policy: { max_plan_revisions: 8 },
+    });
+    const report = renderPlanningStage(model);
+    check("6: SpecKit stage read from the run status file", model.runs[0].planningStage === "spec", model.runs[0].planningStage);
+    check("6: SpecKit spec planner TASK", taskCell(report, "01-planner-a") === "spec", cells(report, "01-planner-a"));
+    check("6: SpecKit spec reviewer TASK", taskCell(report, "02-plan_reviewer-b") === "spec", cells(report, "02-plan_reviewer-b"));
+    check("6: SpecKit plan planner TASK", taskCell(report, "03-planner-c") === "plan", cells(report, "03-planner-c"));
+    check("6: SpecKit plan reviewer TASK (gate step form)", taskCell(report, "04-plan_reviewer-d") === "plan", cells(report, "04-plan_reviewer-d"));
+    check("6: SpecKit tasks planner TASK", taskCell(report, "05-planner-e") === "tasks", cells(report, "05-planner-e"));
+    check("6: SpecKit rows are not all plan/tasks", !report.includes("plan/tasks"), report);
+    check("6: SpecKit revision counter reads the gate key", report.includes("2 revisions of 8"), report.split("\n")[0]);
+  }
+
+  // GSD: rows show discuss/research/plan/plan-check, and the revision counter
+  // reads both the GSD state key and the latest stage revision.
+  {
+    const model = buildReportModel({
+      state: {
+        mission: "6-gsd", phase: "planning", step: "gsd-plan-check",
+        planningDetection: { framework: "gsd" },
+        planReviewRevisions: { "gsd-plan:plan:phase-1": 2 },
+        gsdPlanningReview: { stage: "plan-check", revision: 1 },
+      },
+      runs: [
+        run({ id: "01-planner-a", dirName: "01-planner-a", role: "planner", taskRef: "gsd-planning-planner", planningStage: "discuss", started_at: "2026-10-30T03:00:00.000Z" }),
+        run({ id: "02-plan_reviewer-b", dirName: "02-plan_reviewer-b", role: "plan_reviewer", taskRef: "gsd-planning-plan_reviewer", planningStage: "research", decision: "PASS", started_at: "2026-10-30T03:01:00.000Z" }),
+        run({ id: "03-planner-c", dirName: "03-planner-c", role: "planner", taskRef: "gsd-planning-planner", planningStage: "gsd-plan", started_at: "2026-10-30T03:02:00.000Z" }),
+        run({ id: "04-plan_reviewer-d", dirName: "04-plan_reviewer-d", role: "plan_reviewer", taskRef: "gsd-planning-plan_reviewer", planningStage: "plan-check", decision: "PASS", started_at: "2026-10-30T03:03:00.000Z" }),
+      ],
+      phases: [], policy: { max_plan_revisions: 8 },
+    });
+    const report = renderPlanningStage(model);
+    check("6: GSD discuss TASK", taskCell(report, "01-planner-a") === "discuss", cells(report, "01-planner-a"));
+    check("6: GSD research TASK", taskCell(report, "02-plan_reviewer-b") === "research", cells(report, "02-plan_reviewer-b"));
+    check("6: GSD plan TASK (gsd- prefix normalized)", taskCell(report, "03-planner-c") === "plan", cells(report, "03-planner-c"));
+    check("6: GSD plan-check TASK", taskCell(report, "04-plan_reviewer-d") === "plan-check", cells(report, "04-plan_reviewer-d"));
+    check("6: GSD revision counter reads the GSD keys", report.includes("2 revisions of 8"), report.split("\n")[0]);
+
+    const latestOnly = buildReportModel({
+      state: {
+        mission: "6-gsd-latest", phase: "planning", step: "gsd-plan-check",
+        planningDetection: { framework: "gsd" },
+        gsdPlanningReview: { stage: "plan-check", revision: 3 },
+      },
+      runs: [run({ id: "01-planner-a", dirName: "01-planner-a", role: "planner", taskRef: "gsd-planning-planner", planningStage: "plan", started_at: "2026-10-30T04:00:00.000Z" })],
+      phases: [], policy: { max_plan_revisions: 8 },
+    });
+    check("6: GSD falls back to gsdPlanningReview.revision", renderPlanningStage(latestOnly).includes("3 revisions of 8"), renderPlanningStage(latestOnly).split("\n")[0]);
+  }
+
   // ── #12 session total, escalation and retry notes ────────────────────────
   const escDir = path.join(root, "escalated-run");
   write(path.join(escDir, "status.json"), { status: "capped", sessionNumber: 3 });

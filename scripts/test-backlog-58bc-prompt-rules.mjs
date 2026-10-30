@@ -109,7 +109,7 @@ check("read-range: fails when the speckit-phase rule is dropped",
 // ── 4. No inline wording copies: each rule's distinctive wording lives only
 // in its const definition ──
 check("no-inline: reviewer wording lives only in its const definition",
-  countOf(src, "Report ALL findings you can see in ONE pass") === 1);
+  countOf(src, "Report everything you can see in ONE pass") === 1);
 check("no-inline: read-range wording lives only in its const definition",
   countOf(src, "never read a whole large file into context") === 1);
 

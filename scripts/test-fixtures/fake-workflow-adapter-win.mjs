@@ -63,6 +63,8 @@ const PORTED_SCENARIOS = new Set([
   "plan_review_policy_violation",
   "speckit_rereview_infra_retryable", "speckit_rereview_infra_non_retryable",
   "speckit_rereview_output_contract", "speckit_rereview_policy_violation",
+  "speckit_rereview_gate_fail_twice", "speckit_rereview_gate_fail_always",
+  "gsd_plan_check_fail_twice",
   "existing_planning_infra_retryable", "existing_planning_infra_retryable_always",
   "existing_planning_output_contract", "existing_planning_policy_violation",
   "implementer_adapter_retryable_always",
@@ -176,6 +178,24 @@ function reviewerResultCount(role) {
       if (entry.isDirectory()) walk(full);
       else if (entry.name === "result.json") {
         try { if (JSON.parse(fs.readFileSync(full, "utf8")).role === role) found += 1; } catch { /* ignore */ }
+      }
+    }
+  })(path.join(".autopilot"));
+  return found;
+}
+
+// Number of persisted run briefs containing `fragment` — position-specific
+// counters (e.g. how many GSD "plan-check" reviews already ran) that cannot
+// be derived from a role's total result count. Reads only.
+function briefCount(fragment) {
+  let found = 0;
+  (function walk(dir) {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, {withFileTypes: true})) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name === "brief.txt") {
+        try { if (fs.readFileSync(full, "utf8").includes(fragment)) found += 1; } catch { /* ignore */ }
       }
     }
   })(path.join(".autopilot"));
@@ -762,9 +782,22 @@ async function main() {
       } else {
         reviewOutput("PASS", "");
       }
+    } else if (scenario === "speckit_rereview_gate_fail_twice" && reviewerResultCount("plan_reviewer") < 2) {
+      // Item 5: initial gate review and first post-revision re-review FAIL,
+      // then the next re-review PASSes.
+      reviewOutput("FAIL", "gate still needs revision");
+    } else if (scenario === "speckit_rereview_gate_fail_always") {
+      // Item 5 exhaustion: the loop spends the whole revision budget.
+      reviewOutput("FAIL", "gate still needs revision");
+    } else if (scenario === "gsd_plan_check_fail_twice"
+      && prompt.includes('Review the GSD planning stage "plan-check"')
+      && briefCount('Review the GSD planning stage "plan-check"') <= 2) {
+      // Item 5/GSD: first two FINAL plan-check reviews FAIL (the current
+      // brief is already on disk), the third PASSes.
+      reviewOutput("FAIL", "plan-check still needs a revision");
     } else if (scopedDeltaContainsForbiddenMarker(prompt)) {
       reviewOutput("FAIL", "forbidden baseline marker present in scoped delta");
-    } else if (scenario === "plan_review_fail" && !hasFeedbackMarker(prompt)) {
+    } else if (scenario === "plan_review_fail" && !hasFeedbackMarker(prompt) && !prompt.includes("confirmation full review after a scoped")) {
       // Platform parity with fake-workflow-adapter.sh's own plan_review_fail
       // case. Without it this scenario had no branch here at all, so a native
       // Windows run of any suite that selects it (test-planning-review-resume,

@@ -71,6 +71,12 @@ function check(name, cond, detail) {
     noProgressDisplayLabel({taskId: null, taskRef: "standalone-planning-plan_reviewer", framework: "standalone"}) === "Standalone plan reviewer");
   check("label: planning plan_reviewer continuation scope",
     noProgressDisplayLabel({taskId: null, taskRef: "task:standalone:planning:plan_reviewer", framework: "standalone"}) === "Standalone plan reviewer");
+  check("label: gsd planning planner continuation scope",
+    noProgressDisplayLabel({taskId: null, taskRef: "task:gsd:planning:planner", framework: "gsd"}) === "GSD planner");
+  check("label: gsd planning plan_reviewer continuation scope",
+    noProgressDisplayLabel({taskId: null, taskRef: "task:gsd:planning:plan_reviewer", framework: "gsd"}) === "GSD plan reviewer");
+  check("label: gsd framework fallback",
+    noProgressDisplayLabel({taskId: null, taskRef: null, framework: "gsd"}) === "GSD task");
 }
 
 // ── Label: never "task null" ──

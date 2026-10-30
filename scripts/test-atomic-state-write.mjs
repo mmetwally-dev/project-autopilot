@@ -424,7 +424,9 @@ function makeRecordingIo(events) {
   check("autopilot.mjs imports the helper",
     flat.includes(compact('import {atomicWriteFileSync} from "./atomic-state-write.mjs";')));
   check("saveState() calls the helper with the historical serialization",
-    flat.includes(compact("const saveState=s=>{linkDetachedOrchestratorLog(s);atomicWriteFileSync(statePath,JSON.stringify({...s,updatedAt:now()},null,2));};")));
+    flat.includes(compact("atomicWriteFileSync(statePath,JSON.stringify({...s,updatedAt:now()},null,2));")));
+  check("saveState() keeps the state-transition refresh hook around the write",
+    flat.includes(compact('if(prevKey!==null&&prevKey!==nextKey){try{refreshHook(s,"state-transition");}')));
   check("saveState() no longer calls write() directly",
     !flat.includes(compact("const saveState=s=>write(statePath")));
   check("shared write() definition unchanged",

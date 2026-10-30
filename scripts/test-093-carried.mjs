@@ -96,7 +96,7 @@ check("wire: retry path re-passes carriedForwardTasks",
 check("wire: guard collapses non-arrays/empty to null",
   /const carriedForwardTasksValue=\(Array\.isArray\(carriedForwardTasks\)&&carriedForwardTasks\.length>0\?carriedForwardTasks:null\);/.test(autopilotSource));
 check("wire: seed initRun carries carriedForwardTasks",
-  /snapshotBeforeStartedAt:null,snapshotBeforeAt:null,snapshotAfterStartedAt:null,snapshotAfterAt:null,planRevision:planRevisionValue,carriedForwardTasks:carriedForwardTasksValue\}\)/.test(autopilotSource));
+  /snapshotBeforeStartedAt:null,snapshotBeforeAt:null,snapshotAfterStartedAt:null,snapshotAfterAt:null,planRevision:planRevisionValue,carriedForwardTasks:carriedForwardTasksValue(?:,[^}]*)?\}\)/.test(autopilotSource));
 check("wire: onStart re-init keeps the seeded carriedForwardTasks",
   /initRun\(dir,\{pid,role:roleName,runId:id,\.\.\.meta,configuredModel,resolvedModel:null,modelMismatch:null,sessionNumber,snapshotBeforeStartedAt,snapshotBeforeAt,snapshotAfterStartedAt:null,snapshotAfterAt:null,planRevision:planRevisionValue,carriedForwardTasks:carriedForwardTasksValue\}\)/.test(autopilotSource));
 check("wire: makeRelayResult accepts carriedForwardTasks=null",

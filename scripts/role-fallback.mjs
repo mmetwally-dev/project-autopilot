@@ -22,6 +22,7 @@
 export const RATE_LIMITED_FAILURE_CLASS = "RATE_LIMITED";
 export const IDLE_HANG_FAILURE_CLASS = "IDLE_HANG";
 export const PROVIDER_ERROR_FAILURE_CLASS = "PROVIDER_ERROR";
+export const AUTH_REQUIRED_FAILURE_CLASS = "AUTH_REQUIRED";
 
 function isRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -175,8 +176,13 @@ export function skipExhaustedRoleModel({role, roleConfig, activeModel = null, ex
 //   fallback left: run the same run at once on `next` (fresh copy).
 // - `{action: "escalate", reason}` — RATE_LIMITED with no fallback left
 //   (or no fallbacks configured): keep today's escalate-and-stop.
-// - `{action: "none", reason}` — any non-RATE_LIMITED class: no switch,
-//   caller behavior unchanged.
+// - `{action: "none", reason}` — any other class: no switch, caller
+//   behavior unchanged.
+//
+// AUTH_REQUIRED (the CLI is logged out) switches only to a fallback on a
+// DIFFERENT adapter: another model on the same adapter shares the same dead
+// credentials, so it is never retried. With no other-adapter fallback it
+// escalates at once with the log-in instruction.
 //
 // IDLE_HANG with `noOutput: true` (the run produced 0 bytes for its whole
 // life) is treated like RATE_LIMITED for the switch (sticky, next untried
@@ -187,21 +193,24 @@ export function decideRoleFallback({role, roleConfig, activeModel = null, failur
   const name = typeof role === "string" && role ? role : "unknown";
   const silentHang = failureClass === IDLE_HANG_FAILURE_CLASS && noOutput === true;
   const providerError = failureClass === PROVIDER_ERROR_FAILURE_CLASS;
-  if (failureClass !== RATE_LIMITED_FAILURE_CLASS && !silentHang && !providerError) {
+  const authRequired = failureClass === AUTH_REQUIRED_FAILURE_CLASS;
+  if (failureClass !== RATE_LIMITED_FAILURE_CLASS && !silentHang && !providerError && !authRequired) {
     return {
       action: "none",
       reason: `${name}: failure class ${String(failureClass)} is not RATE_LIMITED; no fallback switch`,
     };
   }
   const fallbacks = fallbackListOf(roleConfig);
-  const label = silentHang ? "IDLE_HANG (no output)" : providerError ? "PROVIDER_ERROR" : "RATE_LIMITED";
+  const label = silentHang ? "IDLE_HANG (no output)" : authRequired ? "AUTH_REQUIRED" : providerError ? "PROVIDER_ERROR" : "RATE_LIMITED";
   if (fallbacks.length === 0) {
     if (silentHang) {
       return {action: "none", reason: `${name}: ${label} with no fallbacks configured; normal retry`};
     }
     return {
       action: "escalate",
-      reason: `${name}: ${label} with no fallbacks configured; human intervention required`,
+      reason: authRequired
+        ? `${name}: ${label} with no fallback on another adapter; log in required`
+        : `${name}: ${label} with no fallbacks configured; human intervention required`,
     };
   }
   // Sticky order: the current position is the active entry when it matches
@@ -218,17 +227,23 @@ export function decideRoleFallback({role, roleConfig, activeModel = null, failur
       currentIndex = found === -1 ? 0 : found + 1;
     }
   }
-  const next = fallbacks.slice(currentIndex).find((entry) => !isExhausted(exhausted, entry, policy, nowMs)) ?? null;
+  const from = currentIndex === 0 ? primary : fallbacks[currentIndex - 1];
+  // AUTH_REQUIRED is scoped to the CLI's own credentials, so a fallback model
+  // on the SAME adapter cannot help — only a different adapter (another CLI)
+  // can. Never retry the logged-out CLI, even through a configured sibling.
+  const next = fallbacks.slice(currentIndex).find((entry) =>
+    (!authRequired || entry.adapter !== from?.adapter) && !isExhausted(exhausted, entry, policy, nowMs)) ?? null;
   if (!next) {
     if (silentHang) {
       return {action: "none", reason: `${name}: ${label} with all ${fallbacks.length} fallback(s) exhausted; normal retry`};
     }
     return {
       action: "escalate",
-      reason: `${name}: ${label} with all ${fallbacks.length} fallback(s) exhausted; human intervention required`,
+      reason: authRequired
+        ? `${name}: ${label} with no untried fallback on another adapter; log in required`
+        : `${name}: ${label} with all ${fallbacks.length} fallback(s) exhausted; human intervention required`,
     };
   }
-  const from = currentIndex === 0 ? primary : fallbacks[currentIndex - 1];
   return {
     action: "switch",
     next: copyModelEntry(next),

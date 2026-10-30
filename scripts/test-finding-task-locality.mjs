@@ -35,7 +35,7 @@ import * as standalone from "../adapters/standalone.mjs";
 import * as speckit from "../adapters/speckit.mjs";
 import {
   makeFixtureRepo, makeFixtureBin, makeSpecKitWorkflowOnly, makeClaudeMdBaseline,
-  setScenario, writeConfig, runAutopilot, runAutopilotUntilMarker, readObservedEvents, cleanup,
+  setScenario, writeConfig, runAutopilot, runAutopilotUntilMarker, readObservedEvents, hangStarted, cleanup,
 } from "./test-fixtures/workflow-order-harness.mjs";
 
 const SCENARIO = "finding_task_locality";
@@ -1216,8 +1216,8 @@ async function runFindingCase(label, framework) {
 //
 // Each case runs a 3-task phase whose Implementer writes one ordinal-derived
 // file per task (output/carry-T0/T1/T2.txt — the intra_role_ten mechanism,
-// so every task owns a known file). Run 1 is killed on deadline during the
-// SECOND review hang, with the post-retry state on disk: the record, the
+// so every task owns a known file). Run 1 is killed as soon as the SECOND
+// review hang is visible on disk, with the post-retry state on disk: the record, the
 // wiped-then-replayed roleProgress, and every implementer brief. Run 2
 // resumes the same repo to completion, proving the second review PASSes.
 // ══════════════════════════════════════════════════════════════════════
@@ -1339,14 +1339,19 @@ async function runCarryCase(label, framework, def) {
     }
     if (def.scenario === "carry_forward_gate") writeCarryGateCommand(repo);
 
-    // Run 1: killed on deadline during the second review hang.
+    // Run 1: killed as soon as the second review/verifier hang is visible on
+    // disk (the first launch completed with result.json; the second is still
+    // in progress). timeoutMs stays only as the safety net.
     const killMs = framework === "speckit" ? SPECKIT_KILL_MS : STANDALONE_KILL_MS;
+    const hangRole = def.hangRole === "verify" ? "verifier" : "code_reviewer";
     const run1 = await runAutopilotUntilMarker(repo, binDir, {
-      request, markerFile: path.join(repo, NEVER_MARKER), timeoutMs: killMs,
+      request, markerFile: path.join(repo, NEVER_MARKER),
+      readyWhen: () => hangStarted(repo, hangRole, 2), timeoutMs: killMs,
     });
-    check(`${tag}: run 1 was killed on deadline inside the second ${def.hangRole} hang (no marker, tree confirmed dead)`,
-      run1.killed === true && run1.markerObserved === false && run1.timedOut === true,
-      {killed: run1.killed, markerObserved: run1.markerObserved, timedOut: run1.timedOut});
+    check(`${tag}: run 1 was killed while the second ${def.hangRole} hang was in progress (ready observed, no marker, tree confirmed dead)`,
+      run1.readyObserved === true && run1.killed === true && run1.terminationConfirmed === true && run1.markerObserved === false,
+      {readyObserved: run1.readyObserved, killed: run1.killed, terminationConfirmed: run1.terminationConfirmed,
+        markerObserved: run1.markerObserved, timedOut: run1.timedOut});
 
     const state = readState(repo);
     const key = `${framework}-phase:0`;
@@ -1437,7 +1442,10 @@ async function runCarryCrashCase() {
     // Empty marker: crash on the first carried task (T1).
     fs.writeFileSync(path.join(repo, ".autopilot", ".autopilot-test-crash-after-carry-prep"), "");
 
-    // Run 1: the retry carries T1 and crashes before committing it.
+    // Run 1: the retry carries T1 and crashes before committing it. This is
+    // a scheduled crash (the orchestrator's own marker check exits 137 in
+    // seconds), not a hang, so there is no readyWhen to observe here and the
+    // NEVER_MARKER only keeps the marker trigger out of the way.
     const run1 = await runAutopilotUntilMarker(repo, binDir, {
       request: CARRY_REQUEST, markerFile: path.join(repo, NEVER_MARKER), timeoutMs: SPECKIT_KILL_MS,
     });
@@ -1456,12 +1464,17 @@ async function runCarryCrashCase() {
       !!progress1 && progress1.completedTaskIds.length === 0 && progress1.currentTaskId === ids[0],
       {completedTaskIds: progress1?.completedTaskIds, currentTaskId: progress1?.currentTaskId});
 
-    // Run 2: killed on deadline during the second review hang.
+    // Run 2: killed as soon as the second review hang is visible on disk.
+    // Run 1 never reached a second review (it crashed in the carry prep), so
+    // the hang is still the second code_reviewer launch overall.
     const run2 = await runAutopilotUntilMarker(repo, binDir, {
-      request: CARRY_REQUEST, markerFile: path.join(repo, NEVER_MARKER), timeoutMs: SPECKIT_KILL_MS,
+      request: CARRY_REQUEST, markerFile: path.join(repo, NEVER_MARKER),
+      readyWhen: () => hangStarted(repo, "code_reviewer", 2), timeoutMs: SPECKIT_KILL_MS,
     });
-    check(`${tag}: run 2 was killed inside the second review hang`,
-      run2.killed === true && run2.timedOut === true, {killed: run2.killed, timedOut: run2.timedOut});
+    check(`${tag}: run 2 was killed while the second review hang was in progress (ready observed, tree confirmed dead)`,
+      run2.readyObserved === true && run2.killed === true && run2.terminationConfirmed === true,
+      {readyObserved: run2.readyObserved, killed: run2.killed, terminationConfirmed: run2.terminationConfirmed,
+        timedOut: run2.timedOut});
     state = readState(repo);
     record = state?.[FINDING_TASKS_STATE_KEY]?.["speckit-phase:0"];
     const progress2 = state[CHECKPOINT_STATE_KEY]?.roleProgress?.implementer;
@@ -1781,10 +1794,13 @@ async function runOverlapBriefCase() {
     writeConfig(repo, {planningFramework: "speckit"});
     setScenario(repo, "carry_forward_overlap");
     const run1 = await runAutopilotUntilMarker(repo, binDir, {
-      request: CARRY_REQUEST, markerFile: path.join(repo, NEVER_MARKER), timeoutMs: SPECKIT_KILL_MS,
+      request: CARRY_REQUEST, markerFile: path.join(repo, NEVER_MARKER),
+      readyWhen: () => hangStarted(repo, "code_reviewer", 2), timeoutMs: SPECKIT_KILL_MS,
     });
-    check(`${tag}: run 1 was killed inside the second review hang`,
-      run1.killed === true && run1.timedOut === true, {killed: run1.killed, timedOut: run1.timedOut});
+    check(`${tag}: run 1 was killed while the second review hang was in progress (ready observed, tree confirmed dead)`,
+      run1.readyObserved === true && run1.killed === true && run1.terminationConfirmed === true,
+      {readyObserved: run1.readyObserved, killed: run1.killed, terminationConfirmed: run1.terminationConfirmed,
+        timedOut: run1.timedOut});
     const state = readState(repo);
     const record = state?.[FINDING_TASKS_STATE_KEY]?.["speckit-phase:0"];
     check(`${tag}: the record is persisted`, !!record);

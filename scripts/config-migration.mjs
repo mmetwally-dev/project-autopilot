@@ -226,8 +226,8 @@ function migrateLegacyRuntime(input, existingMeta = {}) {
   // the policy invalid — a wrap-up at/above its cap, or a non-planner role cap
   // at/above the global ceiling. Degrade the offending value to its default so
   // migrateConfig never returns a config validatePolicyConfig rejects (the
-  // comparisons mirror validatePolicyConfig exactly, planner exempt from the
-  // global-ceiling check like it is there).
+  // comparisons mirror validatePolicyConfig exactly, planner and plan_reviewer
+  // exempt from the global-ceiling check like they are there).
   const effectiveCeiling = Number.isInteger(out.policy.per_task_max_tokens) && out.policy.per_task_max_tokens > 0
     ? out.policy.per_task_max_tokens
     : PER_TASK_MAX_TOKENS_DEFAULT;
@@ -239,7 +239,7 @@ function migrateLegacyRuntime(input, existingMeta = {}) {
   for (const role of reviewRoles) {
     const roleCaps = out.policy.caps?.[role];
     if (!roleCaps || typeof roleCaps !== "object" || Array.isArray(roleCaps)) continue;
-    if (role !== "planner") {
+    if (role !== "planner" && role !== "plan_reviewer") {
       const capTokens = Number(roleCaps.max_tokens);
       if (Number.isInteger(capTokens) && capTokens > 0 && capTokens >= effectiveCeiling) {
         roleCaps.max_tokens = PER_ROLE_CAPS_DEFAULT[role].maxTokens;

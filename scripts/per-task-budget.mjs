@@ -104,7 +104,9 @@ export const PER_ROLE_CAPS_DEFAULT = {
   // Backlog #59(b): planner raised with the implementer (operator decision
   // 2026-10-10; rarely reaches the limit, and a cut re-reads uncached).
   planner: {maxTurns: 30, maxTokens: 200_000, extraSessions: 2},
-  plan_reviewer: {maxTurns: 30, maxTokens: 150_000, extraSessions: 2},
+  // Operator decision 2026-10-28: 4, because with working hand-off notes two 30-turn sessions cost less than one long session and long full reviews were stopping missions at 2.
+  // Backlog #8: 250K so a full plan re-check finishes in one session on a large plan instead of splitting at ~135K.
+  plan_reviewer: {maxTurns: 30, maxTokens: 250_000, extraSessions: 4},
   code_reviewer: {maxTurns: 22, maxTokens: 150_000, extraSessions: 2},
   // Backlog #59(b): the verifier was cut at 22 in test mission 048 trial 3
   // and re-ran in full (392K priced) — raised with the implementer.
@@ -114,11 +116,12 @@ export const PER_ROLE_CAPS_DEFAULT = {
 // Per-role wrap-up token thresholds (mission 031 Phase 1 task 1.1; mission
 // 044 Phase 1 task 1.3: per-turn values).
 // Must be strictly below the role's maxTokens so wrap-up can fire before the cap.
-// Non-planner review roles use 135K (~one turn headroom below 150K);
-// planner uses 180K (~one turn headroom below 200K).
+// planner uses 180K (~one turn headroom below 200K), plan_reviewer uses 225K
+// (~one turn headroom below its 250K cap, backlog #8); the other review roles
+// use 135K (~one turn headroom below 150K).
 export const PER_ROLE_WRAPUP_TOKENS_DEFAULT = {
   planner: 180_000,
-  plan_reviewer: 135_000,
+  plan_reviewer: 225_000,
   code_reviewer: 135_000,
   verifier: 135_000,
 };
@@ -832,10 +835,11 @@ export function clearNoProgress(state, scope) {
 //   - anything else non-empty => `tasks ${taskRef}` for multi-token refs,
 //     else `task ${taskRef}`.
 //   - missing/empty taskRef => `${Prefix} task` (framework fallback).
-// Prefix is "SpecKit" for framework "speckit" (case-insensitive), else
-// "Standalone".
+// Prefix is "SpecKit" for framework "speckit", "GSD" for "gsd"
+// (case-insensitive), else "Standalone".
 export function noProgressDisplayLabel({taskId, taskRef, framework} = {}) {
-  const prefix = String(framework ?? "").toLowerCase() === "speckit" ? "SpecKit" : "Standalone";
+  const fw = String(framework ?? "").toLowerCase();
+  const prefix = fw === "speckit" ? "SpecKit" : fw === "gsd" ? "GSD" : "Standalone";
   const id = taskId === null || taskId === undefined ? "" : String(taskId).trim();
   if (id && id.toLowerCase() !== "null" && id.toLowerCase() !== "undefined") return `task ${id}`;
   const ref = taskRef === null || taskRef === undefined ? "" : String(taskRef).trim();

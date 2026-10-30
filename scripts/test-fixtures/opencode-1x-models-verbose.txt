@@ -1,0 +1,4 @@
+opencode/fake-model
+{"name":"Fake OpenCode Model","variants":{"low":{},"medium":{},"high":{}}}
+opencode/another-model
+{"name":"Another OpenCode Model","variants":{"low":{},"high":{}}}

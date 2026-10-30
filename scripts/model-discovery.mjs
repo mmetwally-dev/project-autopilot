@@ -5,12 +5,44 @@ import {resolveAdapterTransport} from './adapter-transport.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {
+  isOpenCodeAdapter,
+  openCodeHelpArgs,
+  cachedOpenCodeGeneration,
+  rememberOpenCodeGeneration
+} from './opencode-generation.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOCUMENTED_MODELS_DIR = path.join(__dirname, '..', 'adapters', 'documented-models');
 const DOCUMENTED_EFFORT_DIR = path.join(__dirname, '..', 'adapters', 'documented-effort');
 
+// Short probe limit for --help/--version capability detection. Model-list
+// discovery is a different, slower call (a real `opencode models --verbose`
+// can take >10 s on a busy machine and print thousands of lines), so it gets
+// its own, more realistic limit below.
 export const DISCOVERY_TIMEOUT_MS = 10_000;
+export const MODEL_DISCOVERY_TIMEOUT_MS = 30_000;
+
+// Tests (and operators with unusually slow providers) can override the
+// model-list limit. Read at call time so tests can set it after importing
+// this module.
+export function modelDiscoveryTimeoutMs(){
+  const raw = Number(process.env.AP_MODEL_DISCOVERY_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : MODEL_DISCOVERY_TIMEOUT_MS;
+}
+
+export function modelDiscoveryTimeoutLabel(ms = modelDiscoveryTimeoutMs()){
+  const seconds = ms / 1000;
+  return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)} s`;
+}
+
+// Backlog #5: a cold first start (opencode rebuilding its data for a new
+// project) can exceed the normal model-list budget even though the CLI is
+// working. Setup/config retry that timed-out probe ONCE with twice the
+// effective budget; the env override still scales both attempts.
+export function modelDiscoveryRetryTimeoutMs(){
+  return modelDiscoveryTimeoutMs() * 2;
+}
 
 function cleanLines(text){
   return String(text||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
@@ -133,14 +165,22 @@ function flagFromHelp(text, aliases){
 export async function discoverCapabilities(meta, deadline){
   if(!deadline) deadline = newDeadline();
   const help=await collectHelpText(meta, deadline);
+  const openCodeGeneration = isOpenCodeAdapter(meta)
+    ? rememberOpenCodeGeneration(meta, help)
+    : null;
+  // OpenCode 2.x has no reasoning/effort flag: the level is a model suffix.
+  // Its help names --model's value as "provider/model#variant" instead.
+  const openCodeModelSuffix = openCodeGeneration === "2";
   const modelFlag = flagFromHelp(help, ['--model','-m']);
   // Try the adapter's OWN declared effort_flag first (e.g. OpenCode's is
   // "--variant" — its reasoning/effort levels ARE its model variants, there
   // is no separate "--effort" flag), then the two generic literal names as
   // a fallback for adapters that don't declare one.
-  const effortFlag = meta.effort_mode === 'config'
-    ? flagFromHelp(help, ['--config'])
-    : flagFromHelp(help, [meta.effort_flag, '--effort', '--reasoning-effort'].filter(Boolean));
+  const effortFlag = openCodeModelSuffix
+    ? null
+    : meta.effort_mode === 'config'
+      ? flagFromHelp(help, ['--config'])
+      : flagFromHelp(help, [meta.effort_flag, '--effort', '--reasoning-effort'].filter(Boolean));
   const variantFlagRaw = flagFromHelp(help, ['--variant']);
   // If the flag just detected for "variant" is the exact same literal flag
   // already claimed by "effort" above (OpenCode's case once help text from
@@ -159,16 +199,26 @@ export async function discoverCapabilities(meta, deadline){
     const flag = String(arg).replace(/^.*?--/, "--");
     return help.includes(flag);
   });
-  return {
+  const capabilities = {
     model: !!modelFlag,
     model_flag: modelFlag,
-    effort: !!effortFlag,
+    effort: openCodeModelSuffix ? !!modelFlag : !!effortFlag,
     effort_flag: effortFlag,
-    variant: !!variantFlag,
-    variant_flag: variantFlag,
+    variant: openCodeModelSuffix ? false : !!variantFlag,
+    variant_flag: openCodeModelSuffix ? null : variantFlag,
     resume: resumeSupported,
     discovery: meta.model_discovery || 'manual'
   };
+  if (isOpenCodeAdapter(meta)) {
+    capabilities.opencode_generation = openCodeGeneration;
+    if (openCodeModelSuffix) {
+      capabilities.effort_mode = 'model_suffix';
+      capabilities.standalone = true;
+    } else {
+      capabilities.standalone = false;
+    }
+  }
+  return capabilities;
 }
 
 export async function discoverAdapter(meta){
@@ -258,20 +308,83 @@ export function parseOpenCodeVerboseOutput(text){
   return out;
 }
 
-async function discoverFromOpenCode(binary, deadline){
-  if(!deadline) deadline = newDeadline();
-  let r=await spawnWithDeadline(binary,['models','--verbose'],{encoding:'utf8',stdio:['ignore','pipe','pipe']}, deadline);
+// OpenCode 2.x's machine-readable catalog: `api GET /api/model` returns
+// {location, data:[{providerID,id,name,variants:[{id,settings}],status,enabled}]}.
+// The per-model variant ids are the reasoning/effort levels (the same
+// dimension 1.x reports through `models --verbose`). A disabled or
+// non-active entry is not selectable, mirroring the usable-only 1.x list.
+export function parseOpenCodeApiModels(text){
+  let parsed;
+  try{ parsed=JSON.parse(String(text||'').trim()); }catch{ return []; }
+  const data=Array.isArray(parsed) ? parsed : parsed?.data;
+  if(!Array.isArray(data)) return [];
+  const out=[];
+  const seen=new Set();
+  for(const model of data){
+    if(!model || typeof model!=='object') continue;
+    const provider=typeof model.providerID==='string' ? model.providerID : '';
+    const modelId=typeof model.id==='string' ? model.id : (typeof model.modelID==='string' ? model.modelID : '');
+    if(!provider || !modelId) continue;
+    if(model.enabled === false) continue;
+    if(typeof model.status === 'string' && model.status !== 'active') continue;
+    const id=`${provider}/${modelId}`;
+    if(seen.has(id)) continue;
+    seen.add(id);
+    const variants=Array.isArray(model.variants)
+      ? model.variants.map(v=>typeof v==='string' ? v : v?.id).filter(Boolean)
+      : [];
+    out.push({id,label:model.name||model.modelID||modelId,reasoning:variants,variants});
+  }
+  return out;
+}
+
+async function resolveOpenCodeGeneration(meta, deadline){
+  const cached=cachedOpenCodeGeneration(meta);
+  if(cached !== undefined) return {generation:cached, timedOut:false};
+  const r=await spawnWithDeadline(meta.binary,openCodeHelpArgs(meta),{encoding:'utf8',stdio:['ignore','pipe','pipe']}, deadline);
+  if(r.timedOut) return {generation:null, timedOut:true};
+  return {generation:rememberOpenCodeGeneration(meta, `${r.stdout||''}\n${r.stderr||''}`), timedOut:false};
+}
+
+async function discoverFromOpenCode(meta, deadline){
+  if(!deadline) deadline = newDeadline(modelDiscoveryTimeoutMs());
+  const generation=await resolveOpenCodeGeneration(meta, deadline);
+  if(generation.timedOut) return {items:[], status:'timeout'};
+  let timedOut=false;
+  if(generation.generation === '2'){
+    let r=await spawnWithDeadline(meta.binary,['api','GET','/api/model'],{encoding:'utf8',stdio:['ignore','pipe','pipe']}, deadline);
+    if(r.timedOut) timedOut=true;
+    if(r.status===0 && r.stdout){
+      const items=parseOpenCodeApiModels(r.stdout);
+      if(items.length) return {items, status:'reported'};
+    }
+    if(remaining(deadline) <= 0) return {items:[], status:timedOut ? 'timeout' : 'unsupported'};
+    // 2.x `models --verbose` no longer exists; the plain list still gives
+    // ids, so it remains the last-resort fallback (levels unavailable).
+    r=await spawnWithDeadline(meta.binary,['models'],{encoding:'utf8',stdio:['ignore','pipe','pipe']}, deadline);
+    if(r.timedOut) timedOut=true;
+    if(r.status!==0 || !r.stdout) return {items:[], status:timedOut ? 'timeout' : 'unsupported'};
+    const items=unique(cleanLines(r.stdout)
+      .filter(line=>/^[A-Za-z0-9._-]+\/[A-Za-z0-9._:@+-]+(?:\s|$)/.test(line))
+      .map(line=>line.split(/\s+/)[0]))
+      .map(id=>({id,label:id,reasoning:[],variants:discoverOpenCodeVariants(id)}));
+    return {items, status:items.length ? 'reported' : 'unsupported'};
+  }
+  let r=await spawnWithDeadline(meta.binary,['models','--verbose'],{encoding:'utf8',stdio:['ignore','pipe','pipe']}, deadline);
+  if(r.timedOut) timedOut=true;
   if(r.status===0 && r.stdout){
     const verbose=parseOpenCodeVerboseOutput(r.stdout);
-    if(verbose.length) return verbose;
+    if(verbose.length) return {items:verbose, status:'reported'};
   }
-  if(remaining(deadline) <= 0) return [];
-  r=await spawnWithDeadline(binary,['models'],{encoding:'utf8',stdio:['ignore','pipe','pipe']}, deadline);
-  if(r.status!==0 || !r.stdout) return [];
-  return unique(cleanLines(r.stdout)
+  if(remaining(deadline) <= 0) return {items:[], status:timedOut ? 'timeout' : 'unsupported'};
+  r=await spawnWithDeadline(meta.binary,['models'],{encoding:'utf8',stdio:['ignore','pipe','pipe']}, deadline);
+  if(r.timedOut) timedOut=true;
+  if(r.status!==0 || !r.stdout) return {items:[], status:timedOut ? 'timeout' : 'unsupported'};
+  const items=unique(cleanLines(r.stdout)
     .filter(line=>/^[A-Za-z0-9._-]+\/[A-Za-z0-9._:@+-]+(?:\s|$)/.test(line))
     .map(line=>line.split(/\s+/)[0]))
     .map(id=>({id,label:id,reasoning:[],variants:discoverOpenCodeVariants(id)}));
+  return {items, status:items.length ? 'reported' : 'unsupported'};
 }
 
 
@@ -280,12 +393,14 @@ export function parseAntigravityModels(text){
 }
 
 async function discoverAntigravityModels(binary, deadline){
-  if(!deadline) deadline = newDeadline();
+  if(!deadline) deadline = newDeadline(modelDiscoveryTimeoutMs());
   const transport=resolveAdapterTransport({driver:adapterDriver('antigravity'),request:{binary,args:['models']}});
-  if(!transport.available) return [];
+  if(!transport.available) return {items:[], status:'unsupported'};
   const r=await spawnWithDeadline(transport.invocation.binary,transport.invocation.args,{encoding:'utf8',stdio:['ignore','pipe','pipe']}, deadline);
-  if(r.status!==0 || !r.stdout) return [];
-  return parseAntigravityOutput(r.stdout);
+  if(r.timedOut) return {items:[], status:'timeout'};
+  if(r.status!==0 || !r.stdout) return {items:[], status:'unsupported'};
+  const items=parseAntigravityOutput(r.stdout);
+  return {items, status:items.length ? 'reported' : 'unsupported'};
 }
 
 function parseAntigravityOutput(text){
@@ -316,14 +431,20 @@ function parseAntigravityOutput(text){
 }
 
 async function discoverFromCursor(binary, deadline){
-  if(!deadline) deadline = newDeadline();
+  if(!deadline) deadline = newDeadline(modelDiscoveryTimeoutMs());
+  let timedOut=false;
   let r=await spawnWithDeadline(binary,['models'],{encoding:'utf8',stdio:['ignore','pipe','pipe']}, deadline);
-  if(r.status!==0 && remaining(deadline) > 0) r=await spawnWithDeadline(binary,['--list-models'],{encoding:'utf8',stdio:['ignore','pipe','pipe']}, deadline);
-  if(r.status!==0 || !r.stdout) return [];
-  return unique(cleanLines(r.stdout)
+  if(r.timedOut) timedOut=true;
+  if(r.status!==0 && remaining(deadline) > 0){
+    r=await spawnWithDeadline(binary,['--list-models'],{encoding:'utf8',stdio:['ignore','pipe','pipe']}, deadline);
+    if(r.timedOut) timedOut=true;
+  }
+  if(r.status!==0 || !r.stdout) return {items:[], status:timedOut ? 'timeout' : 'unsupported'};
+  const items=unique(cleanLines(r.stdout)
     .filter(line=>!/^(available|models|model|name|id|usage|help|press|cursor agent|available models|model list)\b/i.test(line))
     .map(line=>line.replace(/^[-*•]\s*/,'').split(/\s{2,}|\t/)[0].trim())
     .filter(line=>line && line.length<160));
+  return {items, status:items.length ? 'reported' : 'unsupported'};
 }
 
 function normalizeCodexModels(result){
@@ -336,7 +457,8 @@ function normalizeCodexModels(result){
   })).filter(m=>m.id);
 }
 
-function discoverFromCodexAppServer(binary){
+function discoverFromCodexAppServer(binary, deadline){
+  if(!deadline) deadline = newDeadline(modelDiscoveryTimeoutMs());
   return new Promise(resolve => {
     const child = spawnAgent(binary,['app-server','--stdio'],{encoding:'utf8',stdio:['pipe','pipe','ignore']});
     let done = false;
@@ -344,8 +466,8 @@ function discoverFromCodexAppServer(binary){
       if(done) return;
       done = true;
       killTree(child);
-      resolve([]);
-    }, 7000);
+      resolve({items:[], status:'timeout'});
+    }, remaining(deadline));
     const finish = (result) => {
       if(done) return;
       done = true;
@@ -363,15 +485,18 @@ function discoverFromCodexAppServer(binary){
         try{ const msg=JSON.parse(line); replies.push(msg); }catch{}
       }
       const modelReply=replies.find(x=>x?.id===2 && x?.result);
-      if(modelReply) finish(normalizeCodexModels(modelReply));
+      if(modelReply){
+        const items=normalizeCodexModels(modelReply);
+        finish({items, status:items.length ? 'reported' : 'unsupported'});
+      }
     });
-    child.on('error',()=>finish([]));
-    child.on('exit',()=>{ if(!replies.find(x=>x?.id===2)) finish([]); });
+    child.on('error',()=>finish({items:[], status:'error'}));
+    child.on('exit',()=>{ if(!replies.find(x=>x?.id===2)) finish({items:[], status:'unsupported'}); });
     try{
       child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{clientInfo:{name:'project-autopilot',version:'10.2.0'}}})+'\n');
       child.stdin.write(JSON.stringify({jsonrpc:'2.0',method:'initialized',params:{}})+'\n');
       child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:2,method:'model/list',params:{includeHidden:false}})+'\n');
-    }catch{ finish([]); }
+    }catch{ finish({items:[], status:'unsupported'}); }
   });
 }
 
@@ -380,17 +505,30 @@ function discoverFromCodexAppServer(binary){
  * Empty means no supported machine-readable discovery is available.
  * Autopilot never invents a catalog.
  * The return value is Promise<array|string> because Codex discovery is async.
+ * The array carries a non-enumerable `status` side field
+ * ("reported"|"timeout"|"unsupported"|"error") so callers can tell a slow
+ * model list from a CLI that genuinely has no machine-readable one.
  */
-export async function discoverModelCatalog(meta){
+function catalogStatus(items, status){
+  Object.defineProperty(items, 'status', {value:status, enumerable:false, configurable:true});
+  return items;
+}
+
+export async function discoverModelCatalog(meta, {timeoutMs = modelDiscoveryTimeoutMs()} = {}){
   const binary=meta.binary; const kind=meta.model_discovery;
-  const deadline = newDeadline();
+  const deadline = newDeadline(timeoutMs);
   try{
-    if(kind==='opencode_models') return await discoverFromOpenCode(binary, deadline);
-    if(kind==='cursor_models') return (await discoverFromCursor(binary, deadline)).map(id=>({id,label:id,reasoning:[],variants:[]}));
-    if(kind==='codex_app_server') return await discoverFromCodexAppServer(binary);
-    if(kind==='antigravity_models') return await discoverAntigravityModels(binary, deadline);
-  }catch{}
-  return [];
+    let result;
+    if(kind==='opencode_models') result=await discoverFromOpenCode(meta, deadline);
+    else if(kind==='cursor_models'){
+      const cursor=await discoverFromCursor(binary, deadline);
+      result={items:cursor.items.map(id=>({id,label:id,reasoning:[],variants:[]})), status:cursor.status};
+    }
+    else if(kind==='codex_app_server') result=await discoverFromCodexAppServer(binary, deadline);
+    else if(kind==='antigravity_models') result=await discoverAntigravityModels(binary, deadline);
+    else result={items:[], status:'unsupported'};
+    return catalogStatus(result.items, result.status);
+  }catch{ return catalogStatus([], 'error'); }
 }
 
 export async function discoverModels(meta){

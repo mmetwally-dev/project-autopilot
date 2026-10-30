@@ -749,6 +749,10 @@ export function toRuntimeConfig(layout = {}) {
   else if (has(legacyCapabilities.verification || {}, "browser")) verification.browser = legacyCapabilities.verification.browser;
   if (has(tests, "require_browser")) verification.require_browser = tests.require_browser;
   else if (has(legacyCapabilities.verification || {}, "require_browser")) verification.require_browser = legacyCapabilities.verification.require_browser;
+  if (has(tests, "e2e")) verification.e2e = tests.e2e;
+  else if (has(legacyCapabilities.verification || {}, "e2e")) verification.e2e = legacyCapabilities.verification.e2e;
+  if (has(tests, "e2e_setup_pending")) verification.e2e_setup_pending = tests.e2e_setup_pending;
+  else if (has(legacyCapabilities.verification || {}, "e2e_setup_pending")) verification.e2e_setup_pending = legacyCapabilities.verification.e2e_setup_pending;
   if (Object.keys(verification).length) capabilities.verification = verification;
   if (Object.keys(capabilities).length) out.capabilities = capabilities;
 
@@ -885,6 +889,8 @@ export function toNewLayoutConfig(runtimeConfig = {}, schemaRef = "./config.sche
   const verification = isObject(capabilities.verification) ? capabilities.verification : {};
   if (has(verification, "browser")) layout.tests.browser = verification.browser;
   if (has(verification, "require_browser")) layout.tests.require_browser = verification.require_browser;
+  if (has(verification, "e2e")) layout.tests.e2e = verification.e2e;
+  if (has(verification, "e2e_setup_pending")) layout.tests.e2e_setup_pending = verification.e2e_setup_pending;
   if (has(planning, "verify_denylist")) layout.tests.verify_denylist = planning.verify_denylist;
 
   // safety

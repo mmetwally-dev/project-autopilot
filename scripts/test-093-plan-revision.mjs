@@ -11,6 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { initRun } from "./run-observability.mjs";
+import { readRunMeta } from "./run-history.mjs";
 
 const failures = [];
 const check = (name, cond, extra) => {
@@ -63,6 +64,17 @@ for (const [label, value] of bad) {
   check(`bad: ${JSON.stringify(value ?? null)} -> null`, st.planRevision === null, st.planRevision);
 }
 
+// ── 3b. planningStage is recorded for stage-based planning runs ──────────
+{
+  const dirStage = path.join(root, "stage");
+  initRun(dirStage, { role: "planner", runId: "run-stage", planningStage: "spec" });
+  check("stage: planningStage persisted on status.json", readStatus(dirStage).planningStage === "spec", readStatus(dirStage).planningStage);
+  check("stage: readRunMeta exposes planningStage", readRunMeta(dirStage, "run-stage").planningStage === "spec", readRunMeta(dirStage, "run-stage").planningStage);
+  const dirNoStage = path.join(root, "no-stage");
+  initRun(dirNoStage, { role: "planner", runId: "run-no-stage" });
+  check("stage: non-stage runs record null", readStatus(dirNoStage).planningStage === null, readStatus(dirNoStage).planningStage);
+}
+
 // ── 4. finalizeRun keeps planRevision ────────────────────────────────────
 {
   const dirFin = path.join(root, "fin");
@@ -89,7 +101,7 @@ check("wire: retry path re-passes planRevision",
 check("wire: guard collapses non-integers to null",
   /const planRevisionValue=\(Number\.isInteger\(planRevision\)&&planRevision>=0\?planRevision:null\);/.test(autopilotSource));
 check("wire: seed initRun carries planRevision",
-  /snapshotBeforeStartedAt:null,snapshotBeforeAt:null,snapshotAfterStartedAt:null,snapshotAfterAt:null,planRevision:planRevisionValue,carriedForwardTasks:carriedForwardTasksValue\}\)/.test(autopilotSource));
+  /snapshotBeforeStartedAt:null,snapshotBeforeAt:null,snapshotAfterStartedAt:null,snapshotAfterAt:null,planRevision:planRevisionValue,carriedForwardTasks:carriedForwardTasksValue(?:,[^}]*)?\}\)/.test(autopilotSource));
 check("wire: onStart re-init keeps the seeded planRevision",
   /initRun\(dir,\{pid,role:roleName,runId:id,\.\.\.meta,configuredModel,resolvedModel:null,modelMismatch:null,sessionNumber,snapshotBeforeStartedAt,snapshotBeforeAt,snapshotAfterStartedAt:null,snapshotAfterAt:null,planRevision:planRevisionValue,carriedForwardTasks:carriedForwardTasksValue\}\)/.test(autopilotSource));
 check("wire: makeRelayResult accepts planRevision=null",
@@ -105,9 +117,9 @@ check("site: runStandalonePlanning restores the revision from state",
 const plannerSite = autopilotSource.indexOf(`relayAsync("planner",prompt,c,s,{resume:false,capEnabled:true,taskRef:'standalone-planning-planner',planRevision:revision})`);
 check("site: planner run carries planRevision:revision", plannerSite !== -1, plannerSite);
 check("site: plan_reviewer run carries planRevision:revision",
-  /relayAsync\("plan_reviewer",reviewPrompt,c,s,\{readOnly:true,review:true,resume:false,capEnabled:true,taskRef:'standalone-planning-plan_reviewer',planRevision:revision\}\)/.test(autopilotSource));
+  /relayAsync\("plan_reviewer",reviewPrompt,c,s,\{readOnly:true,review:true,resume:false,capEnabled:true,taskRef:'standalone-planning-plan_reviewer',planRevision:revision,[^\n]*\}\)/.test(autopilotSource));
 check("site: reviewer retry lambda carries planRevision:revision",
-  /\(\)=>relayAsync\("plan_reviewer",reviewPrompt,c,s,\{readOnly:true,review:true,resume:false,capEnabled:true,taskRef:'standalone-planning-plan_reviewer',planRevision:revision\}\)/.test(autopilotSource));
+  /\(\)=>relayAsync\("plan_reviewer",reviewPrompt,c,s,\{readOnly:true,review:true,resume:false,capEnabled:true,taskRef:'standalone-planning-plan_reviewer',planRevision:revision,[^\n]*\}\)/.test(autopilotSource));
 // All three sites must sit inside runStandalonePlanning (4747..5264).
 {
   const fnStart = autopilotSource.indexOf("async function runStandalonePlanning(");
@@ -115,15 +127,29 @@ check("site: reviewer retry lambda carries planRevision:revision",
   check("site: planner/reviewer sites are inside runStandalonePlanning",
     fnStart !== -1 && fnEnd > fnStart && plannerSite > fnStart && plannerSite < fnEnd, { fnStart, fnEnd, plannerSite });
 }
-// Null elsewhere: the non-standalone planning paths never pass planRevision.
-for (const [label, pattern] of [
-  ["speckit planner", `relayAsync("planner",prompt,c,s,{readOnly:false,resume})`],
-  ["gsd review", `relayAsync("plan_reviewer",`],
+// The non-standalone planning paths now split by role. SpecKit gate re-review
+// FAILs and the GSD final plan-check loop through further Planner revisions, so
+// those two planner sites DO carry planRevision (their function signatures
+// default it to null for the first, non-revision run). The three plan_reviewer
+// sites still never pass it. Locate each call by its stable call prefix and
+// fail loudly if a site disappears rather than passing vacuously.
+for (const [label, needle, expectRevision] of [
+  ["speckit planner", `relay("planner",task,c,s,{resume:false,capEnabled:true,taskRef,planRevision})`, true],
+  ["speckit gate plan_reviewer", `relay("plan_reviewer",\`\${prompt}\\n\\n\${planReviewerContextText()}\`,c,s,{readOnly:true,review:true,resume:false,...opts,capEnabled:true,taskRef:planReviewerTaskRef})`, false],
+  ["existing-planning plan_reviewer", `relayAsync("plan_reviewer",buildPrompt(),c,s,{readOnly:true,review:true,capEnabled:true,taskRef})`, false],
+  ["gsd planner", `relayAsync("planner",prompt,c,s,{readOnly:false,resume,capEnabled:true,taskRef,planRevision})`, true],
+  ["gsd plan_reviewer", `relayAsync("plan_reviewer",prompt,c,s,{readOnly:true,review:true,capEnabled:true,taskRef})`, false],
 ]) {
-  const idx = autopilotSource.indexOf(pattern);
-  const line = idx === -1 ? -1 : autopilotSource.slice(idx, Math.min(autopilotSource.length, idx + 400));
-  check(`null-elsewhere: ${label} passes no planRevision`, idx === -1 || !/planRevision/.test(line), line.slice(0, 160));
+  const idx = autopilotSource.indexOf(needle);
+  const end = idx === -1 ? -1 : autopilotSource.indexOf("\n", idx);
+  const call = idx === -1 || end === -1 ? "" : autopilotSource.slice(idx, end);
+  check(`null-elsewhere: ${label} site is present`, idx !== -1, { idx });
+  check(`null-elsewhere: ${label} ${expectRevision ? "passes" : "passes no"} planRevision`, call.length > 0 && (expectRevision ? /planRevision/.test(call) : !/planRevision/.test(call)), call.slice(0, 200));
 }
+check("signature: runPlanningPhase defaults planRevision to null",
+  autopilotSource.includes("async function runPlanningPhase(c, step, request, s, planRevision=null)"));
+check("signature: gsdPlanningStage destructuring defaults planRevision to null",
+  /async function gsdPlanningStage\(c,s,\{[^}]*planRevision=null\}\)/.test(autopilotSource));
 
 // ── 8. result.json path carries the field ───────────────────────────────
 check("record: result.json is written from the result object",

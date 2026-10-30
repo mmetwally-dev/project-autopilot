@@ -256,6 +256,12 @@ try {
     // still escalates with no second revision.
     const s2 = readState(repo);
     s2.reviewFeedback = {"speckit-stage:plan": {findings: ["needs more detail: split phase 1"], at: new Date().toISOString()}};
+    // Item 5: the post-revision re-review now keeps revising while the
+    // plan_revisions budget remains. This case is specifically the
+    // BUDGET-EXHAUSTED resume, so seed the previously spent revisions (the
+    // real crashed process had already recorded them) — otherwise the FAIL
+    // correctly grants another revision.
+    s2.planReviewRevisions = {"speckit-stage:plan": 3};
     writeState(repo, s2);
     setScenario(repo, "plan_review_fail");
     const result = run(repo, binDir);
@@ -329,27 +335,30 @@ try {
   }
   // -------------------------------------------------------------------
   // S6 (023 Phase 2 task 2.2): gate-exhaustion same-request resume — the
-  // SpecKit twin of the standalone revision-exhaustion guard. Run 1 drives
-  // a gate to exhaustion (re-review FAIL -> "SpecKit gate ... failed").
-  // Run 2 with the SAME request must re-invoke the Planner with the
-  // persisted stage findings and re-run gate review — never just re-run
-  // the re-review, and never adopt the rejected artifacts as complete.
-  // (Fixture limitation, same as S1/S3: the resume-time Planner cannot
-  // complete a revision, so run 2 is asserted on the Planner's launch +
-  // prompt and its nonzero exit, never on mission completion.)
+  // SpecKit twin of the standalone revision-exhaustion guard. Item 5 makes
+  // every re-review FAIL another revision while the plan_revisions budget
+  // remains, so run 1 now spends the WHOLE budget (three Planner revisions)
+  // before "SpecKit gate ... failed". Run 2 with the SAME request must
+  // re-invoke the Planner once with the persisted stage findings and re-run
+  // gate review — never just re-run the re-review, and never adopt the
+  // rejected artifacts as complete. (The resume-time Planner cannot complete
+  // a revision in this fixture, so run 2 is asserted on its launch + prompt
+  // and nonzero exit, never on mission completion.)
   // -------------------------------------------------------------------
   {
     const {repo, binDir} = fixture("sk-gate-exhaust", {
       artifacts: {spec: SPEC, plan: PLAN},
-      gate: "review-plan", substage: SPECKIT_POST_REVISION_REVIEW
+      gate: "review-plan", substage: SPECKIT_INITIAL_REVIEW
     });
-    setScenario(repo, "plan_review_fail");
+    setScenario(repo, "speckit_rereview_gate_fail_always");
     const first = run(repo, binDir);
     const firstOutput = combined(first);
     const plannerBefore = roleCounts(repo).planner || 0;
     check("s6: run 1 escalates on the exhausted gate (nonzero exit)", first.status !== 0, {status: first.status, tail: firstOutput.slice(-600)});
     check("s6: run 1 names the failed gate", firstOutput.includes("SpecKit gate review-plan failed"), firstOutput.slice(-600));
-    check("s6: run 1 granted no second revision (the Planner never ran)", plannerBefore === 0, roleCounts(repo));
+    check("s6: run 1 spent the full revision budget (three Planner revisions)", plannerBefore === 3, roleCounts(repo));
+    check("s6: run 1 recorded all three spent revisions",
+      (readState(repo).planReviewRevisions?.["speckit-stage:plan"] || 0) === 3, readState(repo).planReviewRevisions);
 
     // Same request, new process, same repo: the exhaustion resume.
     const second = run(repo, binDir);
@@ -360,7 +369,7 @@ try {
     check("s6: run 2 re-invokes the Planner exactly once with the persisted findings (never-execute-unapproved-plan guard)",
       plannerAfter - plannerBefore === 1, {before: plannerBefore, after: plannerAfter, counts});
     check("s6: run 2's Planner was handed the persisted gate findings",
-      briefs.some((brief) => brief.includes("needs more detail")), briefs.length);
+      briefs.some((brief) => brief.includes("gate still needs revision")), briefs.length);
     check("s6: run 2's Planner was told the previous attempt was REJECTED",
       briefs.some((brief) => /REJECTED/.test(brief)), briefs.length);
     check("s6: run 2 does not complete (the fixture Planner cannot finish a revision)",

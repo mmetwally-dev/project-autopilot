@@ -260,7 +260,8 @@ export function validatePolicyConfig(policy = {}) {
     // Mission 031 Phase 1 task 1.4: validate policy.caps per-role entries.
     // Review roles: planner, plan_reviewer, code_reviewer, verifier.
     // Each entry requires positive integer max_turns, max_tokens, extra_sessions;
-    // max_tokens < effective token ceiling; extra_sessions >= 0;
+    // max_tokens < effective token ceiling (planner and plan_reviewer exempt);
+    // extra_sessions >= 0;
     // wrap_up_tokens_threshold optional, if present must be < max_tokens for review roles.
     const caps = policy.caps;
     if (caps !== undefined) {
@@ -288,12 +289,14 @@ export function validatePolicyConfig(policy = {}) {
           const maxTokens = roleCaps.max_tokens;
           if (maxTokens == null || !Number.isInteger(maxTokens) || maxTokens <= 0) {
             errors.push(`policy.caps.${roleName}.max_tokens must be a positive integer.`);
-          } else if (maxTokens >= globalCeiling && roleName !== "planner") {
+          } else if (maxTokens >= globalCeiling && roleName !== "planner" && roleName !== "plan_reviewer") {
             // Mission 039 task 1.4: planner is exempt from the sub-ceiling
             // check. Its code default (200K per-turn) intentionally exceeds the
             // ~180K implementer-oriented global default, and the relay enforces
             // planner caps via resolvePerRoleLimits, so the planner cap fires
-            // at its own max regardless of the global ceiling.
+            // at its own max regardless of the global ceiling. Backlog #8:
+            // plan_reviewer is exempt for the same reason — its code default is
+            // now 250K so a full plan re-check no longer splits at ~135K.
             errors.push(`policy.caps.${roleName}.max_tokens (${maxTokens}) must be strictly below the effective token ceiling (${globalCeiling}); otherwise the cap can never fire.`);
           }
           const extraSessions = roleCaps.extra_sessions;
@@ -564,7 +567,7 @@ const LEGACY_KEY_TARGETS = {
     role_requirements: "advanced.capabilities.role_requirements",
     safety_denied: "advanced.capabilities.safety_denied",
     legacy_text_inference: "advanced.capabilities.legacy_text_inference",
-    verification: "tests.browser, tests.require_browser",
+    verification: "tests.browser, tests.require_browser, tests.e2e",
   },
 };
 
@@ -640,6 +643,8 @@ const TESTS_KEYS = new Set([
   "require_reviewer",
   "browser",
   "require_browser",
+  "e2e",
+  "e2e_setup_pending",
   "verify_denylist",
 ]);
 
@@ -696,6 +701,7 @@ const FREE_MODELS_KEYS = new Set(["auto_fallback", "max_turns"]);
 // shipped config.schema.json cannot drift.
 const BROWSER_VALUES = new Set(SCHEMA_ENUMS["tests.browser"]);
 const REQUIRE_BROWSER_VALUES = new Set(SCHEMA_ENUMS["tests.require_browser"]);
+const E2E_VALUES = new Set(SCHEMA_ENUMS["tests.e2e"]);
 const PLANNING_FRAMEWORK_VALUES = SCHEMA_ENUMS["project.planning_framework"];
 
 function isObject(value) {
@@ -1002,6 +1008,8 @@ function validateTestsConfig(tests, path, errors, warnings) {
   if (tests.require_reviewer !== undefined) validateType(tests.require_reviewer, "boolean", `${path}.require_reviewer`, errors);
   if (tests.browser !== undefined) validateType(tests.browser, "string", `${path}.browser`, errors, Array.from(BROWSER_VALUES));
   if (tests.require_browser !== undefined) validateType(tests.require_browser, "string", `${path}.require_browser`, errors, Array.from(REQUIRE_BROWSER_VALUES));
+  if (tests.e2e !== undefined && tests.e2e !== null) validateType(tests.e2e, "string", `${path}.e2e`, errors, Array.from(E2E_VALUES));
+  if (tests.e2e_setup_pending !== undefined) validateType(tests.e2e_setup_pending, "boolean", `${path}.e2e_setup_pending`, errors);
   if (tests.verify_denylist !== undefined) {
     if (!Array.isArray(tests.verify_denylist)) {
       errors.push(`${path}.verify_denylist: must be an array.`);

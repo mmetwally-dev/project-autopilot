@@ -5,8 +5,13 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"/></a>
-  <img src="https://img.shields.io/badge/version-12.0.0-informational" alt="Version 12.0.0"/>
+  <img src="https://img.shields.io/badge/version-12.0.1-informational" alt="Version 12.0.1"/>
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node 18 or newer"/>
+</p>
+
+<p align="center">
+  <img src="docs/media/install.gif" alt="npm install -g project-autopilot, then ap setup in a project: it finds the agent CLIs and saves the settings" width="900"/>
+  <br/><sub>Install and set up a project in about a minute (Enter takes the default answers). Then run <code>ap run "your request"</code>.</sub>
 </p>
 
 <p align="center">
@@ -571,7 +576,7 @@ GATE (orchestrator)        -                         T1.1 > T1.7  PASS       00:
   **CONTEXT** — the largest context the session reached. **TURNS** — model turns.
   `-` means the CLI reports no usage.
 - **NOTE** — the session number, the number of findings, and warnings such as
-  `⚠ high usage` (over the role's cap) or `haiku→sonnet !` (see below).
+  `⚠ high usage` (over the role's cap).
 
 The same folder has `orchestrator.log` (the full log), `gates/` (each gate's
 output), `handoff/` (hand-off notes), `phase-briefs/` and `runs/` (each agent
@@ -622,12 +627,6 @@ for the CLI default. Effort levels come from the same sources (Codex has a
 documented fallback list). Before saving, each role is checked: a live model must
 be in the live list and unsupported flags are refused. `node scripts/doctor.mjs`
 flags a documented list older than 180 days.
-
-**Haiku on read-only Claude roles runs as Sonnet.** The read-only roles start
-Claude with `--permission-mode plan`, and Claude Code runs plan mode on Sonnet
-when Haiku is selected. A reviewer set to `haiku` therefore really runs (and
-bills) Sonnet. Setup, `ap config` and `ap run` warn about it, and the report
-marks it `haiku→sonnet !`. Haiku as implementer runs as Haiku.
 
 **What really ran.** For every run Autopilot records the exact CLI command and
 checks before launch that the configured model, effort and variant are really in

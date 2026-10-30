@@ -55,7 +55,7 @@ function migratedInput(roles) {
       no_progress_generations: 2, final_review_fix_rounds: 2, backstop_raw_tokens: 6000000, idle_hang_ms: 600000,
       caps: {
         planner: { max_turns: 22, max_tokens: 200000, extra_sessions: 2, wrap_up_tokens_threshold: 180000 },
-        plan_reviewer: { max_turns: 18, max_tokens: 150000, extra_sessions: 2, wrap_up_tokens_threshold: 135000 },
+        plan_reviewer: { max_turns: 18, max_tokens: 150000, extra_sessions: 4, wrap_up_tokens_threshold: 135000 },
         code_reviewer: { max_turns: 22, max_tokens: 150000, extra_sessions: 0, wrap_up_tokens_threshold: 135000 },
         verifier: { max_turns: 15, max_tokens: 150000, extra_sessions: 3, wrap_up_tokens_threshold: 135000 },
       },

@@ -76,6 +76,13 @@ has_feedback() {
   printf '%s\n' "$PROMPT" | grep -qiE 'FEEDBACK TO ADDRESS|Prior findings to re-check|Previous failure|previous failure'
 }
 
+# A plan-review confirmation full review (run after a scoped re-review PASS)
+# deliberately carries no previous findings; a scenario that FAILs only the
+# first, feedback-less review must not FAIL it as if it were round 1.
+is_confirmation_review() {
+  printf '%s\n' "$PROMPT" | grep -q 'confirmation full review after a scoped'
+}
+
 # TASK-19 Phase 4: the per-task Implementer result contract. The final
 # non-empty line must be exactly one AUTOPILOT_TASK_RESULT sentinel; the
 # orchestrator derives changed files from the tree, so this fixture reports
@@ -780,7 +787,27 @@ case "$ROLE" in
       review_output FAIL "Phase 1 has no Git-observable deliverable: creating an empty directory is git-invisible, so this phase could never be verified"
     elif scoped_delta_contains_forbidden_marker; then
       review_output FAIL "forbidden baseline marker present in scoped delta"
-    elif [ "$SCENARIO" = "plan_review_fail" ] && ! has_feedback; then
+    elif [ "$SCENARIO" = "speckit_rereview_gate_fail_twice" ] && [ "$(role_result_count plan_reviewer)" -lt 2 ]; then
+      # Item 5: the FIRST TWO plan_reviewer results FAIL (the initial gate
+      # review and the first post-revision re-review), then the third PASSes.
+      # With max_plan_revisions=3 the gate must run two revisions and re-review
+      # each, never escalate on the first re-review FAIL.
+      review_output FAIL "gate still needs revision"
+    elif [ "$SCENARIO" = "speckit_rereview_gate_fail_always" ]; then
+      # Item 5 exhaustion: every gate review FAILs, including every re-review,
+      # so the loop spends the whole revision budget before escalating.
+      review_output FAIL "gate still needs revision"
+    elif [ "$SCENARIO" = "gsd_plan_check_fail_twice" ] && printf '%s\n' "$PROMPT" | grep -q 'Review the GSD planning stage "plan-check"'; then
+      # Item 5/GSD: the first two FINAL plan-check reviews FAIL (the current
+      # brief is already on disk, so the brief count includes this call), the
+      # third PASSes. Earlier discuss/research/plan stage reviews PASS.
+      _PC_COUNT=$(find ./.autopilot -name brief.txt -exec grep -l 'Review the GSD planning stage "plan-check"' {} + 2>/dev/null | wc -l)
+      if [ "$_PC_COUNT" -le 2 ]; then
+        review_output FAIL "plan-check still needs a revision"
+      else
+        review_output PASS ""
+      fi
+    elif [ "$SCENARIO" = "plan_review_fail" ] && ! has_feedback && ! is_confirmation_review; then
       review_output FAIL "needs more detail"
     elif [ "$SCENARIO" = "speckit_spec_review_fail" ]; then
       # Deterministic per-run scenario control: the harness sets this

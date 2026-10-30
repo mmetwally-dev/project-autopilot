@@ -10,11 +10,13 @@
 //
 // The fake executable REFUSES (non-zero exit) write roles unless they arrive
 // with exactly `--permission-mode acceptEdits`, and read-only roles unless
-// they arrive with exactly `--permission-mode plan`. A passing mission is
-// therefore a live proof that the Planner and Implementer are launched
-// write-capable non-interactively (the real 15.6A Native Windows failure was
-// a Planner with NO permission mode: exit 0, no artifacts), while reviewers
-// stay on least-privilege `plan` — with no dangerous bypass flag anywhere.
+// they arrive with exactly `--permission-mode default` plus the read-only
+// allow list whose Write/Edit rules stay inside the scratch mount. A passing
+// mission is therefore a live proof that the Planner and Implementer are
+// launched write-capable non-interactively (the real 15.6A Native Windows
+// failure was a Planner with NO permission mode: exit 0, no artifacts), while
+// reviewers stay read-only except for their scratch hand-off note (backlog
+// #2: plan mode refused that note) — with no dangerous bypass flag anywhere.
 //
 // Requires Linux/WSL (bubblewrap filesystem containment for the read-only
 // roles). Fails closed, not skip, on Windows.
@@ -185,6 +187,8 @@ function directCheck(claudeTargetPath, cwd) {
   const invoke = (argv, stdinText) => spawnSync(process.execPath, [claudeTargetPath, ...argv], {
     cwd, encoding: "utf8", input: stdinText, timeout: 30000, stdio: ["pipe", "pipe", "pipe"], shell: false
   });
+  const readOnlyArgv = (mode, tools = ["Read", "Glob", "Grep", "Bash", "Write(//workspace/scratch/**)", "Edit(//workspace/scratch/**)"]) =>
+    ["-p", "--permission-mode", mode, "--allowedTools", ...tools];
   // Write role with the wrong mode / missing mode / duplicated mode: refuse.
   check("direct: planner + plan is REFUSED",
     invoke(["-p", "--permission-mode", "plan"], "ROLE=planner\ntask\n").status !== 0);
@@ -194,11 +198,19 @@ function directCheck(claudeTargetPath, cwd) {
     invoke(["-p", "--permission-mode", "acceptEdits", "--permission-mode", "acceptEdits"], "ROLE=planner\ntask\n").status !== 0);
   check("direct: plan_reviewer + acceptEdits is REFUSED",
     invoke(["-p", "--permission-mode", "acceptEdits"], "ROLE=plan_reviewer\ntask\n").status !== 0);
+  check("direct: plan_reviewer + plan is REFUSED (plan mode cannot write the scratch note)",
+    invoke(["-p", "--permission-mode", "plan"], "ROLE=plan_reviewer\ntask\n").status !== 0);
+  check("direct: plan_reviewer + default without the allow list is REFUSED",
+    invoke(["-p", "--permission-mode", "default"], "ROLE=plan_reviewer\ntask\n").status !== 0);
+  check("direct: plan_reviewer + default with a bare Write grant is REFUSED",
+    invoke(readOnlyArgv("default", ["Read", "Glob", "Grep", "Bash", "Write", "Edit(//workspace/scratch/**)"]), "ROLE=plan_reviewer\ntask\n").status !== 0);
+  check("direct: plan_reviewer + default with a repo Write grant is REFUSED",
+    invoke(readOnlyArgv("default", ["Read", "Glob", "Grep", "Bash", "Write(///workspace/repository/**)", "Edit(//workspace/scratch/**)"]), "ROLE=plan_reviewer\ntask\n").status !== 0);
   // Correct combinations: accepted.
   check("direct: planner + acceptEdits is ACCEPTED",
     invoke(["-p", "--permission-mode", "acceptEdits"], "ROLE=planner\ntask\n").status === 0);
-  check("direct: plan_reviewer + plan is ACCEPTED",
-    invoke(["-p", "--permission-mode", "plan"], "ROLE=plan_reviewer\ntask\n").status === 0);
+  check("direct: plan_reviewer + default with scratch-only Write/Edit is ACCEPTED",
+    invoke(readOnlyArgv("default"), "ROLE=plan_reviewer\ntask\n").status === 0);
 }
 
 // The direct-refusal checks below invoke the fake Claude target script
@@ -254,7 +266,7 @@ try {
     if (report) checkObservedArgv(`${role} (relay-observed)`, report, {expectedMode, expectedRole: role});
   }
 
-  for (const [role, expectedMode] of [["plan_reviewer", "plan"], ["code_reviewer", "plan"], ["verifier", "plan"]]) {
+  for (const [role, expectedMode] of [["plan_reviewer", "default"], ["code_reviewer", "default"], ["verifier", "default"]]) {
     const found = findRole(autoRoot, role);
     check(`${role} relay produced a result.json`, found != null);
     if (found) {

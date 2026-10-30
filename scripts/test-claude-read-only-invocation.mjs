@@ -42,8 +42,17 @@ assert.ok(
 );
 assert.ok(
   readOnlyFlags.includes("--permission-mode") &&
-    readOnlyFlags[readOnlyFlags.indexOf("--permission-mode") + 1] === "plan",
-  "claude.read_only manifest must include --permission-mode plan"
+    readOnlyFlags[readOnlyFlags.indexOf("--permission-mode") + 1] === "default",
+  "claude.read_only manifest must include --permission-mode default"
+);
+assert.ok(
+  !readOnlyFlags.includes("plan"),
+  "claude.read_only manifest must not use plan mode (it refuses the scratch hand-off note)"
+);
+assert.ok(
+  readOnlyFlags.includes("--allowedTools") &&
+    readOnlyFlags[readOnlyFlags.indexOf("--allowedTools") + 1] === "Read",
+  "claude.read_only manifest must start its allow list with Read"
 );
 
 // ── 2. Contract validation still passes ─────────────────────────────────
@@ -91,8 +100,12 @@ for (const {name, model, reasoning} of readOnlyRoles) {
   );
   assert.ok(
     finalArgs.includes("--permission-mode") &&
-      finalArgs[finalArgs.indexOf("--permission-mode") + 1] === "plan",
-    `${name}: final invocation must include --permission-mode plan`
+      finalArgs[finalArgs.indexOf("--permission-mode") + 1] === "default",
+    `${name}: final invocation must include --permission-mode default`
+  );
+  assert.ok(
+    !finalArgs.includes("plan"),
+    `${name}: final invocation must not use plan mode`
   );
   assert.ok(
     finalArgs.includes("--model") &&
@@ -115,7 +128,7 @@ for (const {name, model, reasoning} of readOnlyRoles) {
 
 // ── 4. Verify the argument ordering matches the real argv ────────────────
 // The original real invocation (with the input-format bug) was:
-//   -p --output-format stream-json --input-format stream-json --permission-mode plan --model sonnet --effort low
+//   -p --output-format stream-json --input-format stream-json --permission-mode default --model sonnet --effort low
 // With the fix, --input-format is followed by "text", and --verbose still
 // appears between --input-format and --permission-mode.
 const reviewerArgs = applyAgentSelections([...claude.read_only], {model: "sonnet", reasoning: "low", variant: null}, claude);

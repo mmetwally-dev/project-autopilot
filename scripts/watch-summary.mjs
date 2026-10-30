@@ -7,6 +7,7 @@ import {
   readWatchEvents,
   readRunMeta,
 } from "./run-history.mjs";
+import { normalizeFindings } from "./review-feedback.mjs";
 
 // Mission 094 Phase 3 task 3.1 — the compact watch-summary cache.
 //
@@ -30,7 +31,7 @@ import {
 // unchanged, so a run that finishes (its status.json is rewritten) or a new
 // event forces a rebuild.
 
-export const SUMMARY_VERSION = 4;
+export const SUMMARY_VERSION = 7;
 
 // Mission-scoped cache path, with the flat legacy fallback used elsewhere in
 // run-history.mjs (watchRunsDir).
@@ -108,16 +109,20 @@ function stampMapFresh(stored, current, skipName, skipEvents) {
 function readRunExtras(dir) {
   const extras = {
     findings: [],
+    notes: [],
     carriedForwardTasks: null,
     sessionNumber: null,
     resolvedModel: null,
     configuredModel: null,
     modelMismatch: null,
+    reasoning: null,
+    variant: null,
     snapshotBeforeStartedAt: null,
     snapshotBeforeAt: null,
     snapshotAfterStartedAt: null,
     snapshotAfterAt: null,
     planRevision: null,
+    planningStage: null,
     note: null,
     policyViolation: null,
     failureClass: null,
@@ -133,12 +138,15 @@ function readRunExtras(dir) {
       if (st.carriedForwardTasks !== undefined && st.carriedForwardTasks !== null) extras.carriedForwardTasks = st.carriedForwardTasks;
       if (st.configuredModel !== undefined && st.configuredModel !== null) extras.configuredModel = st.configuredModel;
       if (st.resolvedModel !== undefined && st.resolvedModel !== null) extras.resolvedModel = st.resolvedModel;
+      if (typeof st.reasoning === "string" && st.reasoning) extras.reasoning = st.reasoning;
+      if (typeof st.variant === "string" && st.variant) extras.variant = st.variant;
       if (st.modelMismatch !== undefined && st.modelMismatch !== null) extras.modelMismatch = st.modelMismatch;
       if (st.snapshotBeforeStartedAt !== undefined) extras.snapshotBeforeStartedAt = st.snapshotBeforeStartedAt;
       if (st.snapshotBeforeAt !== undefined) extras.snapshotBeforeAt = st.snapshotBeforeAt;
       if (st.snapshotAfterStartedAt !== undefined) extras.snapshotAfterStartedAt = st.snapshotAfterStartedAt;
       if (st.snapshotAfterAt !== undefined) extras.snapshotAfterAt = st.snapshotAfterAt;
       if (st.planRevision !== undefined) extras.planRevision = st.planRevision;
+      if (st.planningStage !== undefined) extras.planningStage = st.planningStage;
       if (st.note !== undefined) extras.note = st.note;
       if (st.interrupted_at !== undefined) extras.interrupted_at = st.interrupted_at;
       if (st.interruption_reason !== undefined) extras.interruption_reason = st.interruption_reason;
@@ -147,10 +155,17 @@ function readRunExtras(dir) {
   try {
     const rs = JSON.parse(fs.readFileSync(path.join(dir, "result.json"), "utf8"));
     if (rs && typeof rs === "object") {
-      if (Array.isArray(rs.review?.findings)) extras.findings = rs.review.findings.map(String);
-      else if (Array.isArray(rs.findings)) extras.findings = rs.findings.map(String);
+      if (extras.planningStage == null && rs.planningStage !== undefined) extras.planningStage = rs.planningStage;
+      if (Array.isArray(rs.review?.findings) && rs.review.findings.length) extras.findings = rs.review.findings.map(String);
+      else if (Array.isArray(rs.findings) && rs.findings.length) extras.findings = rs.findings.map(String);
+      // Plan-review FAILs can carry their findings only on verdict.findings.
+      else if (Array.isArray(rs.verdict?.findings) && rs.verdict.findings.length) extras.findings = normalizeFindings(rs.verdict.findings);
+      if (Array.isArray(rs.review?.notes) && rs.review.notes.length) extras.notes = rs.review.notes.map(String);
+      else if (Array.isArray(rs.verdict?.notes) && rs.verdict.notes.length) extras.notes = rs.verdict.notes.map(String);
       if (extras.carriedForwardTasks == null && Array.isArray(rs.carriedForwardTasks)) extras.carriedForwardTasks = rs.carriedForwardTasks.slice();
       if (extras.resolvedModel == null && typeof rs.resolvedModel === "string") extras.resolvedModel = rs.resolvedModel;
+      if (extras.reasoning == null && typeof rs.reasoning === "string" && rs.reasoning) extras.reasoning = rs.reasoning;
+      if (extras.variant == null && typeof rs.variant === "string" && rs.variant) extras.variant = rs.variant;
       extras.policyViolation = (typeof rs.policyViolation === "string" && rs.policyViolation)
         || (typeof rs.policy?.violation === "string" && rs.policy.violation)
         || null;
@@ -170,16 +185,20 @@ function compactRun(run) {
   return {
     ...base,
     findings: Array.isArray(base.findings) ? base.findings.map(String) : extras.findings,
+    notes: Array.isArray(base.notes) ? base.notes.map(String) : extras.notes,
     carriedForwardTasks: base.carriedForwardTasks !== undefined ? base.carriedForwardTasks : extras.carriedForwardTasks,
     sessionNumber: base.sessionNumber !== undefined ? base.sessionNumber : extras.sessionNumber,
     resolvedModel: base.resolvedModel !== undefined ? base.resolvedModel : extras.resolvedModel,
     configuredModel: base.configuredModel !== undefined ? base.configuredModel : extras.configuredModel,
     modelMismatch: base.modelMismatch !== undefined ? base.modelMismatch : extras.modelMismatch,
+    reasoning: base.reasoning !== undefined ? base.reasoning : extras.reasoning,
+    variant: base.variant !== undefined ? base.variant : extras.variant,
     snapshotBeforeStartedAt: base.snapshotBeforeStartedAt !== undefined ? base.snapshotBeforeStartedAt : extras.snapshotBeforeStartedAt,
     snapshotBeforeAt: base.snapshotBeforeAt !== undefined ? base.snapshotBeforeAt : extras.snapshotBeforeAt,
     snapshotAfterStartedAt: base.snapshotAfterStartedAt !== undefined ? base.snapshotAfterStartedAt : extras.snapshotAfterStartedAt,
     snapshotAfterAt: base.snapshotAfterAt !== undefined ? base.snapshotAfterAt : extras.snapshotAfterAt,
     planRevision: base.planRevision !== undefined ? base.planRevision : extras.planRevision,
+    planningStage: base.planningStage !== undefined ? base.planningStage : extras.planningStage,
     note: base.note !== undefined ? base.note : extras.note,
     policyViolation: base.policyViolation !== undefined ? base.policyViolation : extras.policyViolation,
     failureClass: base.failureClass !== undefined ? base.failureClass : extras.failureClass,
@@ -192,16 +211,20 @@ function compactRun(run) {
 function normalizeRecord(record) {
   const r = compactRun(record);
   if (!Array.isArray(r.findings)) r.findings = [];
+  if (!Array.isArray(r.notes)) r.notes = [];
   if (r.carriedForwardTasks === undefined) r.carriedForwardTasks = null;
   if (r.sessionNumber === undefined) r.sessionNumber = null;
   if (r.resolvedModel === undefined) r.resolvedModel = null;
   if (r.configuredModel === undefined) r.configuredModel = null;
   if (r.modelMismatch === undefined) r.modelMismatch = null;
+  if (r.reasoning === undefined) r.reasoning = null;
+  if (r.variant === undefined) r.variant = null;
   if (r.snapshotBeforeStartedAt === undefined) r.snapshotBeforeStartedAt = null;
   if (r.snapshotBeforeAt === undefined) r.snapshotBeforeAt = null;
   if (r.snapshotAfterStartedAt === undefined) r.snapshotAfterStartedAt = null;
   if (r.snapshotAfterAt === undefined) r.snapshotAfterAt = null;
   if (r.planRevision === undefined) r.planRevision = null;
+  if (r.planningStage === undefined) r.planningStage = null;
   if (r.note === undefined) r.note = null;
   if (r.policyViolation === undefined) r.policyViolation = null;
   if (r.failureClass === undefined) r.failureClass = null;

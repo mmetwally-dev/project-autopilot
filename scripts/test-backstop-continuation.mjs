@@ -75,8 +75,25 @@ check("loops: backstop evidence carries total, turns, and largest single-turn co
   check("loops: backstop branch continues the cursor loop",
     branches.length === 2 && branches.every((b) => b.slice(0, 3000).includes("continue;")), branches.length);
 }
-check("loops: backstop rollover log words the cumulative figure (both loops + 7 review-role sites)",
-  count(/crossed the cumulative backstop/g) === 9);
+check("loops: backstop rollover log words the cumulative figure (both loops + 7 review-role sites + planning backstop handler)",
+  count(/crossed the cumulative backstop/g) === 10);
+// The shared SpecKit/GSD planning handler covers every capped field on the
+// planning relays: it logs the cumulative figure, records on the firing
+// ledger and resets the consecutive count on a non-backstop generation.
+{
+  const start = src.indexOf("function handleCappedPlanningResult(");
+  const end = src.indexOf("function handleIncompletePlanningResult(");
+  const planningBackstop = start !== -1 && end > start ? src.slice(start, end) : "";
+  const incompleteStart = end;
+  const incompleteEnd = src.indexOf("// TASK-26", incompleteStart);
+  const planningIncomplete = incompleteStart !== -1 && incompleteEnd > incompleteStart ? src.slice(incompleteStart, incompleteEnd) : "";
+  check("planning: capped handler logs the cumulative figure and continues",
+    /crossed the cumulative backstop[\s\S]*?continuing as backstop session/.test(planningBackstop), planningBackstop.includes("crossed the cumulative backstop"));
+  check("planning: non-backstop capped generation resets the firing count",
+    /clearBackstopFirings\(s,contScope\)[\s\S]*?handlePlanningContinuation\(/.test(planningBackstop));
+  check("planning: incomplete generation resets the firing count",
+    /clearBackstopFirings\(s,contScope\)[\s\S]*?handlePlanningContinuation\(/.test(planningIncomplete));
+}
 check("loops: firing ledger cleared on task success AND on non-backstop early exits (converge + carry + status/sentinel breaks, both loops + 4 review-role normal-completed clears)",
   count(/clearBackstopFirings\(s,`task:(standalone|speckit):phase-/g) === 12);
 // A generation ending without a backstop firing resets the consecutive
@@ -85,8 +102,8 @@ check("loops: firing ledger cleared on task success AND on non-backstop early ex
 // non-completed / malformed-sentinel early exits clear via the task scope
 // (both loops) — so firing → non-backstop generation → firing never
 // escalates as a second consecutive firing.
-check("loops: non-backstop rollover paths reset the consecutive count (cap + attempted, both loops + 7 review-role capped sites)",
-  count(/clearBackstopFirings\(s,contScope\)/g) === 11);
+check("loops: non-backstop rollover paths reset the consecutive count (cap + attempted, both loops + 7 review-role capped sites + planning capped/incomplete/GSD/existing-planning paths)",
+  count(/clearBackstopFirings\(s,contScope\)/g) === 17);
 
 // ── Live: backstop firing leaves the extra_sessions ledger unchanged ──
 {

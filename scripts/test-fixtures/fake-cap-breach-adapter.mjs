@@ -26,6 +26,12 @@ if (args.includes("--version")) {
   process.stdout.write("fake-cap-breach-adapter 1.0.0\n");
   process.exit(0);
 }
+// Answer help probes instantly (1.x-style help naming --variant) so generation
+// detection never falls through to consuming a scenario on `run --help`.
+if (args.includes("--help")) {
+  process.stdout.write("Usage: opencode [command]\n  run [message..]\n    -m, --model <model>\n    --variant <level>\n    --agent <agent>\n");
+  process.exit(0);
+}
 if (args[0] === "models") {
   process.stdout.write("opencode/fake-cap-model\n");
   process.exit(0);
@@ -78,7 +84,12 @@ const ATTEMPTED_RESULT = 'AUTOPILOT_TASK_RESULT={"summary":"cap probe stopped ea
 
 const prompt = (await readStdin()) + " " + args.join(" ");
 const sc = scenario();
-const gen2 = prompt.includes("Dead ends from capped generations");
+// Planning roles get the planning-specific continuation heading instead of
+// role-progress-prompt's implementer heading; both mean "this is the resumed
+// generation".
+const gen2 = prompt.includes("Dead ends from capped generations")
+  || prompt.includes("Prior dead ends (continuation context")
+  || prompt.includes("Prior reviewer handoff note (continuation context");
 const SPIN_TURNS = 45;
 const SPIN_MS = 80;
 const tiny = {input: 10, output: 5, reasoning: 0, cache: {read: 0, write: 0}};
@@ -86,6 +97,35 @@ const heavy = {input: 1000000, output: 5, reasoning: 0, cache: {read: 1000000, w
 const tokensFor = () => (sc === "cap_tokens" ? heavy : tiny);
 
 const REVIEW_PASS = 'AUTOPILOT_REVIEW={"decision":"PASS","findings":[]}';
+const REVIEW_FAIL = 'AUTOPILOT_REVIEW={"decision":"FAIL","findings":["fixture planning gap: add the missing detail"]}';
+const PLAN_OK = "# Plan\n\nObjective: cap continuation reset probe.\n";
+const TASKS_OK = "## Phase 1: General\n\n- [ ] Do the fixture task — accept: done ; verify: none\n";
+
+async function spinToCap(tokens) {
+  emit({type: "step_start", part: {type: "step-start"}});
+  for (let i = 0; i < SPIN_TURNS; i += 1) {
+    stepFinish(tokens);
+    await sleep(SPIN_MS);
+  }
+}
+function writeStandalonePlanningArtifacts() {
+  const planMatch = /Write the narrative plan to exactly: (\S+)/.exec(prompt);
+  const tasksMatch = /Write the phased checklist to exactly: (\S+)/.exec(prompt);
+  if (planMatch) {
+    const planPath = planMatch[1].replace(/[.,;:]+$/, "");
+    try {
+      fs.mkdirSync(planPath.split("/").slice(0, -1).join("/") || ".", {recursive: true});
+      fs.writeFileSync(planPath, PLAN_OK);
+    } catch { /* best-effort like the other fixtures */ }
+  }
+  if (tasksMatch) {
+    const tasksPath = tasksMatch[1].replace(/[.,;:]+$/, "");
+    try {
+      fs.mkdirSync(tasksPath.split("/").slice(0, -1).join("/") || ".", {recursive: true});
+      fs.writeFileSync(tasksPath, TASKS_OK);
+    } catch { /* best-effort like the other fixtures */ }
+  }
+}
 
 if (sc === "live_usage_review") {
   // TASK-27 follow-up (003#8): the reviewer twin of `live_usage` — same
@@ -164,7 +204,69 @@ if (prompt.includes(WRAPUP_MARKER)) {
   emit({type: "text", part: {type: "text", text: "wrap-up note written, stopping"}});
   process.exit(0);
 }
-if (sc === "cap_files_spin" && gen2) {
+if (sc === "cap_verdict") {
+  // Item 7: a read-only review that emits its complete verdict and THEN spins
+  // past the cap. The final text event is the verdict, so the orchestrator
+  // must accept it instead of spending a continuation to re-run the review.
+  emit({type: "text", part: {type: "text", text: REVIEW_PASS}});
+  await spinToCap(tiny);
+} else if (sc === "plan_review_cap_rounds" && prompt.includes("Create or continue an implementation plan")) {
+  // Item 6/planner: every Planner generation caps once, then the resumed
+  // generation writes the artifacts. The second (revision) Planner run may
+  // only cap again if the planner continuation allowance was reset by the
+  // completed first Planner run.
+  if (!gen2) await spinToCap(tiny);
+  else {
+    writeStandalonePlanningArtifacts();
+    emit({type: "text", part: {type: "text", text: "planner ok"}});
+  }
+} else if (sc === "plan_review_cap_rounds" && prompt.includes("Review the standalone Autopilot plan")) {
+  // Item 6/reviewer: each review round (initial, post-revision, confirmation)
+  // caps once and completes on the resumed generation. A completed round
+  // resets the reviewer allowance, so the NEXT round may cap again under the
+  // same allowance of 1. The first round FAILs, the later rounds PASS.
+  if (!gen2) await spinToCap(tiny);
+  else if (prompt.includes("confirmation full review after a scoped re-review PASS")
+    || prompt.includes("Prior findings to re-check")) {
+    emit({type: "text", part: {type: "text", text: REVIEW_PASS}});
+  } else {
+    emit({type: "text", part: {type: "text", text: REVIEW_FAIL}});
+  }
+} else if (sc === "planner_stale_note_then_rate_limit" && prompt.includes("Create or continue an implementation plan")) {
+  // Backlog #7: the initial Planner completes and leaves a hand-off note
+  // (STALE-PLANNER-HANDOFF-MARKER). The next Planner run is a revision and
+  // hits a provider rate limit, so the role fallback relaunches it with the
+  // SAME prompt. A stale note surviving the completed initial run would be
+  // quoted into both revision briefs as "continuation context".
+  if (prompt.includes("This is a REVISION round")) {
+    emit({type: "error", error: {name: "APIError", data: {message: "rate limit exceeded", statusCode: 429}}});
+    process.stderr.write('level=ERROR role=server cause="AI_APICallError: rate_limit_exceeded"\n');
+    process.exit(1);
+  }
+  const noteMatch = /Keep a hand-off note at (\S+)/.exec(prompt);
+  if (noteMatch) {
+    const notePath = noteMatch[1].replace(/[.,;:]+$/, "");
+    try {
+      fs.mkdirSync(notePath.split("/").slice(0, -1).join("/") || ".", {recursive: true});
+      fs.writeFileSync(notePath, [
+        "1. Done — initial planning revision complete.",
+        "2. Found — STALE-PLANNER-HANDOFF-MARKER from an earlier, finished revision.",
+        "3. Next — nothing; this revision is done.",
+        "4. Dead ends — none.",
+        "",
+      ].join("\n"));
+      // Audit trail: proves the fixture wrote the note even though the
+      // production clear removes it when the Planner completes uncapped.
+      fs.mkdirSync(".autopilot", {recursive: true});
+      fs.writeFileSync(".autopilot/.fixture-stale-planner-note", `${notePath}\n${"STALE-PLANNER-HANDOFF-MARKER"}\n`);
+    } catch {}
+  }
+  writeStandalonePlanningArtifacts();
+  emit({type: "text", part: {type: "text", text: "planner initial complete"}});
+} else if (sc === "planner_stale_note_then_rate_limit" && prompt.includes("Review the standalone Autopilot plan")) {
+  // One review FAIL schedules exactly one Planner revision.
+  emit({type: "text", part: {type: "text", text: REVIEW_FAIL}});
+} else if (sc === "cap_files_spin" && gen2) {
   // Voluntary early stop with a well-formed "attempted" sentinel (never a
   // breach, never a completion): exercises the continuation-on-attempted
   // path, not the commit path.

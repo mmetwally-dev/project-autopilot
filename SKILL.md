@@ -253,8 +253,6 @@ here.` and exits 0, without starting the setup wizard.
   `tests.gate_network` is true.
 - Keep reviewers independent: never the same model for `code_reviewer` as
   `implementer`, or for `plan_reviewer` as `planner`, as primary or fallback.
-- Haiku on a read-only Claude role runs as Sonnet (plan mode); setup, config and
-  run warn, and the report shows `haiku→sonnet !`.
 
 ### Known Git-guard limitation
 

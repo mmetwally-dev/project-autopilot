@@ -185,8 +185,12 @@ process.stdin.on("end", () => {
   }
 
   if (role === "plan_reviewer") {
+    // A scoped re-review (prior findings listed) and the confirmation full
+    // review that follows its PASS both accept; only the first exhaustive
+    // review rejects, forcing exactly one planner revision.
     const revised = stdin.includes("Prior findings to re-check:");
-    const sentinel = "AUTOPILOT_REVIEW=" + JSON.stringify(revised
+    const confirmation = stdin.includes("confirmation full review after a scoped re-review PASS");
+    const sentinel = "AUTOPILOT_REVIEW=" + JSON.stringify(revised || confirmation
       ? {decision: "PASS", findings: []}
       : {decision: "FAIL", findings: ["revise the plan"]});
     return finish("fake-reviewer-session", sentinel);

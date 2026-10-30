@@ -67,7 +67,8 @@ function makeConfig(repo) {
     roles: {
       planner: {adapter: "cursor", model: "", reasoning: "", variant: "", resume: false, model_source: "default", model_verified_at: null, capabilities_verified_at: null},
       // The role under test: real "claude" adapter/driver, matching the
-      // real failing invocation (sonnet/low, permission-mode plan).
+      // real invocation (sonnet/low, permission-mode default plus the
+      // scratch-scoped read-only allow list).
       plan_reviewer: {adapter: "claude", model: "sonnet", reasoning: "low", variant: "", resume: false, model_source: "default", model_verified_at: null, capabilities_verified_at: null},
       implementer: {adapter: "cursor", model: "", reasoning: "", variant: "", resume: false, model_source: "default", model_verified_at: null, capabilities_verified_at: null},
       code_reviewer: {adapter: "cursor", model: "", reasoning: "", variant: "", resume: false, model_source: "default", model_verified_at: null, capabilities_verified_at: null},
@@ -184,8 +185,13 @@ function findRole(root, role) {
         Array.isArray(report.argv) && report.argv.includes("--output-format") && report.argv[report.argv.indexOf("--output-format") + 1] === "stream-json",
         JSON.stringify(report.argv));
       check("fake claude observed --verbose", Array.isArray(report.argv) && report.argv.includes("--verbose"), JSON.stringify(report.argv));
-      check("fake claude observed --permission-mode plan",
-        Array.isArray(report.argv) && report.argv.includes("--permission-mode") && report.argv[report.argv.indexOf("--permission-mode") + 1] === "plan",
+      check("fake claude observed --permission-mode default",
+        Array.isArray(report.argv) && report.argv.includes("--permission-mode") && report.argv[report.argv.indexOf("--permission-mode") + 1] === "default",
+        JSON.stringify(report.argv));
+      check("fake claude observed the read-only allow list with a scratch-only Write rule",
+        Array.isArray(report.argv) && report.argv.includes("Read") && report.argv.includes("Glob") && report.argv.includes("Grep") && report.argv.includes("Bash")
+          && report.argv.some(a => a === "Write(//workspace/scratch/**)") && report.argv.some(a => a === "Edit(//workspace/scratch/**)")
+          && !report.argv.includes("Write") && !report.argv.includes("Edit"),
         JSON.stringify(report.argv));
       check("fake claude observed --model sonnet",
         Array.isArray(report.argv) && report.argv.includes("--model") && report.argv[report.argv.indexOf("--model") + 1] === "sonnet",

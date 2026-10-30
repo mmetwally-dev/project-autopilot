@@ -328,6 +328,39 @@ try {
       r.status === 0 && r.killed === false && r.timedOut === false && r.markerObserved === false, r);
     check("M4. clean exit output captured", r.stdout.trim() === "quick-done", r.stdout);
   }
+
+  // M5. readyWhen ends a deliberate hang early, with the tree confirmed dead.
+  // The probe turns true on its own (no file written by the child, mirroring
+  // a read-only role), then the runner waits settleMs before killing.
+  {
+    const started = Date.now();
+    const r = await runTreeUntilMarker(NODE, ["-e", "setTimeout(() => {}, 30000);"], {
+      markerFile: path.join(markerRoot, "m5-absent"),
+      readyWhen: () => Date.now() - started >= 250,
+      settleMs: 100,
+      pollMs: 20,
+      timeoutMs: 15000
+    });
+    const elapsed = Date.now() - started;
+    check("M5. readyWhen kill is reported as observed, not timed out",
+      r.readyObserved === true && r.killed === true && r.timedOut === false && r.markerObserved === false, r);
+    check("M5. readyWhen kill confirms the tree dead",
+      r.terminationConfirmed === true && r.terminationFailed === false, r);
+    check("M5. readyWhen ends the wait well before the deadline", elapsed >= 300 && elapsed < 5000, elapsed);
+  }
+
+  // M6. readyWhen that never fires leaves the deadline as the safety net.
+  {
+    const r = await runTreeUntilMarker(NODE, ["-e", "setTimeout(() => {}, 30000);"], {
+      markerFile: path.join(markerRoot, "m6-absent"),
+      readyWhen: () => false,
+      pollMs: 20,
+      timeoutMs: 600
+    });
+    check("M6. unfired readyWhen still ends in the deadline path",
+      r.timedOut === true && r.readyObserved === false && r.markerObserved === false, r);
+    check("M6. deadline path still confirms the tree dead", r.killed === true && r.terminationConfirmed === true, r);
+  }
 } finally {
   try { fs.rmSync(markerRoot, {recursive: true, force: true}); } catch { /* best-effort */ }
 }

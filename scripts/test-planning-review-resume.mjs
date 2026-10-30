@@ -436,7 +436,9 @@ const autopilotSrc = fs.readFileSync(path.join("scripts", "autopilot.mjs"), "utf
   // All four call sites route through the shared helper with distinct
   // task scopes.
   const sites = (autopilotSrc.match(/await resolvePlanningReviewAttempt\(c,s,/g) || []).length;
-  check("contract: all four call sites route through resolvePlanningReviewAttempt", sites === 4, {sites});
+  // Four call sites plus the SpecKit gate confirmation full review (a fifth
+  // reviewer call routed through the same helper).
+  check("contract: all four call sites (+ SpecKit confirmation review) route through resolvePlanningReviewAttempt", sites === 5, {sites});
   check("contract: post-revision re-review scope", autopilotSrc.includes('"speckit-gate-review"'));
   check("contract: existing-planning scope", autopilotSrc.includes('"existing-planning-review"'));
 
@@ -445,8 +447,8 @@ const autopilotSrc = fs.readFileSync(path.join("scripts", "autopilot.mjs"), "utf
   // with a re-review prefix naming class/domain via the helper.
   check("contract: re-review prompt hoisted for the retry closure",
     autopilotSrc.includes("const reReviewPrompt=`Re-review the SpecKit gate"));
-  check("contract: re-review retries via review() with the same prompt",
-    autopilotSrc.includes("()=>review(\"plan_reviewer\",reReviewPrompt,c,s)"));
+  check("contract: re-review retries via the same capped reviewer call",
+    autopilotSrc.includes("()=>runCappedReview(reReviewPrompt)"));
 
   // Call site 4: positive allowlist gating — never a negative check.
   check("contract: decision module exports the allowlist predicate",
@@ -458,8 +460,8 @@ const autopilotSrc = fs.readFileSync(path.join("scripts", "autopilot.mjs"), "utf
     reviewExistingCode.includes("isPlanningReviewRetryFramework(framework)"));
   check("contract: call site 4 never uses a negative framework check",
     !reviewExistingCode.includes('framework!=="gsd"') && !reviewExistingCode.includes("framework !== \"gsd\""));
-  check("contract: call site 4 retry re-invokes the same relay call",
-    reviewExistingCode.includes('()=>relayAsync("plan_reviewer",prompt,c,s,{readOnly:true,review:true})'));
+  check("contract: call site 4 retry re-invokes the same reviewer closure",
+    reviewExistingCode.includes("runReview,") && reviewExistingCode.includes("const runReview=()=>relayAsync(\"plan_reviewer\""));
   // relayAsync's own default is resume:false (fresh session), so the
   // closure above retries with a fresh session without restating it.
   check("contract: relayAsync defaults to a fresh session (resume:false)",
@@ -944,7 +946,8 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
       {watchReason: run.watchReason, status: run.status, killed: run.killed});
     const counts = roleCounts(repo);
     check("s4: planner re-invoked (ran twice)", counts.planner === 2, counts);
-    check("s4: reviewer ran twice (fail then pass)", counts.plan_reviewer === 2, counts);
+    // FAIL, scoped re-review PASS, then the confirmation full review PASS.
+    check("s4: reviewer ran three times (fail, scoped pass, confirmation pass)", counts.plan_reviewer === 3, counts);
     const reviews = roleResults(repo, "plan_reviewer");
     check("s4: first review was a functional FAIL",
       reviews[0]?.review?.decision === "FAIL" && reviews[0]?.failure?.class === "PLANNING_REJECTED",

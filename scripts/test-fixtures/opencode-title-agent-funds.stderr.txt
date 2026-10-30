@@ -1,0 +1,1 @@
+timestamp=2026-10-28T16:38:49.850Z level=ERROR run=a2112262 message="stream error" providerID=opencode modelID=gpt-5.4-nano session.id=ses_e7c9f2d04ffetG0nMsg18g8A0C small=true agent=title mode=primary error.error="AI_APICallError: Upstream request failed: Insufficient account funds"

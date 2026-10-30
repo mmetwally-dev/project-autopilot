@@ -34,12 +34,31 @@ check("wiring: evaluateBackstopEscalation imported",
   ["evaluateBackstopEscalation", "handleRoleBackstopFiring"].every((n) => importNames(src, "./per-task-budget.mjs").includes(n)));
 check("wiring: escalation evaluated on the firing list in both loops",
   count(/evaluateBackstopEscalation\(firings\)\.escalate/g) === 2);
-check("wiring: escalation step is runaway_session_escalation (both loops + 7 review-role sites)",
-  count(/s\.step="runaway_session_escalation"/g) === 9);
-check("wiring: escalation evidence carries total, turns, largest turn, both firings (both loops + 7 review-role sites)",
+check("wiring: escalation step is runaway_session_escalation (both loops + 7 review-role sites + planning backstop handler)",
+  count(/s\.step="runaway_session_escalation"/g) === 10);
+check("wiring: escalation evidence carries total, turns, largest turn, both firings (both loops + 7 review-role sites + planning backstop handler)",
   count(/evidence:\{taskId,totalRawTokens:/g) === 2
-  && count(/maxSingleTurnContext:last\.maxSingleTurnContext/g) === 9
-  && count(/firings:\[\.\.\.firings\]/g) === 2);
+  && count(/maxSingleTurnContext:last\.maxSingleTurnContext/g) === 10
+  && count(/firings:\[\.\.\.firings\]/g) === 2
+  && count(/firings:\[\.\.\.backstop\.firings\]/g) === 8);
+// The shared SpecKit/GSD planning handler must carry the same backstop
+// guarantee: two consecutive firings escalate with the same evidence shape.
+{
+  const start = src.indexOf("function handleCappedPlanningResult(");
+  const end = src.indexOf("function handleIncompletePlanningResult(");
+  const planningBackstop = start !== -1 && end > start ? src.slice(start, end) : "";
+  check("planning: backstop handler escalates with role + both firings evidence",
+    planningBackstop.includes('s.step="runaway_session_escalation"')
+    && planningBackstop.includes("handleRoleBackstopFiring(s,contScope,result)")
+    && /evidence:\{role,totalRawTokens:last\.totalRawTokens\?\?result\.capped\.used,turns:last\.turns\?\?null,maxSingleTurnContext:last\.maxSingleTurnContext\?\?null,firings:\[\.\.\.backstop\.firings\]\}/.test(planningBackstop), planningBackstop.slice(0, 600));
+  const esc = planningBackstop.indexOf("runaway_session_escalation");
+  const die = esc === -1 ? -1 : planningBackstop.indexOf("die(", esc);
+  const cont = esc === -1 ? -1 : planningBackstop.indexOf("handlePlanningContinuation(", esc);
+  check("planning: escalation dies before any continuation allowance is consumed",
+    esc !== -1 && die !== -1 && (cont === -1 || die < cont), {esc, die, cont});
+  check("planning: first firing still continues the planning loop",
+    /crossed the cumulative backstop[\s\S]*?return;/.test(planningBackstop));
+}
 
 // ── Branches: escalate dies with evidence, first firing still continues ──
 {

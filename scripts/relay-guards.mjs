@@ -148,6 +148,82 @@ export function keepEntryAfterEolFilter(entry,eolDirtySet){
   return entry.paths.some(p=>eolDirtySet.has(p));
 }
 
+// Batch bounds for the limited diffs: keep every git invocation's argv well
+// under the OS limit (~128 KB on Windows, more elsewhere) even with very long
+// paths. Both are soft limits; a rename pair may push a batch one path over.
+const SNAPSHOT_DIFF_PATHS_PER_BATCH=200;
+const SNAPSHOT_DIFF_ARG_BYTES_PER_BATCH=30*1024;
+
+function compareSnapshotPaths(a,b){
+  // Git emits changed paths in byte order, not UTF-16 code-unit order.
+  return Buffer.compare(Buffer.from(a,"utf8"),Buffer.from(b,"utf8"));
+}
+
+// Derive the tracked paths whose diff could contribute to the snapshot from
+// `git status`: every entry that is not untracked (`??`) or ignored (`!!`),
+// including both sides of a rename/copy. Root-level `.autopilot/` paths are
+// excluded because the binary diff already excludes them via pathspec.
+// A rename/copy pair must travel in one batch or the pair would degrade into
+// separate delete+add hunks. Git sorts a pair at its NEW path, so the pair is
+// anchored there (see snapshotDiffBatches) while its old path waits.
+function snapshotDiffCandidates(entries){
+  const candidates=new Set();
+  const pairs=[];
+  for(const entry of entries){
+    if(entry.xy==="??"||entry.xy==="!!") continue;
+    if(entry.xy===null||entry.xy===undefined) continue;
+    const included=[];
+    for(const p of entry.paths){
+      if(String(p).startsWith(".autopilot/")) continue;
+      candidates.add(p);
+      included.push(p);
+    }
+    if(entry.fromPath!==null&&entry.fromPath!==undefined&&included.length===2){
+      pairs.push([entry.toPath,entry.fromPath]);
+    }
+  }
+  const pairFromByTo=new Map();
+  const renameSources=new Set();
+  for(const [to,from] of pairs){
+    pairFromByTo.set(to,from);
+    renameSources.add(from);
+  }
+  return {
+    candidatePaths:[...candidates].sort(compareSnapshotPaths),
+    pairFromByTo,
+    renameSources
+  };
+}
+
+function snapshotDiffBatches(sortedPaths,pairFromByTo,renameSources){
+  const batches=[];
+  const assigned=new Set();
+  let i=0;
+  while(i<sortedPaths.length){
+    const batch=[];
+    let bytes=0;
+    const add=(p)=>{
+      if(assigned.has(p)) return;
+      assigned.add(p);
+      batch.push(p);
+      // ":(literal)" prefix plus the separating space.
+      bytes+=Buffer.byteLength(p,"utf8")+11;
+    };
+    while(i<sortedPaths.length&&batch.length<SNAPSHOT_DIFF_PATHS_PER_BATCH&&(batch.length===0||bytes<SNAPSHOT_DIFF_ARG_BYTES_PER_BATCH)){
+      const p=sortedPaths[i++];
+      if(assigned.has(p)) continue;
+      // A rename source is added by its destination's batch, at the position
+      // Git would emit the pair.
+      if(renameSources.has(p)) continue;
+      add(p);
+      const from=pairFromByTo.get(p);
+      if(from!==undefined) add(from);
+    }
+    if(batch.length) batches.push(batch);
+  }
+  return batches;
+}
+
 function eolNormalizedFileHash(file){
   try{
     const buf=fs.readFileSync(file);
@@ -374,11 +450,39 @@ export function gitSnapshot(startCwd){
   // Entries for tracked paths absent from this set are phantoms and are
   // dropped from the fingerprinted status. Untracked/ignored entries (`??`,
   // `!!`) are never in the diff-HEAD set and are always kept.
-  const eolDirtySet=new Set(gitOut(cwd,["-c","core.autocrlf=input","diff","--ignore-cr-at-eol","--name-only","-z","HEAD"]).toString().split("\0").filter(Boolean));
+  //
+  // Status runs FIRST so its tracked entries can bound both diffs to the
+  // paths that actually changed. On a large checkout this turns two ~12 s
+  // full-tree diffs into ~2 s limited diffs while producing byte-identical
+  // output: a path not reported by status cannot contribute to `diff HEAD`.
+  // Batches are sorted in Git's byte order and concatenated in that order so
+  // the fingerprinted binary diff matches the full-tree run exactly.
   const rawStatus=gitOut(cwd,["-c","core.autocrlf=input","status","--porcelain=v1","-z","--untracked-files=all"]);
   const statusText=rawStatus.toString("utf8");
+  const statusEntries=parsePorcelainV1ZEntries(statusText);
+  const {candidatePaths,pairFromByTo,renameSources}=snapshotDiffCandidates(statusEntries);
+  const eolDirtySet=new Set();
+  const diffParts=[];
+  for(const batch of snapshotDiffBatches(candidatePaths,pairFromByTo,renameSources)){
+    // Literal pathspecs: a tracked filename containing glob metacharacters
+    // must not pull an unrelated path into this batch (which would duplicate
+    // that path's diff across batches).
+    const pathspecs=batch.map(p=>`:(literal)${p}`);
+    for(const rel of gitOut(cwd,["-c","core.autocrlf=input","diff","--ignore-cr-at-eol","--name-only","-z","HEAD","--",...pathspecs]).toString().split("\0")){
+      if(rel) eolDirtySet.add(rel);
+    }
+    diffParts.push(gitOut(cwd,["-c","core.autocrlf=input","diff","--ignore-cr-at-eol","--no-ext-diff","--binary","HEAD","--",...pathspecs,":(exclude).autopilot/**"]));
+  }
+  // Preserve gitOut's historical type: Buffer.alloc(0) when the full-tree
+  // command would have produced no bytes, otherwise its UTF-8 string. Parts
+  // are already decoded per batch; concatenating decoded file diffs is
+  // identical to decoding the same full output (no multi-byte sequence spans
+  // two files).
+  const diff=diffParts.some(part=>part.length>0)
+    ?diffParts.map(part=>part.toString()).join("")
+    :Buffer.alloc(0);
   const statusKept=[];
-  for(const entry of parsePorcelainV1ZEntries(statusText)){
+  for(const entry of statusEntries){
     if(entry.paths.some(p=>String(p).includes(".autopilot/"))) continue;
     if(entry.xy===null){
       // Ungrouped continuation token (should not happen outside renames
@@ -392,11 +496,15 @@ export function gitSnapshot(startCwd){
     if(entry.fromPath!==null) statusKept.push(entry.fromPath);
   }
   const statusFiltered=Buffer.from(statusKept.join("\0")+(statusKept.length?"\0":""));
-  const diff=gitOut(cwd,["-c","core.autocrlf=input","diff","--ignore-cr-at-eol","--no-ext-diff","--binary","HEAD","--", ".", ":(exclude).autopilot/**"]);
 
   const fileSet=new Set([...eolDirtySet].filter(rel=>!rel.startsWith(".autopilot/")));
-  for(const rel of gitOut(cwd,["ls-files","--others","-z","--exclude-standard"]).toString().split("\0").filter(Boolean)){
-    if(!rel.startsWith(".autopilot/"))fileSet.add(rel);
+  // Untracked files come from the status already parsed above (`??` entries
+  // under --untracked-files=all): byte-identical to `git ls-files --others
+  // --exclude-standard` (plain, nested, spaces/unicode/newline names, nested
+  // git repos reported as `sub/`, empty dirs omitted by both) without a
+  // second full-tree walk.
+  for(const entry of statusEntries){
+    if(entry.xy==="??"&&!entry.toPath.startsWith(".autopilot/")) fileSet.add(entry.toPath);
   }
   // Ignored files: --directory reports a wholly-ignored dir as ONE entry
   // (e.g. `apps/web/.next/`) without descending, so git never walks
@@ -448,13 +556,22 @@ export function gitSnapshot(startCwd){
 
 // Snapshot scope (backlog #9 / TASK-31). Single place defining which
 // wholly-ignored directory segments are EXCLUDED from the fingerprint.
-// Framework build caches only: node_modules, .next, .turbo, .nuxt,
-// .svelte-kit, .parcel-cache, .vite. Deliberately NOT excluded: dist/,
-// build/, coverage/ — they are build outputs a read-only stage must not
-// change, so a write there must still trip read_only_violation.
+// Framework build caches (node_modules, .next, .turbo, .nuxt, .svelte-kit,
+// .parcel-cache, .vite) and build/coverage OUTPUT dirs (dist, build,
+// coverage, .nyc_output, out, .cache, __pycache__, .pytest_cache, target) are
+// never expanded or hashed: on a real repo they were hundreds of files / MBs
+// per snapshot. Playwright/browser artifact dirs (.playwright-mcp,
+// playwright-report, test-results) are deliberately NOT listed: a verifier's
+// screenshots/traces may hold sensitive data and must stay visible to
+// snapshot diffing (test-security-hardening.mjs). Applied to
+// IGNORED entries only — a TRACKED file under dist/ etc. is still covered by
+// status/diff. Agent-config dirs (.opencode, .claude, ...) are deliberately
+// NOT listed: they stay fingerprinted to catch writes by read-only roles.
 export const SNAPSHOT_EXCLUDED_DIR_SEGMENTS = Object.freeze([
   "node_modules", ".next", ".turbo", ".nuxt", ".svelte-kit",
-  ".parcel-cache", ".vite"
+  ".parcel-cache", ".vite",
+  "dist", "build", "coverage", ".nyc_output", "out", ".cache", "__pycache__", ".pytest_cache",
+  "target"
 ]);
 
 function snapshotPathExcluded(rel){

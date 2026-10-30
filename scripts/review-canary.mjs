@@ -356,7 +356,10 @@ function runSlicedBriefProbe(repo, fileDiff) {
   //    /workspace/repository envelope, so the review never happens and the
   //    probe silently produces no AUTOPILOT_REVIEW sentinel (observed live:
   //    "permission requested: external_directory (.../src/*); auto-rejecting").
-  //  - claude: its own --permission-mode plan.
+  //  - claude: default mode + an explicit read-only allow list (same shape
+  //    the production read-only roles launch with after backlog #2). No
+  //    Write/Edit rule is granted: the canary probe has no scratch hand-off
+  //    note to keep, so the probe stays read-only without plan mode.
   const PROBE_OPENCODE_AGENT = "review_canary_probe";
   const opencodeProbeConfig = JSON.stringify({
     "$schema": "https://opencode.ai/config.json",
@@ -369,7 +372,7 @@ function runSlicedBriefProbe(repo, fileDiff) {
   });
   const baseArgs = REVIEWER_ADAPTER === "opencode"
     ? ["run", "--format", "json", "--agent", PROBE_OPENCODE_AGENT]
-    : ["-p", "--output-format", "stream-json", "--input-format", "text", "--verbose", "--permission-mode", "plan"];
+    : ["-p", "--output-format", "stream-json", "--input-format", "text", "--verbose", "--allowedTools", "Read", "Glob", "Grep", "Bash", "--disallowedTools", "Monitor", "TaskStop", "--settings", "{\"env\":{\"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS\":\"1\"}}", "--permission-mode", "default"];
 
   // Every driver delivers the prompt on stdin (no driver declares a
   // transportPrompt prompt-as-CLI-argument path), so the prompt always goes

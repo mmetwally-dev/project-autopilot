@@ -54,14 +54,15 @@ function check(name, cond, detail) {
   check("incomplete: dead end recorded with reason incomplete", ends.length === 1 && ends[0].reason === "incomplete" && ends[0].generation === 1, ends);
 }
 
-// --- exhaustion: 3rd generation refused by default allowance (2) for both triggers ---
+// --- exhaustion: plan_reviewer default allowance 4, planner (incomplete) default allowance 2 ---
 {
   const s = {};
   const cap = {capped: {type: "turns", used: 23, limit: 22}};
-  handlePlanningContinuation(s, "plan_reviewer", cap, "task:standalone:planning:plan_reviewer", {}, "capped");
-  handlePlanningContinuation(s, "plan_reviewer", cap, "task:standalone:planning:plan_reviewer", {}, "capped");
-  const third = handlePlanningContinuation(s, "plan_reviewer", cap, "task:standalone:planning:plan_reviewer", {}, "capped");
-  check("capped: 3rd consume refused at default allowance 2", third.allowed === false && third.used === 3 && third.limit === 2, third);
+  const prs = [];
+  for (let i = 0; i < 4; i++) prs.push(handlePlanningContinuation(s, "plan_reviewer", cap, "task:standalone:planning:plan_reviewer", {}, "capped"));
+  check("capped: first 4 consumes allowed at default allowance 4", prs.every((r, i) => r.allowed === true && r.used === i + 1), prs);
+  const fifth = handlePlanningContinuation(s, "plan_reviewer", cap, "task:standalone:planning:plan_reviewer", {}, "capped");
+  check("capped: 5th consume refused at default allowance 4", fifth.allowed === false && fifth.used === 5 && fifth.limit === 4, fifth);
 
   const s2 = {};
   handlePlanningContinuation(s2, "planner", {}, "task:standalone:planning:planner", {}, "incomplete");

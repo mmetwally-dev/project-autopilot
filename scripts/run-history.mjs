@@ -8,6 +8,7 @@ import { defaultIsPidAlive } from "./run-recovery.mjs";
 import { growingTerm } from "./per-task-budget.mjs";
 import { readOwnerPid, ownerPidAlive } from "./owner-pid.mjs";
 import { buildReportModel, renderReport } from "./watch-report.mjs";
+import { detectUiProject } from "./e2e-detect.mjs";
 import { phases as standalonePhases } from "../adapters/standalone.mjs";
 
 // true = alive, false = provably gone, null = could not tell (no/invalid pid, or
@@ -196,6 +197,9 @@ export function readRunMeta(dir, id) {
     // only and may be stale or null (see observabilityMeta in
     // autopilot.mjs). result.json first (#110), status.json fallback for old runs.
     taskRef: result?.taskRef ?? status?.taskRef ?? null,
+  // The SpecKit/GSD planning stage this run worked on, recorded at launch.
+  // Null for non-planning runs and for standalone planning (`plan/tasks`).
+  planningStage: status?.planningStage ?? result?.planningStage ?? null,
   attempt: status?.attempt ?? result?.attempt ?? null,
   // Backlog #26 Step B: wrap-up marker (status.json only). Renders as a
   // NOTE suffix on the run line; runs without it read null and render
@@ -537,6 +541,30 @@ function sameResetEvent(a, b) {
 // same displayStatusLabel the old layout used (a run left "running" by a dead
 // orchestrator reads as the stale label, never RUNNING), and a cancelled
 // mission has no current run. All optional inputs are injectable for tests.
+// Final-report note: shown only when tests.e2e is none/unset and a UI was detected.
+export const NO_E2E_REPORT_NOTE = "no E2E — UI checked by component tests only";
+export function noE2eReportNote(repo, layout) {
+  let raw = layout;
+  if (raw === undefined) {
+    try { raw = JSON.parse(fs.readFileSync(path.join(repo, ".autopilot", "config.json"), "utf8")); } catch { raw = null; }
+  }
+  const e2e = raw?.tests?.e2e;
+  if (e2e && e2e !== "none") return null;
+  try { return detectUiProject(repo) ? NO_E2E_REPORT_NOTE : null; } catch { return null; }
+}
+
+// Append the no-E2E note to a mission REPORT.md once (idempotent); returns true when written.
+export function appendNoE2eNoteToReport(repo, file) {
+  try {
+    const note = noE2eReportNote(repo);
+    if (!note || !fs.existsSync(file)) return false;
+    const cur = fs.readFileSync(file, "utf8");
+    if (cur.includes(note)) return false;
+    fs.writeFileSync(file, `${cur.replace(/\n+$/, "")}\n\nNote: ${note}\n`);
+    return true;
+  } catch { return false; }
+}
+
 export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAlive, phases, policy, events, now, skill, gateLog } = {}) {
   const d = new Date();
   const p = (n) => String(n).padStart(2, "0");
@@ -623,10 +651,13 @@ export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAl
     gateLog: gateLogText,
     now: now ?? d.toISOString(),
     skill: skill ?? null,
+    command: state?.command ?? null,
     missionFallback: mission ?? null,
     ownerAlive,
   });
-  return renderReport(model, { stamp });
+  const e2eNote = noE2eReportNote(repo, configResult?.layout ?? null);
+  const out = renderReport(model, { stamp });
+  return e2eNote ? `${out.replace(/\n+$/, "")}\nNote: ${e2eNote}\n` : out;
 }
 
 // Direct-write the watch report file (same principle as progress.log: the

@@ -783,9 +783,9 @@
         },
         "plan_reviewer": {
           "max_turns": 30,
-          "max_tokens": 150000,
-          "extra_sessions": 2,
-          "wrap_up_at_tokens": 135000
+          "max_tokens": 250000,
+          "extra_sessions": 4,
+          "wrap_up_at_tokens": 225000
         },
         "implementer": {
           "max_turns": 40,
@@ -859,9 +859,9 @@
           "description": "Caps for the plan reviewer role.",
           "default": {
             "max_turns": 30,
-            "max_tokens": 150000,
-            "extra_sessions": 2,
-            "wrap_up_at_tokens": 135000
+            "max_tokens": 250000,
+            "extra_sessions": 4,
+            "wrap_up_at_tokens": 225000
           },
           "properties": {
             "max_turns": {
@@ -873,19 +873,19 @@
             "max_tokens": {
               "type": "number",
               "description": "Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
-              "default": 150000,
+              "default": 250000,
               "minimum": 1
             },
             "extra_sessions": {
               "type": "number",
               "description": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap.",
-              "default": 2,
+              "default": 4,
               "minimum": 0
             },
             "wrap_up_at_tokens": {
               "type": "number",
               "description": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
-              "default": 135000,
+              "default": 225000,
               "minimum": 1
             }
           },
@@ -1364,6 +1364,25 @@
           "items": {
             "type": "string"
           }
+        },
+        "e2e": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "End-to-end test tool for UI projects: playwright, cypress or none. Unset (null) = setup asks once; treated as none until answered.",
+          "default": null,
+          "enum": [
+            "playwright",
+            "cypress",
+            "none",
+            null
+          ]
+        },
+        "e2e_setup_pending": {
+          "type": "boolean",
+          "description": "True while an end-to-end tool setup is still pending for the project; unset or false means nothing is pending.",
+          "default": false
         }
       },
       "additionalProperties": false,

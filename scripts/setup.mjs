@@ -11,7 +11,8 @@ import {
   loadDocumentedCatalog,
   loadDocumentedEffort,
   discoverCapabilities,
-  canonicalModelId
+  canonicalModelId,
+  modelDiscoveryTimeoutLabel
 } from "./model-discovery.mjs";
 import { discoverAgentContract } from "./agent-contract.mjs";
 import { buildDiscoveryCaches } from "./setup-discovery.mjs";
@@ -40,6 +41,7 @@ import {
 import { detect as detectSpecKit } from "../adapters/speckit.mjs";
 import { detect as detectGsd } from "../adapters/gsd.mjs";
 import { detectTestCommand, resolveGatesCommands } from "./detect-test-command.mjs";
+import { detectUiProject, detectE2eTool } from "./e2e-detect.mjs";
 import { discoverPlaywrightRuntime } from "./playwright-runtime.mjs";
 import { formatPlaywrightStatusBlock } from "./playwright-status-block.mjs";
 import { PLATFORM_KINDS, detectPlatformCapabilities, detectPlatformKind, formatExecutionEnvironmentBlock } from "./platform-capabilities.mjs";
@@ -53,7 +55,6 @@ import {
   reviewerIndependenceWarning
 } from "./role-fallback-edit.mjs";
 import { normalizeEscalationModel, ESCALATION_ROLES } from "./escalation-model.mjs";
-import {isHaikuOnReadOnlyClaudeRole, planModeModelNote} from "./plan-mode-model-note.mjs";
 import { networkIsolationPrefix } from "./shell-guard.mjs";
 import { installAgentCommands } from "./agent-command-registry.mjs";
 import { fileURLToPath } from "node:url";
@@ -411,7 +412,16 @@ async function pickModelAndCapabilities(
     };
   }
 
-  const discovery = contractCache || await discoverAgentContract(adapterId, meta);
+  const cachedContract = contractCache instanceof Map
+    ? contractCache.get(adapterId)
+    : contractCache;
+  let discovery = cachedContract;
+  if (!discovery) {
+    if (forceInteractive || process.stdin.isTTY) {
+      console.log(`Loading ${meta.binary} models…`);
+    }
+    discovery = await discoverAgentContract(adapterId, meta);
+  }
   const catalog = discovery.models.status === "reported" ? discovery.models.items : [];
 
   if (catalog.length) {
@@ -446,12 +456,12 @@ async function pickModelAndCapabilities(
     // an otherwise-live result, so it is never used for "Use CLI default"
     // (item.id is empty there — there is no selected model to look up).
     let reasoningOptions = item.reasoning || [];
-    if (item.id && !reasoningOptions.length && meta.effort_flag === "--variant" && Array.isArray(item.variants) && item.variants.length) {
+    if (item.id && !reasoningOptions.length && (meta.effort_flag === "--variant" || meta.effort_mode === "model_suffix") && Array.isArray(item.variants) && item.variants.length) {
       // OpenCode has no separate reasoning field in its own model output —
-      // its --help text names --variant itself as "provider-specific
-      // reasoning effort" (e.g. high, max, minimal), so for the one adapter
-      // that declares effort_flag "--variant", the live-discovered variants
-      // ARE the live reasoning levels, not a distinct dimension.
+      // 1.x names --variant itself as "provider-specific reasoning effort"
+      // (e.g. high, max, minimal) and 2.x encodes the same level as a model
+      // suffix; either way the live-discovered variants ARE the live
+      // reasoning levels, not a distinct dimension.
       reasoningOptions = item.variants;
     } else if (item.id && !reasoningOptions.length) {
       const documentedEffort = loadDocumentedEffort(adapterId);
@@ -563,10 +573,22 @@ async function pickModelAndCapabilities(
     };
   }
 
-  console.log(
-    `\n${label}: ${meta.binary} does not expose a supported machine-readable model list; ` +
-    `Autopilot will not invent a catalog.`
-  );
+  if (discovery.models.status === "timeout") {
+    // The probe is cached and reused by every role, so the retry (and this
+    // fallback notice) is reported once per adapter, not once per role.
+    if (!discovery.models.timeoutReported) {
+      console.log(
+        `\n${label}: ${meta.binary} model list timed out after ${modelDiscoveryTimeoutLabel()} — ` +
+        `type a model name, or press Enter for the CLI default, or run ap config again later.`
+      );
+      discovery.models.timeoutReported = true;
+    }
+  } else {
+    console.log(
+      `\n${label}: ${meta.binary} does not expose a supported machine-readable model list; ` +
+      `Autopilot will not invent a catalog.`
+    );
+  }
 
   return {
     model: await valueOrDefault(
@@ -580,15 +602,45 @@ async function pickModelAndCapabilities(
   };
 }
 
+function documentedLevelsForDefaultModel(adapterId) {
+  if (adapterId === "claude") {
+    const catalog = loadDocumentedCatalog("claude");
+    if (!catalog) return null;
+    const levels = catalog.models
+      .map(model => Array.isArray(model.reasoning) ? model.reasoning : [])
+      .find(list => list.length) || [];
+    if (!levels.length) return null;
+    return {levels, source: catalog.source, last_verified: catalog.last_verified};
+  }
+  const effort = loadDocumentedEffort(adapterId);
+  if (!effort) return null;
+  return {levels: effort.levels, source: effort.source, last_verified: effort.last_verified};
+}
+
+// Merge live-discovered capabilities over an adapter manifest. Falls back to
+// the manifest's own effort_mode so a `config` transport (codex) survives and
+// a 2.x OpenCode capability can replace the manifest's --variant flag with
+// the model-suffix transport.
+function effectiveMetaFor(meta, caps) {
+  return {
+    ...meta,
+    model_flag: caps.model ? caps.model_flag : null,
+    effort_flag: caps.effort ? caps.effort_flag : null,
+    effort_mode: caps.effort_mode || meta.effort_mode || null,
+    variant_flag: caps.variant ? caps.variant_flag : null,
+    variant_mode: meta.variant_mode || null
+  };
+}
+
 // Ask for reasoning/effort and (when supported) variant for an already
 // picked model. Shared by the main-role flow and the per-role fallback
 // add flows so both use identical prompts and options. May swap
 // modelInfo.model when the model maps effort levels to exact ids.
-// Adapters without an effort flag are not asked and yield "".
-async function pickReasoningAndVariant(label, effectiveMeta, modelInfo, prior) {
+// Adapters without an effort flag/mode are not asked and yield "".
+async function pickReasoningAndVariant(label, effectiveMeta, modelInfo, prior, adapterId) {
   let reasoning = "";
 
-  if (effectiveMeta.effort_flag) {
+  if (effectiveMeta.effort_flag || effectiveMeta.effort_mode === "model_suffix") {
     if (modelInfo.effortModelIds && modelInfo.reasoningOptions.length) {
       const opts = [...modelInfo.reasoningOptions];
       const priorReasoning = prior.reasoning || "";
@@ -623,10 +675,48 @@ async function pickReasoningAndVariant(label, effectiveMeta, modelInfo, prior) {
       ) {
         reasoning = "";
       }
+    } else if (!modelInfo.model) {
+      const documented = documentedLevelsForDefaultModel(adapterId);
+      if (documented) {
+        console.log(
+          `\n${label}: documented reasoning/effort levels (not live-verified for the CLI default model)`
+        );
+        console.log(
+          `Source: ${documented.source} | verified: ${documented.last_verified}`
+        );
+
+        const opts = [
+          "Use CLI default",
+          ...documented.levels
+        ];
+
+        const priorReasoning =
+          prior.reasoning || "";
+
+        const fallback = Math.max(
+          0,
+          opts.indexOf(priorReasoning)
+        );
+
+        reasoning = await choose(
+          `${label} reasoning/effort (for selected model)`,
+          opts,
+          fallback
+        );
+
+        if (
+          reasoning === "Use CLI default"
+        ) {
+          reasoning = "";
+        }
+      } else {
+        console.log(
+          `\n${label}: the CLI default model has no selectable reasoning levels — the CLI decides.`
+        );
+      }
     } else {
-      reasoning = await value(
-        `${label} reasoning/effort`,
-        prior.reasoning || ""
+      console.log(
+        `\n${label}: ${modelInfo.model} has no selectable reasoning levels — the CLI decides.`
       );
     }
   }
@@ -719,27 +809,12 @@ async function roleConfig(  label,
   console.log(
     `  capabilities: ` +
     `model=${runtimeCaps.model ? runtimeCaps.model_flag : "no"}, ` +
-    `effort=${runtimeCaps.effort ? runtimeCaps.effort_flag : "no"}, ` +
+    `effort=${runtimeCaps.effort ? (runtimeCaps.effort_flag || (runtimeCaps.effort_mode === "model_suffix" ? "model#level" : "yes")) : "no"}, ` +
     `variant=${runtimeCaps.variant ? runtimeCaps.variant_flag : (meta.variant_mode === "model_suffix" ? "model#variant" : "no")}, ` +
     `resume=${runtimeCaps.resume ? "yes" : "no"}`
   );
 
-  const effectiveMeta = {
-    ...meta,
-    model_flag:
-      runtimeCaps.model
-        ? runtimeCaps.model_flag
-        : null,
-    effort_flag:
-      runtimeCaps.effort
-        ? runtimeCaps.effort_flag
-        : null,
-    variant_flag:
-      runtimeCaps.variant
-        ? runtimeCaps.variant_flag
-        : null,
-    variant_mode: meta.variant_mode || null
-  };
+  const effectiveMeta = effectiveMetaFor(meta, runtimeCaps);
 
   const prior =
     adapter === current.adapter
@@ -756,14 +831,16 @@ async function roleConfig(  label,
       label,
       effectiveMeta,
       prior,
-      adapter
+      adapter,
+      contractCache
     );
 
   const { reasoning, variant } = await pickReasoningAndVariant(
     label,
     effectiveMeta,
     modelInfo,
-    prior
+    prior,
+    adapter
   );
 
   // Resume is an internal orchestration decision, not a setup choice.
@@ -818,9 +895,11 @@ async function repairOneMissingModel({entry, roles, agents, roleLabels, contract
   const adapter = agents?.[adapterId];
   const binary = adapter?.binary || adapterId;
   let items = [];
+  let modelsStatus = null;
   try {
     const contract = contractCache?.get(adapterId) || await discoverAgentContract(adapterId, adapter);
     items = contract?.models?.status === "reported" ? contract.models.items : [];
+    modelsStatus = contract?.models?.status || null;
   } catch { items = []; }
   const ids = [];
   for (const item of items) {
@@ -835,7 +914,9 @@ async function repairOneMissingModel({entry, roles, agents, roleLabels, contract
   console.log(`\nModel no longer available: ${targetLabel} uses '${entry.model}', which ${binary} no longer lists.`);
   console.log(ids.length
     ? `${binary} currently lists: ${ids.join(", ")}`
-    : `${binary} currently reports no machine-readable model list.`);
+    : modelsStatus === "timeout"
+      ? `${binary} model list timed out after ${modelDiscoveryTimeoutLabel()} — type a model id or drop this entry, or run ap config again later.`
+      : `${binary} currently reports no machine-readable model list.`);
 
   const dropLabel = entry.kind === "fallback"
     ? "Drop this fallback"
@@ -1042,6 +1123,27 @@ function detectPlanningFrameworks(repo) {
 // Platform the network question is decided for (single line so tests can pin it in a disposable copy).
 const NETWORK_PLATFORM = process.platform;
 
+// E2E question (shared by first run and `ap config`): asked only for a UI project with no E2E tool
+// and no stored tests.e2e. "no" is stored as "none" so it is never asked again. Installs nothing.
+const E2E_PROMPT = "Add Playwright? (recommended) [yes/no/cypress]: ";
+
+function storedE2e(current) {
+  return current?.capabilities?.verification?.e2e ?? current?.tests?.e2e ?? null;
+}
+
+async function askE2eChoice(current, repo, interactive) {
+  const stored = storedE2e(current);
+  if (!interactive || stored != null) return stored;
+  if (!detectUiProject(repo) || detectE2eTool(repo)) return null;
+  for (;;) {
+    const answer = (await ask(E2E_PROMPT)).trim().toLowerCase();
+    if (answer === "" || answer === "y" || answer === "yes") return "playwright";
+    if (answer === "n" || answer === "no") return "none";
+    if (answer === "c" || answer === "cypress") return "cypress";
+    console.log("Please answer yes, no or cypress.");
+  }
+}
+
 async function networkSetting(current, runtimeMode) {
   let networkIsolation =
     current?.gates?.network_isolation ??
@@ -1179,16 +1281,20 @@ async function printStartScreen(detectedFrameworks) {
       return;
     }
 
-    // Probe each available CLI once per setup invocation.
-    // The capability result is reused for every role, while model/variant
-    // selection is still presented independently each time the CLI is chosen.
-    const { capabilityCache, contractCache } =
-      await buildDiscoveryCaches(available, agents);
-
     // Interactive once, reused by the role-fallback loop below and the gates
     // question further down: a non-interactive stdin keeps defaults.
     const interactive =
       forceInteractive || !!process.stdin.isTTY;
+
+    // Probe each available CLI once per setup invocation.
+    // The capability result is reused for every role, while model/variant
+    // selection is still presented independently each time the CLI is chosen.
+    const { capabilityCache, contractCache } =
+      await buildDiscoveryCaches(available, agents, undefined, {
+        onStart: (_id, meta) => {
+          if (interactive) console.log(`Loading ${meta.binary} models…`);
+        }
+      });
 
     let detectedFrameworks = [];
     let frameworkChoices = [];
@@ -1386,9 +1492,6 @@ async function printStartScreen(detectedFrameworks) {
             contractCache,
             r !== "implementer"
           );
-        if (isHaikuOnReadOnlyClaudeRole(r, roles[r]?.adapter, roles[r]?.model)) {
-          console.log(`\n${planModeModelNote(r)}`);
-        }
 
         // Pending #22: roleConfig() rebuilds the role, so carry a configured
         // escalation_model forward; the optional question below may change it.
@@ -1437,24 +1540,20 @@ async function printStartScreen(detectedFrameworks) {
               const fallbackCaps =
                 capabilityCache.get(fallbackAdapter) ||
                 await discoverCapabilities(fallbackMeta);
-              const fallbackEffectiveMeta = {
-                ...fallbackMeta,
-                model_flag: fallbackCaps.model ? fallbackCaps.model_flag : null,
-                effort_flag: fallbackCaps.effort ? fallbackCaps.effort_flag : null,
-                variant_flag: fallbackCaps.variant ? fallbackCaps.variant_flag : null,
-                variant_mode: fallbackMeta.variant_mode || null
-              };
+              const fallbackEffectiveMeta = effectiveMetaFor(fallbackMeta, fallbackCaps);
               const fallbackModelInfo = await pickModelAndCapabilities(
                 `${roleLabels[r]} fallback`,
                 fallbackEffectiveMeta,
                 null,
-                fallbackAdapter
+                fallbackAdapter,
+                contractCache
               );
               const fallbackExtras = await pickReasoningAndVariant(
                 `${roleLabels[r]} fallback`,
                 fallbackEffectiveMeta,
                 fallbackModelInfo,
-                { reasoning: roles[r]?.reasoning || "", variant: "" }
+                { reasoning: roles[r]?.reasoning || "", variant: "" },
+                fallbackAdapter
               );
               const candidate = {
                 adapter: fallbackAdapter,
@@ -1462,9 +1561,6 @@ async function printStartScreen(detectedFrameworks) {
                 reasoning: fallbackExtras.reasoning,
                 variant: fallbackExtras.variant
               };
-              if (isHaikuOnReadOnlyClaudeRole(r, candidate.adapter, candidate.model)) {
-                console.log(`\n${planModeModelNote(r)}`);
-              }
               if (!probe(fallbackAdapter)) {
                 console.log(
                   `\nWarning: fallback CLI ${fallbackAdapter} probe failed; saving anyway.`
@@ -1568,24 +1664,20 @@ async function printStartScreen(detectedFrameworks) {
           const fallbackCaps =
             capabilityCache.get(fallbackAdapter) ||
             await discoverCapabilities(fallbackMeta);
-          const fallbackEffectiveMeta = {
-            ...fallbackMeta,
-            model_flag: fallbackCaps.model ? fallbackCaps.model_flag : null,
-            effort_flag: fallbackCaps.effort ? fallbackCaps.effort_flag : null,
-            variant_flag: fallbackCaps.variant ? fallbackCaps.variant_flag : null,
-            variant_mode: fallbackMeta.variant_mode || null
-          };
+          const fallbackEffectiveMeta = effectiveMetaFor(fallbackMeta, fallbackCaps);
           const fallbackModelInfo = await pickModelAndCapabilities(
             `${roleLabels[r]} fallback`,
             fallbackEffectiveMeta,
             null,
-            fallbackAdapter
+            fallbackAdapter,
+            contractCache
           );
           const fallbackExtras = await pickReasoningAndVariant(
             `${roleLabels[r]} fallback`,
             fallbackEffectiveMeta,
             fallbackModelInfo,
-            { reasoning: roles[r]?.reasoning || "", variant: "" }
+            { reasoning: roles[r]?.reasoning || "", variant: "" },
+            fallbackAdapter
           );
           const candidate = {
             adapter: fallbackAdapter,
@@ -1593,9 +1685,6 @@ async function printStartScreen(detectedFrameworks) {
             reasoning: fallbackExtras.reasoning,
             variant: fallbackExtras.variant
           };
-          if (isHaikuOnReadOnlyClaudeRole(r, candidate.adapter, candidate.model)) {
-            console.log(`\n${planModeModelNote(r)}`);
-          }
 
           // Warn-never-block per-pick checks: CLI probe plus model
           // membership against the cached/live contract catalog.
@@ -1699,24 +1788,20 @@ async function printStartScreen(detectedFrameworks) {
           const escAdapter = await choose(`${escLabel} CLI`, available, 0);
           const escMeta = agents[escAdapter];
           const escCaps = capabilityCache.get(escAdapter) || await discoverCapabilities(escMeta);
-          const escEffectiveMeta = {
-            ...escMeta,
-            model_flag: escCaps.model ? escCaps.model_flag : null,
-            effort_flag: escCaps.effort ? escCaps.effort_flag : null,
-            variant_flag: escCaps.variant ? escCaps.variant_flag : null,
-            variant_mode: escMeta.variant_mode || null
-          };
+          const escEffectiveMeta = effectiveMetaFor(escMeta, escCaps);
           const escModelInfo = await pickModelAndCapabilities(
             escLabel,
             escEffectiveMeta,
             null,
-            escAdapter
+            escAdapter,
+            contractCache
           );
           const escExtras = await pickReasoningAndVariant(
             escLabel,
             escEffectiveMeta,
             escModelInfo,
-            { reasoning: roles[escRoles[0]]?.reasoning || "", variant: "" }
+            { reasoning: roles[escRoles[0]]?.reasoning || "", variant: "" },
+            escAdapter
           );
           const candidate = normalizeEscalationModel({
             adapter: escAdapter,
@@ -1960,6 +2045,10 @@ async function printStartScreen(detectedFrameworks) {
           true
         );
 
+    // E2E question: same shared helper/prompt for first run and `ap config` (asked only when unset).
+    const e2eChoice = await askE2eChoice(current, repo, interactive);
+    const e2ePending = storedE2e(current) == null && (e2eChoice === "playwright" || e2eChoice === "cypress");
+
     const config = {
       ...(current || {}),
 
@@ -2069,7 +2158,20 @@ async function printStartScreen(detectedFrameworks) {
           browser: "native",
           require_browser: "when-task-requires"
         },
-        ...(current?.capabilities || {})
+        ...(current?.capabilities || {}),
+        // tests.e2e / tests.e2e_setup_pending in the config file (config-layout maps them here).
+        ...(e2eChoice != null
+          ? {
+              verification: {
+                ...(current?.capabilities?.verification || {
+                  browser: "native",
+                  require_browser: "when-task-requires"
+                }),
+                e2e: e2eChoice,
+                ...(e2ePending ? { e2e_setup_pending: true } : {})
+              }
+            }
+          : {})
       },
 
       safety: {

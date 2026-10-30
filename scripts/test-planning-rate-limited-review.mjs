@@ -122,7 +122,7 @@ function rateLimitedResult() {
 //    pre-revision checkpoint, re-review wiring.
 {
   // Planner site in runPlanningPhase: guard between relay and status die.
-  const plannerRelay = autopilotSrc.indexOf('const r=await relay("planner",task,c,s,{resume:false});');
+  const plannerRelay = autopilotSrc.indexOf('const r=await relay("planner",task,c,s,{resume:false,capEnabled:true,taskRef,planRevision});');
   const plannerDie = autopilotSrc.indexOf('Planner failed or violated relay policy in phase');
   const plannerGuard = autopilotSrc.indexOf('escalateIfRateLimited(c,s,"speckit-gate-review",r,');
   assert.ok(plannerRelay !== -1 && plannerDie !== -1 && plannerGuard !== -1, "speckit planner relay/guard/die present");
@@ -139,7 +139,7 @@ function rateLimitedResult() {
   // Revision site: guard before saveReviewFeedback / planner_revision checkpoint / revision runPlanningPhase.
   const revisionFeedback = autopilotSrc.indexOf("saveReviewFeedback(s,speckitStageFeedbackKey(gateStage),rr.review", initialWiring);
   const revisionCheckpoint = autopilotSrc.indexOf("SPECKIT_PLANNER_REVISION", initialWiring);
-  const revisionRun = autopilotSrc.indexOf("await runPlanningPhase(c,gateStage,request,s);", initialWiring);
+  const revisionRun = autopilotSrc.indexOf("await runPlanningPhase(c,gateStage,request,s,planReviewRevisionCount(s,gateKey));", initialWiring);
   assert.ok(revisionFeedback !== -1 && revisionCheckpoint !== -1 && revisionRun !== -1, "revision feedback/checkpoint/run present");
   const revisionGuard = autopilotSrc.slice(initialWiring, revisionFeedback).lastIndexOf('escalateIfRateLimited(c,s,"speckit-gate-review",rr,');
   assert.ok(revisionGuard !== -1, "revision guard before saveReviewFeedback/planner_revision/runPlanningPhase");

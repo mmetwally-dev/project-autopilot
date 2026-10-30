@@ -18,6 +18,12 @@ if (process.argv.includes("--version")) {
   process.stdout.write("fake-opencode-observable 1.0.0\n");
   process.exit(0);
 }
+// Answer help probes instantly (1.x-style help naming --variant) so generation
+// detection never runs a scenario for `--help` / `run --help`.
+if (process.argv.includes("--help")) {
+  process.stdout.write("Usage: opencode [command]\n  run [message..]\n    -m, --model <model>\n    --variant <level>\n    --agent <agent>\n");
+  process.exit(0);
+}
 
 function readStdin() {
   try { return fs.readFileSync(0, "utf8"); } catch { return ""; }

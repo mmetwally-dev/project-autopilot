@@ -33,7 +33,7 @@ import path from "node:path";
 export const CLAUDE_MD_MARKER_BEGIN = "<!-- SPECKIT START -->";
 export const CLAUDE_MD_MARKER_END = "<!-- SPECKIT END -->";
 
-function normalizeRel(p) {
+export function normalizeRel(p) {
   return String(p).replaceAll("\\", "/");
 }
 
@@ -65,17 +65,27 @@ function specifyAllowed(rel, featureDir) {
   if (rel.startsWith(`${base}checklists/`) && rel.length > `${base}checklists/`.length) return true;
   return false;
 }
-function planAllowed(rel, featureDir) {
+function planAllowed(rel, featureDir, revision = false) {
   if (rel === "CLAUDE.md") return true;
   if (!featureDir) return false;
   const base = `specs/${featureDir}/`;
   if ([`${base}plan.md`, `${base}research.md`, `${base}data-model.md`, `${base}quickstart.md`].includes(rel)) return true;
   if (rel.startsWith(`${base}contracts/`) && rel.length > `${base}contracts/`.length) return true;
+  // A gate revision answering review findings may also repair an EARLIER
+  // stage's artifact that a finding cites (spec.md during plan). Same feature
+  // dir only; never a later stage's artifact (tasks.md) nor feature.json.
+  if (revision && rel === `${base}spec.md`) return true;
   return false;
 }
-function tasksAllowed(rel, featureDir) {
+function tasksAllowed(rel, featureDir, revision = false) {
   if (!featureDir) return false;
-  return rel === `specs/${featureDir}/tasks.md`;
+  const base = `specs/${featureDir}/`;
+  if (rel === `${base}tasks.md`) return true;
+  // A gate revision answering review findings may also repair earlier stages'
+  // artifacts that a finding cites (spec.md, plan.md during tasks). Same
+  // feature dir only; never feature.json nor CLAUDE.md.
+  if (revision && (rel === `${base}spec.md` || rel === `${base}plan.md`)) return true;
+  return false;
 }
 const STAGE_ALLOW = { specify: specifyAllowed, plan: planAllowed, tasks: tasksAllowed };
 
@@ -237,7 +247,7 @@ function reasonForRejection(rel, stage, featureDir, preexistingFeatureDirs) {
 // claudeMdBaseline: CLAUDE.md content captured at session start, or null.
 export function evaluatePlanningWriteBoundary({
   stage, touchedFiles = [], preexistingFeatureDirs = [], resolvedFeatureDir = null,
-  readFile = () => null, claudeMdBaseline = null
+  readFile = () => null, claudeMdBaseline = null, revision = false
 } = {}) {
   const matcher = STAGE_ALLOW[stage];
   if (!matcher) throw new Error(`Unknown planning stage: ${stage}`);
@@ -276,7 +286,7 @@ export function evaluatePlanningWriteBoundary({
       violations.push({ path: rel, reason: "multiple_new_feature_directories" });
       continue;
     }
-    if (!matcher(rel, featureDir)) {
+    if (!matcher(rel, featureDir, revision)) {
       violations.push({ path: rel, reason: reasonForRejection(rel, stage, featureDir, preexistingFeatureDirs) });
       continue;
     }

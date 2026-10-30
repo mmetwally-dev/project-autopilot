@@ -223,6 +223,60 @@ function manifestPath(repo, key) {
   return path.join(baselineDir(repo, key), "manifest.json");
 }
 
+// The repo-relative path of the NEAREST ancestor of `rel` that is a symlink
+// in the working tree, or null. lstat only, so links are never followed.
+// A path under a symlink is not an independent working-tree entry: the
+// symlink itself is the only real thing on disk, and Git can still report
+// tracked paths beneath it (e.g. committed on Windows with
+// core.symlinks=false) as deleted/untracked. Capture and diff must therefore
+// represent the symlink once and skip its descendants, never read a file
+// "through" the link.
+function symlinkAncestor(repo, rel) {
+  const segments = String(rel).split("/").filter(Boolean);
+  let cur = repo;
+  let curRel = "";
+  for (let i = 0; i < segments.length - 1; i++) {
+    curRel = curRel ? `${curRel}/${segments[i]}` : segments[i];
+    cur = path.join(cur, segments[i]);
+    let st;
+    try {
+      st = fs.lstatSync(cur);
+    } catch (e) {
+      if (e.code === "ENOENT" || e.code === "ENOTDIR") return null;
+      throw new Error(`implementation-baseline: failed to inspect '${cur}': ${e.message}`);
+    }
+    if (st.isSymbolicLink()) return curRel;
+  }
+  return null;
+}
+
+// The kind of whatever already occupies a baseline snapshot path, or null if
+// nothing does. Defensive: a previous interrupted capture can leave stale
+// snapshot entries behind (the manifest is written last), and recreating a
+// symlink on top of an existing directory otherwise fails with a raw EEXIST.
+function existingSnapshotKind(snapshotPath) {
+  let st;
+  try {
+    st = fs.lstatSync(snapshotPath);
+  } catch (e) {
+    if (e.code === "ENOENT" || e.code === "ENOTDIR") return null;
+    throw new Error(`implementation-baseline: failed to inspect baseline snapshot '${snapshotPath}': ${e.message}`);
+  }
+  if (st.isSymbolicLink()) return "symlink";
+  if (st.isDirectory()) return "directory";
+  if (st.isFile()) return "file";
+  return "other";
+}
+
+function snapshotConflictError(rel, snapshotPath, existingKind) {
+  return new Error(
+    `implementation-baseline: refusing to overwrite existing baseline snapshot '${snapshotPath}' for repository path '${rel}' (found ${existingKind}). ` +
+    `This usually means the working tree has a symlink at or above '${rel}' while Git tracks regular file(s) beneath that path ` +
+    `(for example commits made on Windows with core.symlinks=false); the symlink must be recorded once as a symlink and its descendants skipped, ` +
+    `never captured as separate files through the link.`
+  );
+}
+
 // Symlink-safe classification of a filesystem path: NEVER follows a
 // symlink to inspect what it points to. Returns one of:
 //   {kind:"absent"}                 -- nothing at this path
@@ -247,8 +301,11 @@ function classifyEntry(abs) {
 // Captures the CURRENT dirty/untracked state as the baseline for `key`, but
 // only the first time it is called for that key — every later call
 // (a retry of the same phase, or a resumed process) is a no-op, so a
-// failed attempt's own changes are never folded into the baseline. Never
-// deletes or recreates an existing baseline.
+// failed attempt's own changes are never folded into the baseline. A
+// baseline directory WITHOUT manifest.json is an incomplete capture (the
+// manifest is written last), so its stale snapshot copies are discarded and
+// recaptured rather than layered on top of; a complete baseline is never
+// deleted or recreated.
 export function ensureBaseline(repo, key, opts={}) {
   const mission = opts.mission ?? null;
   const rawDeclared = Array.isArray(opts.declaredPaths) ? opts.declaredPaths : [];
@@ -267,6 +324,11 @@ export function ensureBaseline(repo, key, opts={}) {
   }
   const dir = baselineDir(repo, key);
   const filesDir = path.join(dir, "files");
+  // No manifest means an interrupted capture (manifest.json is written
+  // LAST). Its snapshot copies may include stale REAL directories where a
+  // symlink now belongs, which would otherwise collide on resume. Discard
+  // the incomplete snapshot and capture cleanly from the working tree.
+  fs.rmSync(filesDir, {recursive: true, force: true});
   const entries = {};
   for (const entry of statusEntries(repo)) {
     recordBaselineEntry(repo, filesDir, entries, entry.path);
@@ -398,6 +460,14 @@ function readManifest(file){
 
 function recordBaselineEntry(repo, filesDir, manifest, rel) {
   if (manifest[rel]) return;
+  // Deterministic regardless of the order paths arrive in: any path under a
+  // working-tree symlink collapses to that symlink (captured once); the
+  // descendant itself is never recorded as a separate file through the link.
+  const ancestor = symlinkAncestor(repo, rel);
+  if (ancestor) {
+    recordBaselineEntry(repo, filesDir, manifest, ancestor);
+    return;
+  }
   const abs = path.join(repo, rel);
   const classified = classifyEntry(abs);
   if (classified.kind === "absent") {
@@ -405,8 +475,12 @@ function recordBaselineEntry(repo, filesDir, manifest, rel) {
     return;
   }
   if (classified.kind === "file") {
-    manifest[rel] = {type: "file"};
     const snapshotPath = path.join(filesDir, rel);
+    const existing = existingSnapshotKind(snapshotPath);
+    if (existing && existing !== "file") {
+      throw snapshotConflictError(rel, snapshotPath, existing);
+    }
+    manifest[rel] = {type: "file"};
     fs.mkdirSync(path.dirname(snapshotPath), {recursive: true});
     fs.copyFileSync(abs, snapshotPath);
     return;
@@ -419,8 +493,18 @@ function recordBaselineEntry(repo, filesDir, manifest, rel) {
     // handing this snapshot symlink straight to `git diff --no-index`
     // later compares target strings safely, with no code in this module
     // ever opening the pointed-to file on either side.
-    manifest[rel] = {type: "symlink", target: classified.target};
     const snapshotPath = path.join(filesDir, rel);
+    const existing = existingSnapshotKind(snapshotPath);
+    if (existing) {
+      let existingTarget = null;
+      try { existingTarget = fs.readlinkSync(snapshotPath); } catch { /* not a link */ }
+      if (existing === "symlink" && existingTarget === classified.target) {
+        manifest[rel] = {type: "symlink", target: classified.target};
+        return;
+      }
+      throw snapshotConflictError(rel, snapshotPath, existing);
+    }
+    manifest[rel] = {type: "symlink", target: classified.target};
     fs.mkdirSync(path.dirname(snapshotPath), {recursive: true});
     fs.symlinkSync(classified.target, snapshotPath);
     return;
@@ -521,6 +605,13 @@ export function scopedDeltaChunks(repo, key, opts={}) {
   const allPaths = new Set([...Object.keys(manifestEntries), ...entries.map(e => e.path), ...declaredPaths]);
   const chunks = [];
   for (const rel of allPaths) {
+    // A path under a working-tree symlink is represented by that symlink
+    // alone (see recordBaselineEntry). Git status still lists the tracked
+    // files beneath such a path as deleted/untracked, and diffing them
+    // "through" the link would invent changes that are really just the
+    // pre-existing symlink-vs-tracked-files shape. The symlink's own entry
+    // (if any) is processed normally below.
+    if (symlinkAncestor(repo, rel)) continue;
     const baseEntry = manifestEntries[rel] || null;
     const currentAbs = path.join(repo, rel);
 

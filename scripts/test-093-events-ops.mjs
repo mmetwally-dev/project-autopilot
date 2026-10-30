@@ -88,7 +88,14 @@ async function runTest() {
     assert(stopEvt.reason === "stop", `reason should be stop`);
     assert(stopEvt.scope === "mission", `scope should be mission`);
     assert(typeof stopEvt.at === "string" && stopEvt.at.length > 0, `should have timestamp`);
-    
+
+    const reportFile1 = path.join(missionDir1, "WATCH-REPORT.md");
+    assert(fs.existsSync(reportFile1), "WATCH-REPORT.md should exist");
+    const report1 = fs.readFileSync(reportFile1, "utf8");
+    const statusLine1 = report1.split(/\r?\n/).find((line) => /Status:/.test(line)) || "";
+    assert(/Status:\s+STOPPED/.test(report1), `final report should say STOPPED after ap stop, got: ${statusLine1}`);
+    assert(!/Status:\s+RUNNING/.test(report1), `final report must not still say RUNNING, got: ${statusLine1}`);
+
     console.log("  PASS");
   } finally {
     cleanup(repo1, binDir1);

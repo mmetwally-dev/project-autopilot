@@ -50,6 +50,25 @@ export function decideEscalationName({failureClass, retryable, used, limit, budg
         : "RATE_LIMITED is not retryable; resume with `ap run` after the limit lifts";
       return {step: "rate_limited_escalation", detail};
     }
+    // The CLI's own credentials are unusable. Same-adapter retry (and any
+    // same-adapter fallback) cannot fix it; the operator must log the CLI in
+    // again. The adapter/binary and the CLI's own reason travel on the auth
+    // observation's evidence.
+    if (failureClass === "AUTH_REQUIRED") {
+      let adapter = null;
+      let reason = null;
+      if (Array.isArray(evidence)) {
+        for (const entry of evidence) {
+          if (!entry || typeof entry !== "object") continue;
+          if (adapter == null && typeof entry.adapter === "string" && entry.adapter !== "") adapter = entry.adapter;
+          if (reason == null && typeof entry.reason === "string" && entry.reason !== "") reason = entry.reason;
+          if (adapter != null && reason != null) break;
+        }
+      }
+      const cli = adapter || "the CLI";
+      const why = reason ? ` (${reason})` : "";
+      return {step: "auth_required_escalation", detail: `${cli} is logged out${why} — run \`${cli}\` and log in, then \`ap run\``};
+    }
     return {step: "non_retryable_failure", detail: `${failureClass} is not retryable`};
   }
   if (budget == null) {

@@ -432,14 +432,15 @@ function tickRoleGraceUnit({usage, limits, events, graceWindow}) {
   const roleTurnUsage = (turns, growing = 10_000) => ({turns, cacheRead: growing, input: 0});
   for (const role of REVIEW_ROLES_031) {
     const limits = resolvePerRoleLimits(role, {});
-    const expTokens = role === "planner" ? 200_000 : 150_000;
-    const expWrapup = role === "planner" ? 180_000 : 135_000;
+    const expTokens = role === "planner" ? 200_000 : role === "plan_reviewer" ? 250_000 : 150_000;
+    const expWrapup = role === "planner" ? 180_000 : role === "plan_reviewer" ? 225_000 : 135_000;
     const expTokenCeiling = Math.ceil(expTokens * 1.1);
     const T = (role === "verifier" || role === "planner" || role === "plan_reviewer") ? 30 : 22; // backlog #59(b), #111: verifier/planner/plan_reviewer turn default 30
     check(`grace/${role}: defaults are ${T} turns / ${expTokens} tokens / ${expWrapup} wrap-up`,
       limits.perTaskMaxTurns === T && limits.perTaskMaxTokens === expTokens && limits.wrapUpTokenThreshold === expWrapup, limits);
     // Pure decision: finishing breach at 23 turns grants the single window
-    // with +3-turn / +10%-token ceilings (25 turns / 165K tokens, 220K for planner).
+    // with +3-turn / +10%-token ceilings (25 turns / 165K tokens, 275K for
+    // plan_reviewer, 220K for planner).
     const grant = evaluateCapGraceWindow({verifyPassed: true, writingFinalResult: false, graceUsed: false, turnsUsed: T + 1, perTaskMaxTurns: limits.perTaskMaxTurns, tokensUsed: 10_000, perTaskMaxTokens: limits.perTaskMaxTokens});
     check(`grace/${role}: finishing breach at ${T + 1} turns grants window with ${T + 3}-turn/${expTokenCeiling} ceilings`,
       grant.granted === true && grant.turnCeiling === T + 3 && grant.tokenCeiling === expTokenCeiling, grant);

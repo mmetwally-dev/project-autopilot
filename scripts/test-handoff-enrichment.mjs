@@ -171,9 +171,24 @@ describe("planner brief wiring (backlog #55)", () => {
   const standaloneBrief = "Keep a hand-off note at ${handoffNoteRelPath(mission, 'standalone-planning-planner')}";
   check("standalone planner brief (revision + fresh) names the planner hand-off note",
     autopilot.split(standaloneBrief).length - 1 >= 2);
-  const speckitBrief = "Keep a hand-off note at ${handoffNoteRelPath(s.mission, 'standalone-planning-planner')}";
-  check("speckit planner brief names the planner hand-off note",
-    autopilot.split(speckitBrief).length - 1 >= 1);
+  // SpecKit and GSD planning now run capped with their own per-framework
+  // taskRef, so each planner brief names its own note and each loop reads it
+  // back through planningContinuationText.
+  const perFrameworkBrief = "Keep a hand-off note at ${handoffNoteRelPath(s.mission, taskRef)}";
+  const windowAt = (marker, len = 2500) => {
+    const at = autopilot.indexOf(marker);
+    return {at, text: at < 0 ? "" : autopilot.slice(at, at + len)};
+  };
+  const speckitPlanner = windowAt(`planningContinuationText(s,"speckit","planner")`);
+  check("speckit planner brief names its own planner hand-off note",
+    speckitPlanner.at !== -1 && speckitPlanner.text.includes(perFrameworkBrief), speckitPlanner.at);
+  const gsdPlanner = windowAt(`planningContinuationText(s,"gsd","planner")`);
+  check("gsd planner brief names its own planner hand-off note",
+    gsdPlanner.at !== -1 && gsdPlanner.text.includes(perFrameworkBrief), gsdPlanner.at);
+  check("planning continuation text reads the planner hand-off note back",
+    /function planningContinuationText\(s,framework,role\)\{[\s\S]*?readHandoffNote\(s\?\.mission,taskRef\)/.test(autopilot));
+  check("planner taskRef is derived per framework",
+    /function planningScopeParts\(framework,role\)\{\s*return \{taskRef:`\$\{framework\}-planning-\$\{role\}`,contScope:`task:\$\{framework\}:planning:\$\{role\}`\};/.test(autopilot));
   check("standalone loop reads the brief's planner hand-off note",
     autopilot.includes("readHandoffNote(mission, 'standalone-planning-planner')"));
   // The brief text itself carries the Found/Dead-ends contract.

@@ -6,7 +6,9 @@
 //   - write roles (planner, implementer) are launched with exactly
 //     `--permission-mode acceptEdits`;
 //   - read-only roles (plan_reviewer, code_reviewer, verifier) are launched
-//     with exactly `--permission-mode plan`.
+//     with exactly `--permission-mode default`, an explicit read-only allow
+//     list, and Write/Edit only under the sanctioned scratch mount (backlog
+//     #2: plan mode refused the scratch hand-off note).
 //
 // NOTE: this file is executed as `claude.com` (unknown extension ->
 // CommonJS), so it must stay dependency-free CommonJS: no import syntax.
@@ -67,7 +69,7 @@ process.stdin.on("end", () => {
 
   let expectedMode = null;
   if (WRITE_ROLES.has(role)) expectedMode = "acceptEdits";
-  else if (READ_ROLES.has(role)) expectedMode = "plan";
+  else if (READ_ROLES.has(role)) expectedMode = "default";
   else fail("unknown role '" + role + "' (fail closed)");
 
   const observedModes = [];
@@ -88,6 +90,28 @@ process.stdin.on("end", () => {
     const lowered = String(arg).toLowerCase();
     if (lowered.includes("dangerously-skip-permissions") || lowered.includes("bypasspermissions") || lowered.includes("bypass-permissions")) {
       fail("role '" + role + "' arrived with a dangerous permission bypass flag: " + arg);
+    }
+  }
+  if (READ_ROLES.has(role)) {
+    const allowed = [];
+    for (let i = 0; i < args.length; i += 1) {
+      if (args[i] !== "--allowedTools") continue;
+      for (let j = i + 1; j < args.length && !String(args[j]).startsWith("--"); j += 1) allowed.push(args[j]);
+    }
+    for (const tool of ["Read", "Glob", "Grep", "Bash"]) {
+      if (!allowed.includes(tool)) fail("role '" + role + "' is missing read-only tool '" + tool + "' in --allowedTools: " + JSON.stringify(allowed));
+    }
+    if (allowed.includes("Write") || allowed.includes("Edit")) {
+      fail("role '" + role + "' arrived with a bare Write/Edit grant: " + JSON.stringify(allowed));
+    }
+    const writeRules = allowed.filter(a => /^Write\(/.test(a));
+    const editRules = allowed.filter(a => /^Edit\(/.test(a));
+    if (writeRules.length === 0 || editRules.length === 0) {
+      fail("role '" + role + "' is missing the scratch-only Write/Edit rules: " + JSON.stringify(allowed));
+    }
+    if (!writeRules.every(r => /^Write\(\/\/workspace\/scratch\/\*\*\)$/.test(r))
+      || !editRules.every(r => /^Edit\(\/\/workspace\/scratch\/\*\*\)$/.test(r))) {
+      fail("role '" + role + "' has a Write/Edit grant outside the scratch mount: " + JSON.stringify(allowed));
     }
   }
 

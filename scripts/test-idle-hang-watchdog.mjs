@@ -515,11 +515,19 @@ function makeAdapterDir() {
 }
 
 const SILENT_HANG_CODE = "setTimeout(()=>{},60000);";
+// Load-robust margins (backlog #13): under heavy parallel load node startup
+// of the adapter + the child spawn can take several seconds, and the idle
+// clock starts before that. With a 3 s window the watchdog could tick before
+// the child existed and (correctly) trip. A 9 s window leaves a wide margin
+// for startup, and the child outlives it (12 s) so the check still proves a
+// live child, not the clock, keeps the session alive.
+const CHILD_CASE_IDLE_MS = 9000;
+const CHILD_CASE_CHILD_MS = 12000;
 const CHILD_WORK_CODE = [
   'const {spawn} = require("node:child_process");',
-  'const kid = spawn(process.execPath, ["-e", "setTimeout(()=>{},5000);"], {shell:false, stdio:"ignore"});',
+  `const kid = spawn(process.execPath, ["-e", "setTimeout(()=>{},${CHILD_CASE_CHILD_MS});"], {shell:false, stdio:"ignore"});`,
   'kid.on("exit", () => process.exit(0));',
-  "setTimeout(() => process.exit(3), 15000);",
+  "setTimeout(() => process.exit(3), 25000);",
   "",
 ].join("\n");
 const SILENT_EXIT_4S_CODE = "setTimeout(()=>{process.exit(0);},4000);";
@@ -551,11 +559,11 @@ const OUTPUT_THEN_SILENCE_CODE = "setTimeout(()=>{process.stdout.write(\"working
   const repo = makeRepoRoot();
   const addir = makeAdapterDir();
   try {
-    const r = await runWatchSession({adapterFile: writeAdapterFile(addir, "fake-adapter-.cjs", CHILD_WORK_CODE), repoRoot: repo, timeoutMs: 20000});
+    const r = await runWatchSession({adapterFile: writeAdapterFile(addir, "fake-adapter-.cjs", CHILD_WORK_CODE), repoRoot: repo, idleHangMs: CHILD_CASE_IDLE_MS, timeoutMs: 40000});
     check("2: session with a live child is not tripped", r.breach === null, r.breach);
     check("2: it finishes normally once the child is done", r.status === 0, {status: r.status, signal: r.signal});
     check("2: it outlived the idle window (the child, not the watchdog, set the pace)",
-      r.elapsedMs >= 4800 && r.elapsedMs < 15000, r.elapsedMs);
+      r.elapsedMs >= CHILD_CASE_CHILD_MS - 200 && r.elapsedMs < 25000, r.elapsedMs);
   } finally {
     fs.rmSync(repo, {recursive: true, force: true});
     fs.rmSync(addir, {recursive: true, force: true});

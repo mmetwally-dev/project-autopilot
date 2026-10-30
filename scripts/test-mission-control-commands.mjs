@@ -270,6 +270,34 @@ try {
     }
   }
 
+  // ---- S10: the final report after a live stop says STOPPED, not RUNNING ----
+  // `ap stop` must record its operator event BEFORE refreshing the report: the
+  // killed orchestrator cannot rewrite its own report, and with no owner PID
+  // file left the report can only derive STOPPED from that last stop event.
+  {
+    const repo = track(makeRepo("mc-stop-report"));
+    const s = readState(repo);
+    s.phase = "implementing"; s.step = "implement";
+    writeState(repo, s);
+    const child = spawnDecoy(repo);
+    try {
+      const visible = await waitForLive(repo, child);
+      check("S10 decoy visible to ap stop detector", visible);
+      const go = run(["stop", "--yes"], repo);
+      await settle(300);
+      check("S10 stop --yes exits 0 and the live run is dead",
+        go.status === 0 && !decoyAlive(child), {status: go.status, out: go.out, alive: decoyAlive(child)});
+      const reportFile = path.join(repo, ".autopilot", "missions", "999-test-mission", "WATCH-REPORT.md");
+      check("S10 final WATCH-REPORT.md exists", fs.existsSync(reportFile));
+      const report = fs.existsSync(reportFile) ? fs.readFileSync(reportFile, "utf8") : "";
+      const statusLine = report.split(/\r?\n/).find((line) => /Status:/.test(line)) || "";
+      check("S10 final report says STOPPED, not RUNNING",
+        /Status:\s+STOPPED/.test(report) && !/Status:\s+RUNNING/.test(report), statusLine);
+    } finally {
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+    }
+  }
+
   // ---- S9: interactive TTY answer (POSIX, needs util-linux `script`) ---------
   // Seen live through wsl.exe: the Enter that launched `ap stop` leaked into
   // the pty as "\n", the prompt read it as an empty answer, and a typed `y`

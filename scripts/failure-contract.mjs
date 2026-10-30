@@ -1,4 +1,4 @@
-import {renderFinding} from "./review-feedback.mjs";
+import {normalizeFindings, renderFinding} from "./review-feedback.mjs";
 
 export const FAILURE_SCHEMA = "autopilot-failure.v1";
 
@@ -11,7 +11,7 @@ export const FAILURE_CLASSES = Object.freeze([
   "PERMISSION_DENIED", "PATH_UNSUPPORTED", "INVOCATION_MISMATCH",
   "STRUCTURED_OUTPUT_MISSING", "STRUCTURED_OUTPUT_INVALID",
   "READ_ONLY_VIOLATION", "GIT_MUTATION_BLOCKED", "GIT_COMMIT_DETECTED",
-  "COMMAND_FAILED", "SERVER_UNAVAILABLE", "RATE_LIMITED", "PROVIDER_ERROR", "IDLE_HANG", "IMPLEMENTATION_REJECTED",
+  "COMMAND_FAILED", "SERVER_UNAVAILABLE", "RATE_LIMITED", "AUTH_REQUIRED", "PROVIDER_ERROR", "IDLE_HANG", "IMPLEMENTATION_REJECTED",
   "VERIFICATION_REJECTED", "PLANNING_REJECTED", "INTERNAL_CONTRACT_ERROR"
 ]);
 
@@ -107,6 +107,9 @@ export function parseReviewContract(output) {
         // Backlog #118: optional per-previous-finding fixed/not_fixed record
         // (code-review rounds 2+). Tolerant: absent/malformed -> [].
         previous: normalizePreviousStatuses(review.previous),
+        // Backlog #8: optional minor notes from a plan review. They never
+        // fail the review; strings only, bounded like findings.
+        notes: normalizeFindings(Array.isArray(review.notes) ? review.notes.filter(note => typeof note === "string") : []),
       },
       failure: null
     };
@@ -211,9 +214,20 @@ export function classifyObservedFailure(observation) {
   // 4. Structured terminal rate limit — a CLI-protocol status field, not
   // text scraped from prose, so it is authoritative regardless of exit code.
   if (eventTypes.has("rate_limited")) return failure("RATE_LIMITED", "infrastructure", false, evidence);
-  // 4b. Backlog #106: structured provider-side error (opencode UnknownError).
-  // Retryable (one same-model retry may be spent) but also a role-fallback
-  // trigger like RATE_LIMITED, so a configured fallback is tried first.
+  // 4a. The CLI itself is logged out (claude 401 / revoked or expired OAuth).
+  // Non-retryable and adapter-domain: retrying the same CLI cannot restore
+  // credentials. Placed beside RATE_LIMITED, before every generic adapter
+  // error, so it can never degrade to a retryable PROCESS_EXIT_NONZERO.
+  if (eventTypes.has("auth_required")) return failure("AUTH_REQUIRED", "adapter", false, evidence);
+  // 4b. OpenCode 2.x without --standalone cannot resolve the config-defined
+  // agent ("Agent not found: ..."). That is an invocation/config failure, not
+  // a provider limit and not an idle hang: name it explicitly and do not
+  // retry the same invocation.
+  if (eventTypes.has("agent_not_found")) return failure("INVOCATION_MISMATCH", "adapter", false, evidence);
+  // 4c. Backlog #106: structured provider-side error (opencode UnknownError,
+  // and 2.x provider.no-route / "Model unavailable"). Retryable (one
+  // same-model retry may be spent) but also a role-fallback trigger like
+  // RATE_LIMITED, so a configured fallback is tried first.
   if (eventTypes.has("provider_error")) return failure("PROVIDER_ERROR", "infrastructure", true, evidence);
   // 5. Structured failed permission/path/server evidence — trusted because
   // it comes from the adapter's own canonicalized tool-call outcome
@@ -259,7 +273,7 @@ export function classifyObservedFailure(observation) {
 // error line (which stays PROCESS_EXIT_NONZERO); only silence or explicit
 // limit text is reclassified, so the normal fallback path runs instead of
 // burning the adapter retry budget and stopping.
-const OPENCODE_LIMIT_TEXT = /(?:\b429\b|rate[_\s-]?limit|too many requests|insufficient[_\s-]?(?:quota|funds)|quota[_\s-]?(?:exceeded|exhausted))/i;
+const OPENCODE_LIMIT_TEXT = /(?:\b429\b|rate[_\s-]?limit|too many requests|insufficient[_\s-]?(?:quota|funds)|quota[_\s-]?(?:exceeded|exhausted)|free usage limit reached|usage limit reached|subscribe to [^\n]{0,80}to keep going)/i;
 export function reclassifySilentOpenCodeFailure(observed, { adapter, output, stderr } = {}) {
   if (!observed || observed.class !== "PROCESS_EXIT_NONZERO" || adapter !== "opencode") return observed;
   const answer = String(output || "").trim();
@@ -318,7 +332,7 @@ export function verdictFailure(roleName, verdict) {
 // deliberately absent here — so a warning-only observation set on a clean
 // exit classifies to null below and the relay mapping falls through to the
 // missing-sentinel STRUCTURED_OUTPUT_MISSING path.
-const TRUSTED_FAILURE_EVENT_TYPES = new Set(["rate_limited", "provider_error", "permission_denied", "path_unsupported", "server_unavailable"]);
+const TRUSTED_FAILURE_EVENT_TYPES = new Set(["rate_limited", "auth_required", "agent_not_found", "provider_error", "permission_denied", "path_unsupported", "server_unavailable"]);
 // Reviewer FAIL verdicts live in the failure class (their findings are plain
 // strings, not typed events), so they are exempt from the evidence check.
 const VERDICT_FAILURE_CLASSES = new Set(["IMPLEMENTATION_REJECTED", "VERIFICATION_REJECTED", "PLANNING_REJECTED"]);
@@ -630,8 +644,10 @@ export function recordFailureBudget(state, policy, observedFailure, scope) {
   const limit = positiveInteger(policy?.failure_budgets?.[name], defaultBudget(name));
   // RATE_LIMITED escalates immediately without consuming the budget: the
   // counter is never incremented, so the key stays unset and every such
-  // failure reports allowed:false.
-  if (observedFailure?.class === "RATE_LIMITED") return {allowed: false, budget: name, used: 0, limit, scope};
+  // failure reports allowed:false. AUTH_REQUIRED is the same shape — logging
+  // in again is an operator action, not a retry — so it must not burn the
+  // adapter budget either.
+  if (observedFailure?.class === "RATE_LIMITED" || observedFailure?.class === "AUTH_REQUIRED") return {allowed: false, budget: name, used: 0, limit, scope};
   const key = `${name}:${scope}`;
   state.failureBudgets = state.failureBudgets || {};
   state.failureBudgets[key] = (state.failureBudgets[key] || 0) + 1;

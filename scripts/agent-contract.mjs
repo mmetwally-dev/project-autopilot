@@ -1,4 +1,10 @@
-import {discoverCapabilities, discoverModelCatalog, loadDocumentedCatalog} from "./model-discovery.mjs";
+import {
+  discoverCapabilities,
+  discoverModelCatalog,
+  loadDocumentedCatalog,
+  modelDiscoveryRetryTimeoutMs,
+  modelDiscoveryTimeoutLabel
+} from "./model-discovery.mjs";
 import {ADAPTER_CONTRACT_VERSION, validateCapabilityDeclaration} from "./capability-contract.mjs";
 
 export const ADAPTER_CONTRACT = "autopilot-adapter.v2";
@@ -26,14 +32,30 @@ export function validateAdapterContract(id, adapter) {
   return {ok: errors.length === 0, errors};
 }
 
+// Backlog #5: a cold first start can exceed the normal model-list budget while
+// the CLI is still working. Retry a timed-out list ONCE with double the
+// effective budget before setup/config falls back to the free-text prompt.
+// Unsupported/error results are never retried.
+async function discoverCatalogWithTimeoutRetry(id, adapter) {
+  const first = await discoverModelCatalog(adapter);
+  if (first?.status !== "timeout") return first;
+  const retryMs = modelDiscoveryRetryTimeoutMs();
+  const binary = adapter.binary || id;
+  console.log(`${binary} is slow to answer (first start can take a while) — trying again for up to ${modelDiscoveryTimeoutLabel(retryMs)}…`);
+  return discoverModelCatalog(adapter, {timeoutMs: retryMs});
+}
+
 export async function discoverAgentContract(id, adapter) {
   const validation = validateAdapterContract(id, adapter);
   if (!validation.ok) return {contract: ADAPTER_CONTRACT, adapter: id, valid: false, errors: validation.errors, capabilities: null, access: {method: "cli", requires_api_key: false}, models: {status: "failed", source: "contract", items: []}};
   const capabilities = await discoverCapabilities(adapter);
   try {
-    const items = await discoverModelCatalog(adapter);
+    const items = await discoverCatalogWithTimeoutRetry(id, adapter);
     if (Array.isArray(items) && items.length) {
       return {contract: ADAPTER_CONTRACT, adapter: id, valid: true, errors: [], capabilities, access: {method: "cli", requires_api_key: false, note: "Uses the installed CLI/provider authentication context."}, models: {status: "reported", source: adapter.model_discovery || "cli", items}};
+    }
+    if (items?.status === "timeout") {
+      return {contract: ADAPTER_CONTRACT, adapter: id, valid: true, errors: [], capabilities, access: {method: "cli", requires_api_key: false}, models: {status: "timeout", source: adapter.model_discovery || "cli", items: []}};
     }
   } catch (error) {
     return {contract: ADAPTER_CONTRACT, adapter: id, valid: true, errors: [String(error?.message || error)], capabilities, access: {method: "cli", requires_api_key: false}, models: {status: "failed", source: adapter.model_discovery || "cli", items: []}};

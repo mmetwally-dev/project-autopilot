@@ -141,15 +141,19 @@ function escalate(recorded,{state,saveState,fatal,escalatePrefix,cause}){
   fatal(`${escalatePrefix} failed: ${cause} (${recorded.scope}): ${naming.detail}; human intervention required.`);
 }
 
-// Caller-facing RATE_LIMITED guard (imported by scripts/autopilot.mjs).
-// Returns false when the result is not rate-limited; otherwise escalates at
-// once through the shared helper above and never returns (the injected
-// fatal throws). Forces retryable:false on the recorded-shaped object so the
-// shared naming takes its immediate-escalation step even if the relay marked
-// the failure retryable, and writes zero failure-budget state.
+// Caller-facing immediate-escalation guard (imported by scripts/autopilot.mjs).
+// Returns false when the result is neither RATE_LIMITED nor AUTH_REQUIRED;
+// otherwise escalates at once through the shared helper above and never
+// returns (the injected fatal throws). Both classes are non-retryable and
+// spend zero failure budget: a provider limit lifts later, and a logged-out
+// CLI can only be fixed by the operator. Forces retryable:false on the
+// recorded-shaped object so the shared naming takes its immediate-escalation
+// step even if the relay marked the failure retryable, and writes zero
+// failure-budget state.
 export function escalateIfRateLimited(config,state,taskScope,result,{fatal,saveState,escalatePrefix}={}){
-  if(result?.failure?.class!=="RATE_LIMITED") return false;
-  const failureRecord={...result.failure,class:"RATE_LIMITED",retryable:false};
+  const failureClass=result?.failure?.class;
+  if(failureClass!=="RATE_LIMITED"&&failureClass!=="AUTH_REQUIRED") return false;
+  const failureRecord={...result.failure,class:failureClass,retryable:false};
   const scope=failureBudgetScope(failureRecord,taskScope,result);
   escalate({failure:failureRecord,budget:{allowed:false,budget:null,used:0,limit:0,scope},scope},
     {state,saveState:typeof saveState==="function"?saveState:()=>{},fatal:typeof fatal==="function"?fatal:(m)=>{throw new Error(String(m));},escalatePrefix,cause:`${failureRecord.class}/${failureRecord.domain}`});

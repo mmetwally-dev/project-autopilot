@@ -9,6 +9,8 @@ import {equivalentEventPath, eventReferencesPath} from "./event-paths.mjs";
 import {decodeAgyEvents, observeAgyEvents, accumulateAgyUsage, agyRunModelPatch, writeAgyAllowRule} from "./agy-events.mjs";
 import {resolveRunModel} from "./model-extract.mjs";
 import {updateRunModel} from "./run-observability.mjs";
+import {FREE_QUOTA_REASON, OPENCODE_TITLE_MODEL_LINE_RE} from "./idle-hang-watchdog.mjs";
+import {detectOpenCodeGeneration, splitOpenCodeModelSuffix} from "./opencode-generation.mjs";
 
 const DRIVERS = Object.freeze({
   codex: codexDriver(),
@@ -76,6 +78,11 @@ function resolveOpenCodeBinary(binary) {
 function opencodeInvocation(request) {
   // --print-logs: the only place opencode reports the model it ran (#107).
   const args = ["run", "--print-logs", "--format", "json"];
+  // 2.x resolves config-defined agents (autopilot_readonly lives in
+  // OPENCODE_CONFIG_CONTENT) only in a private server, so every run role on
+  // that generation needs --standalone.
+  const generation = detectOpenCodeGeneration({binary: request.binary});
+  if (generation === "2") args.push("--standalone");
   if (["write", "scratch"].includes(request.mode)) args.push("--auto");
   // Not the native "plan" agent: OpenCode 1.18.29's built-in "plan" agent
   // carries an unconditional `edit "*": deny` in its own resolved permission
@@ -89,8 +96,14 @@ function opencodeInvocation(request) {
   // repository containment still comes from bubblewrap's read-only bind, not
   // from this permission block.
   else args.push("--agent", "autopilot_readonly");
-  if (request.model) args.push("--model", request.model);
-  if (request.reasoning) args.push("--variant", request.reasoning);
+  // 2.x carries the effort level as provider/model#level (there is no
+  // --variant); 1.x keeps the flag it was verified against.
+  const effort = generation === "2" && request.reasoning;
+  if (effort && !request.model) throw new Error("OpenCode 2.x reasoning/effort requires a selected model.");
+  if (request.model || effort) {
+    args.push("--model", effort ? `${request.model}#${request.reasoning}` : request.model);
+  }
+  if (request.reasoning && generation !== "2") args.push("--variant", request.reasoning);
   return {binary: request.binary, args};
 }
 
@@ -99,7 +112,12 @@ function opencodeAppliedSelections(invocation) {
     const index = invocation.args.indexOf(flag);
     return index >= 0 ? invocation.args[index + 1] : null;
   };
-  return {model: pick("--model"), reasoning: pick("--variant")};
+  const model = pick("--model");
+  if (model && String(model).includes("#")) {
+    const split = splitOpenCodeModelSuffix(model);
+    return {model: split.model, reasoning: split.reasoning};
+  }
+  return {model, reasoning: pick("--variant")};
 }
 
 // Containment inside the trusted envelope comes from bubblewrap, not from any
@@ -158,7 +176,7 @@ const SENTINEL_TOKEN = "AUTOPILOT_REVIEW";
 // (file_read_*, write_*, outside_write_*, git_mutation_*, command_*,
 // timeout_child_command_started, permission_denied).
 function observeOpenCodeEvents(events, probe = {}) {
-  const observations = [...detectOpenCodeRateLimited(events), ...detectOpenCodeProviderError(events)];
+  const observations = [...detectOpenCodeRateLimited(events), ...detectOpenCodeProviderError(events), ...detectOpenCodeAgentNotFound(events)];
   const emit = (type, event, details = {}) => observations.push({type, source: "cli_event", ...details, event});
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
@@ -249,22 +267,59 @@ function observeOpenCodeEvents(events, probe = {}) {
   return observations;
 }
 
-// Structured opencode provider error events only (never prose): the run's
-// `{"type":"error","error":{"name":"APIError","data":{"message":...,
-// "statusCode":429}}}` event (2026-10-13 incident B). Rate limit, quota
-// ("Insufficient account funds") and the free tier's "Endpoint is
-// unavailable" are all the same operator-visible state: RATE_LIMITED.
-const OPENCODE_RATE_LIMIT_MESSAGE = /rate[_\s]limit[_\s]exceeded|endpoint is unavailable|insufficient account funds/i;
+// opencode provider errors (never prose). Two channels carry them:
+// - the structured stdout error event `{"type":"error","error":{"name":
+//   "APIError","data":{"message":...,"statusCode":429}}}` (2026-10-13
+//   incident B);
+// - opencode's own logfmt ERROR line on stderr (mission 2026-10-28 backlog
+//   #14: `error.error="AI_APICallError: Free usage limit reached ..."`, no
+//   429 status at all).
+// Rate limit, quota ("Insufficient account funds") and the free tier's
+// "Endpoint is unavailable"/"Free usage limit reached" are all the same
+// operator-visible state: RATE_LIMITED. The 1.x stderr branch requires the
+// engine error source token (`AI_APICallError`/`AI_RetryError`); 2.x logfmt
+// ERROR lines instead carry `cause=`/`role=server` (real 2.2.0 shape, see
+// scripts/test-fixtures/opencode-2x-run-bad-model.stderr.txt). Either way the
+// line must come from stderr, so model prose or tool output containing the
+// same words never matches.
+const OPENCODE_FREE_QUOTA_MESSAGE = /free usage limit reached|usage limit reached|insufficient[_\s-]?quota|quota[_\s-]?(?:exceeded|exhausted)|subscribe to [^\n]{0,80}to keep going/i;
+const OPENCODE_RATE_LIMIT_MESSAGE = new RegExp(`rate[_\\s]limit[_\\s]exceeded|endpoint is unavailable|insufficient account funds|${OPENCODE_FREE_QUOTA_MESSAGE.source}`, "i");
+const OPENCODE_PROVIDER_ERROR_SOURCE = /AI_APICallError|AI_RetryError/;
+// 2.x's own logfmt ERROR lines are engine-level diagnostics too, but they do
+// not spell the 1.x AI SDK error class. The structural marker (server role or
+// a stack-bearing cause=) keeps the existing 1.x negative control — a no-source
+// line is still not a rate-limit hit — intact.
+const OPENCODE_2X_ENGINE_ERROR_LINE = /\blevel=ERROR\b[^\n]*(?:\brole=server\b|\bcause=)/;
+function openCodeEngineErrorLine(text) {
+  return OPENCODE_PROVIDER_ERROR_SOURCE.test(text) || OPENCODE_2X_ENGINE_ERROR_LINE.test(text);
+}
 function detectOpenCodeRateLimited(events) {
   const observations = [];
   for (const event of events) {
-    if (!event || typeof event !== "object" || event.type !== "error") continue;
+    if (!event || typeof event !== "object") continue;
+    if (event.type === "stderr") {
+      const text = String(event.text ?? "");
+      // Backlog #107: the small title-generation model's stream errors
+      // (small=true agent=title) say nothing about the role's own model, so a
+      // completed run must never be reclassified RATE_LIMITED from one.
+      if (OPENCODE_TITLE_MODEL_LINE_RE.test(text)) continue;
+      if (!openCodeEngineErrorLine(text) || !OPENCODE_RATE_LIMIT_MESSAGE.test(text)) continue;
+      observations.push(observation("rate_limited", event, {
+        reason: OPENCODE_FREE_QUOTA_MESSAGE.test(text) ? FREE_QUOTA_REASON : "opencode_stderr_rate_limit",
+        message: text.slice(0, 200),
+      }));
+      continue;
+    }
+    if (event.type !== "error") continue;
     const err = event.error && typeof event.error === "object" ? event.error : {};
     const data = err.data && typeof err.data === "object" ? err.data : {};
     const status = Number(data.statusCode ?? err.statusCode);
     const message = String(data.message ?? err.message ?? "");
     if (status === 429 || OPENCODE_RATE_LIMIT_MESSAGE.test(message)) {
-      observations.push(observation("rate_limited", event, {reason: status === 429 ? "api_error_status_429" : "opencode_error_message"}));
+      const freeQuota = OPENCODE_FREE_QUOTA_MESSAGE.test(message);
+      observations.push(observation("rate_limited", event, {
+        reason: freeQuota ? FREE_QUOTA_REASON : status === 429 ? "api_error_status_429" : "opencode_error_message",
+      }));
     }
   }
   return observations;
@@ -275,19 +330,46 @@ function detectOpenCodeRateLimited(events) {
 // {"message":"Unexpected server error. ..."}}}` and the run did no tool work
 // (a failure tied to the brief/model, not to anything the agent did). Not a
 // rate limit (detectOpenCodeRateLimited keeps precedence in the classifier).
+// 2.x reports an unavailable model as `{"type":"error","error":{"type":
+// "provider.no-route","message":"Model unavailable: provider/model"}}`; that is
+// the same provider/model-side failure class even when tools already ran.
 const OPENCODE_PROVIDER_ERROR_MESSAGE = /unexpected server error/i;
+const OPENCODE_MODEL_UNAVAILABLE_MESSAGE = /model unavailable/i;
 function detectOpenCodeProviderError(events) {
   const hasToolUse = events.some(event => event && typeof event === "object"
     && (event.type === "tool_use" || event.type === "tool" || event.part?.type === "tool"));
-  if (hasToolUse) return [];
   const observations = [];
   for (const event of events) {
     if (!event || typeof event !== "object" || event.type !== "error") continue;
     const err = event.error && typeof event.error === "object" ? event.error : {};
     const data = err.data && typeof err.data === "object" ? err.data : {};
     const message = String(data.message ?? err.message ?? "");
-    if (err.name === "UnknownError" || OPENCODE_PROVIDER_ERROR_MESSAGE.test(message)) {
+    const errorType = String(err.type ?? "");
+    if (errorType === "provider.no-route" || OPENCODE_MODEL_UNAVAILABLE_MESSAGE.test(message)) {
+      observations.push(observation("provider_error", event, {reason: "opencode_model_unavailable", errorType: errorType || null, errorName: err.name ?? null, message: message.slice(0, 200)}));
+      continue;
+    }
+    if (!hasToolUse && (err.name === "UnknownError" || OPENCODE_PROVIDER_ERROR_MESSAGE.test(message))) {
       observations.push(observation("provider_error", event, {reason: "opencode_unknown_error", errorName: err.name ?? null, message: message.slice(0, 200), ref: data.ref ?? null}));
+    }
+  }
+  return observations;
+}
+
+// 2.x without --standalone cannot see an OPENCODE_CONFIG_CONTENT agent:
+// `{"type":"error","error":{"type":"unknown","message":"Agent not found:
+// \"autopilot_readonly\""}}`. That is an invocation/config failure, not an idle
+// hang or a provider limit, so it gets its own structured observation.
+const OPENCODE_AGENT_NOT_FOUND_MESSAGE = /agent not found/i;
+function detectOpenCodeAgentNotFound(events) {
+  const observations = [];
+  for (const event of events) {
+    if (!event || typeof event !== "object" || event.type !== "error") continue;
+    const err = event.error && typeof event.error === "object" ? event.error : {};
+    const data = err.data && typeof err.data === "object" ? err.data : {};
+    const message = String(data.message ?? err.message ?? "");
+    if (OPENCODE_AGENT_NOT_FOUND_MESSAGE.test(message)) {
+      observations.push(observation("agent_not_found", event, {errorType: String(err.type ?? "") || null, message: message.slice(0, 200)}));
     }
   }
   return observations;
@@ -587,6 +669,37 @@ function joinMissingSyntheticExe(originalPath) {
   return path.join(dir, base + ".synthetic-missing-target.exe");
 }
 
+// Claude Code permission-rule syntax is `Tool(//absolute/path/**)`; a single
+// leading `/` is project-relative, so the scratch grant uses two. A read-only
+// role may write ONLY its hand-off note tree. No scratch dir => no Write/Edit
+// grant at all (fail closed), never an unrestricted tool.
+export const CLAUDE_READ_ONLY_ALLOWED_TOOLS = Object.freeze(["Read", "Glob", "Grep", "Bash"]);
+
+export function claudeScratchAllowRules(scratchDir) {
+  const normalized = String(scratchDir ?? "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!/^(?:[A-Za-z]:\/|\/)/.test(normalized)) return [];
+  if (normalized.split("/").includes("..")) return [];
+  const base = `//${normalized.replace(/^\/+/, "")}`;
+  return [`Write(${base}/**)`, `Edit(${base}/**)`];
+}
+
+export function applyClaudeReadOnlyScratchAllow(args, scratchDir) {
+  const out = Array.isArray(args) ? [...args] : [];
+  const rules = claudeScratchAllowRules(scratchDir);
+  if (!rules.length) return out;
+  const at = out.indexOf("--allowedTools");
+  if (at < 0) {
+    const before = out.indexOf("--permission-mode");
+    const insertAt = before >= 0 ? before : out.length;
+    out.splice(insertAt, 0, "--allowedTools", ...rules);
+    return out;
+  }
+  let end = at + 1;
+  while (end < out.length && !String(out[end]).startsWith("--")) end += 1;
+  out.splice(end, 0, ...rules);
+  return out;
+}
+
 function claudeInvocation(request) {
   const args = ["-p"];
   args.push("--output-format", "stream-json");
@@ -601,7 +714,16 @@ function claudeInvocation(request) {
     throw new Error("Claude invocation must not carry a pre-existing --permission-mode flag (fail closed: mode decides).");
   }
   if (request.mode === "read_only") {
-    args.push("--permission-mode", "plan");
+    // Plan mode refuses EVERY Write, including the sanctioned scratch note a
+    // capped reviewer must leave for the next session (backlog #2). Run in
+    // default mode with an explicit allow list instead: read tools + Bash,
+    // plus Write/Edit scoped to the scratch dir the brief names. The
+    // repository stays read-only through bubblewrap (Linux/WSL) or the
+    // disposable workspace (Windows), never through the permission mode.
+    args.push("--allowedTools", ...CLAUDE_READ_ONLY_ALLOWED_TOOLS, ...claudeScratchAllowRules(request.scratchDir));
+    args.push("--disallowedTools", "Monitor", "TaskStop");
+    args.push("--settings", CLAUDE_FOREGROUND_ONLY_SETTINGS);
+    args.push("--permission-mode", "default");
   } else if (request.mode === "write" || request.mode === "scratch") {
     // Least-privileged non-interactive write mode: auto-accept file edits
     // without the broad bypass of --dangerously-skip-permissions.
@@ -668,7 +790,49 @@ function claudeProviderProfile({binary}) {
 // for accounting. It does not introduce new containment, safety, or
 // isolation authority.
 function observeClaudeEvents(events, probe = {}) {
-  return [...detectClaudeRateLimited(events), ...observeCodexEvents(events, probe)];
+  return [...detectClaudeRateLimited(events), ...detectClaudeAuthRequired(events), ...observeCodexEvents(events, probe)];
+}
+
+// Mission 002 runs 09-11 (2026-10-28, a real operator project): the claude CLI
+// ended with a genuine `{"type":"result","is_error":true,...}` line whose
+// `api_error_status` was 401 ("Failed to authenticate: OAuth token revoked.
+// Please log in again…") or null with the same text naming an expired OAuth
+// session. Nothing recognized it, so it fell through to a generic adapter
+// error and was retried until adapterRetryBudget_exhausted — an escalation
+// that never told the operator to log in. Auth is terminal for the CLI
+// itself: no same-adapter retry can succeed.
+//
+// Text is trusted ONLY on the CLI's own terminal result record with
+// `is_error:true` (or an explicit 401 status), never on assistant prose: a
+// model answer that merely discusses "log in again" is not an auth failure.
+// TODO: codex/opencode/agy have no captured auth-failure fixture yet; extend
+// this mapping with their own terminal event shapes when one is observed.
+const CLAUDE_AUTH_REQUIRED_TEXT = /failed to authenticate|oauth token revoked|oauth session expired|please log in again|invalid api key/i;
+const CLAUDE_AUTH_REASON_PATTERNS = [
+  /oauth token revoked/i,
+  /oauth session expired[^.]*/i,
+  /invalid api key/i,
+  /please log in again/i,
+  /failed to authenticate/i,
+];
+function detectClaudeAuthRequired(events) {
+  const observations = [];
+  for (const event of events) {
+    if (!event || typeof event !== "object") continue;
+    const status = event.api_error_status == null ? null : Number(event.api_error_status);
+    const resultFailed = event.type === "result" && event.is_error === true;
+    const text = typeof event.result === "string" ? event.result : "";
+    if (status !== 401 && !(resultFailed && CLAUDE_AUTH_REQUIRED_TEXT.test(text))) continue;
+    const reasonPattern = CLAUDE_AUTH_REASON_PATTERNS.find((pattern) => pattern.test(text));
+    const matched = reasonPattern ? text.match(reasonPattern) : null;
+    observations.push(observation("auth_required", event, {
+      adapter: "claude",
+      reason: status === 401 ? "api_error_status_401" : (matched ? matched[0] : "authentication failed"),
+      status: Number.isFinite(status) ? status : null,
+      message: text.slice(0, 200),
+    }));
+  }
+  return observations;
 }
 
 // Mission 001 runs 27-28: a real Anthropic rate-limit rejection (`{"type":
@@ -927,8 +1091,8 @@ function priceWeightedUsage({input, cacheCreation, cacheRead, output}) {
 // together; the breakdown is the point of this function, not the total,
 // because per-task dispatch (this task list's reason for existing) changes
 // the MIX of these four, not just their sum.
-export function accumulateUsage(adapterId, events) {
-  if (adapterId === "opencode") return accumulateOpenCodeUsage(events);
+export function accumulateUsage(adapterId, events, options = {}) {
+  if (adapterId === "opencode") return accumulateOpenCodeUsage(events, options);
   if (adapterId === "claude") return accumulateClaudeUsage(events);
   if (adapterId === "antigravity") return accumulateAgyUsage(events);
   return null;
@@ -974,16 +1138,38 @@ export function recordRunModel(dir, adapterId, events, configuredModel = null) {
 // component. The return also carries `maxSingleTurnContext`: the largest
 // single-step context footprint (`input + cache.read + cache.write`), i.e.
 // the current context size rather than the cumulative session total.
-function accumulateOpenCodeUsage(events) {
+//
+// OpenCode 2.x omits step_finish for the FINAL step (a one-step reply has no
+// step_finish at all; a tool run's last step has text but no finish), so its
+// sum is inherently a lower bound. The caller passes the generation detected
+// at launch; on 2.x a text-bearing step after the last step_finish marks the
+// result `usage_partial:true` while still summing every step_finish that did
+// arrive. A 2.x stream with no step_finish at all returns only that flag —
+// never zeroed/invented token counts. 1.x (and callers with no generation,
+// e.g. the existing unit tests) keep the exact old null/throw-free behavior.
+function openCodeTextAfterLastFinish(events, lastFinishIndex) {
+  for (let index = lastFinishIndex + 1; index < events.length; index += 1) {
+    const event = events[index];
+    const part = event?.part || {};
+    const type = String(event?.type || part.type || "");
+    if (type !== "text") continue;
+    if (String(part.text ?? event?.text ?? "").trim() !== "") return true;
+  }
+  return false;
+}
+function accumulateOpenCodeUsage(events, {generation = null} = {}) {
   let input = 0, output = 0, cacheCreation = 0, cacheRead = 0, turns = 0, seen = false;
   let maxSingleTurnContext = 0;
-  for (const event of events) {
+  let lastFinishIndex = -1;
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
     const part = event?.part || {};
     const type = String(event?.type || part.type || "");
     if (type !== "step_finish" && type !== "step-finish") continue;
     const tokens = part.tokens;
     if (!tokens || typeof tokens !== "object") continue;
     seen = true;
+    lastFinishIndex = index;
     turns += 1;
     input += Number(tokens.input) || 0;
     output += (Number(tokens.output) || 0) + (Number(tokens.reasoning) || 0);
@@ -994,9 +1180,10 @@ function accumulateOpenCodeUsage(events) {
       + (Number(tokens.cache?.write) || 0);
     if (turnContext > maxSingleTurnContext) maxSingleTurnContext = turnContext;
   }
-  if (!seen) return null;
+  const partial = generation === "2" && openCodeTextAfterLastFinish(events, lastFinishIndex);
+  if (!seen) return partial ? {usage_partial: true} : null;
   const usage = {input, cacheCreation, cacheRead, output, turns, maxSingleTurnContext};
-  return {...usage, priceWeighted: priceWeightedUsage(usage)};
+  return {...usage, priceWeighted: priceWeightedUsage(usage), ...(partial ? {usage_partial: true} : {})};
 }
 
 // Claude Code's stream-json carries a per-Messages-API-shaped `usage` object

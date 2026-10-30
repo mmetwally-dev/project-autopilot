@@ -491,12 +491,18 @@ const fixture = path.join(here, "test-fixtures", "fake-observable-adapter.mjs");
   const implRole = "implementer";
 
   // resolvePerRoleLimits returns correct defaults for each role
-  // (planner: 200K tokens / 180K wrap-up; other review roles: 150K / 135K)
+  // (planner: 200K/180K; plan_reviewer: 250K/225K after backlog #8;
+  //  code_reviewer and verifier stay 150K/135K).
+  const expectedRoleDefaults = {
+    planner: {tokens: 200000, wrapup: 180000, allowance: 2},
+    plan_reviewer: {tokens: 250000, wrapup: 225000, allowance: 4},
+    code_reviewer: {tokens: 150000, wrapup: 135000, allowance: 2},
+    verifier: {tokens: 150000, wrapup: 135000, allowance: 2},
+  };
   for (const role of reviewRoles) {
     const limits = resolvePerRoleLimits(role, {});
-    const expTokens = role === "planner" ? 200000 : 150000;
-    const expWrapup = role === "planner" ? 180000 : 135000;
-    check(`resolvePerRoleLimits: ${role} defaults`, limits.perTaskMaxTurns === ((role === "verifier" || role === "planner" || role === "plan_reviewer") ? 30 : 22) && limits.perTaskMaxTokens === expTokens && limits.continuationAllowance === 2 && limits.wrapUpTokenThreshold === expWrapup, limits);
+    const expected = expectedRoleDefaults[role];
+    check(`resolvePerRoleLimits: ${role} defaults`, limits.perTaskMaxTurns === ((role === "verifier" || role === "planner" || role === "plan_reviewer") ? 30 : 22) && limits.perTaskMaxTokens === expected.tokens && limits.continuationAllowance === expected.allowance && limits.wrapUpTokenThreshold === expected.wrapup, limits);
     check(`resolvePerRoleLimits: ${role} wrapUpTokenThreshold < perTaskMaxTokens`, limits.wrapUpTokenThreshold < limits.perTaskMaxTokens, limits);
   }
   const implLimits = resolvePerRoleLimits(implRole, {});
@@ -541,7 +547,7 @@ const fixture = path.join(here, "test-fixtures", "fake-observable-adapter.mjs");
   const implBoth = resolvePerRoleLimits("implementer", bothPolicy);
   check("resolvePerRoleLimits: implementer policy.caps.implementer wins over per_task_*", implBoth.perTaskMaxTurns === 15 && implBoth.perTaskMaxTokens === 500000, implBoth);
 
-  // consumeContinuation with role name uses role-specific allowance (default 2 for review roles)
+  // consumeContinuation with role name uses role-specific allowance (verifier default 2; plan_reviewer default 4)
   const state = {};
   const c1 = consumeContinuation(state, {}, "task:review:1", "verifier");
   check("consumeContinuation: first consume with role allowed (used=1, limit=2)", c1.allowed === true && c1.used === 1 && c1.limit === 2, c1);

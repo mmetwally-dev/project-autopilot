@@ -132,6 +132,8 @@ const DESCRIPTIONS = {
   "tests.require_reviewer": "Intended to require a reviewer verdict before a phase passes. Fixed in this version; changing it has no effect.",
   "tests.browser": "Browser capability used for verification: native (the agent's own browser), playwright or both.",
   "tests.require_browser": "How browser capabilities are required for the verifier: always adds them to every call; when-task-requires and never add them only when the task itself needs a browser.",
+  "tests.e2e": "End-to-end test tool for UI projects: playwright, cypress or none. Unset (null) = setup asks once; treated as none until answered.",
+  "tests.e2e_setup_pending": "True while an end-to-end tool setup is still pending for the project; unset or false means nothing is pending.",
   "tests.verify_denylist": "Commands or paths that a task or verification step may never run; empty adds no bans beyond the built-in full-suite ban.",
 
   safety: "What roles may do and which safety checks are enforced.",
@@ -227,6 +229,7 @@ export const ENUMS = {
   "runtime.mode": ["auto", "linux-strong", "wsl2-strong", "windows-compatibility"],
   "tests.browser": ["native", "playwright", "both"],
   "tests.require_browser": ["always", "when-task-requires", "never"],
+  "tests.e2e": ["playwright", "cypress", "none"],
   "roles.*.cli": CLI_VALUES,
   "roles.*.reasoning": REASONING_VALUES,
   "roles.*.fallbacks[].cli": CLI_VALUES,
@@ -426,6 +429,10 @@ export function buildConfigSchema() {
   for (const role of ESCALATION_MODEL_ROLES) {
     properties.roles.properties[role].properties.escalation_model = escalationModelSchema();
   }
+  // Schema-only keys: not in DEFAULTS, so they stay out of config.example.json.
+  // Unset (null) means never asked; setup/config asks the operator once.
+  properties.tests.properties.e2e = {type: ["string", "null"], description: descriptionFor("tests.e2e"), default: null, enum: [...enumFor("tests.e2e"), null]};
+  properties.tests.properties.e2e_setup_pending = {type: "boolean", description: descriptionFor("tests.e2e_setup_pending"), default: false};
   return {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     $id: "https://project-autopilot.dev/config.schema.json",

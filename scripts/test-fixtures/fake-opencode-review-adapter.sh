@@ -21,6 +21,12 @@ if [ "$1" = "--version" ]; then
   echo "fake-opencode-review 1.0.0"
   exit 0
 fi
+# Answer help probes instantly (1.x-style help naming --variant) so generation
+# detection never falls through to running a scenario for `run --help`.
+if [ "$1" = "--help" ] || { [ "$1" = "run" ] && [ "$2" = "--help" ]; }; then
+  printf '%s\n' 'Usage: opencode [command]' '  run [message..]' '    -m, --model <model>' '    --variant <level>' '    --agent <agent>'
+  exit 0
+fi
 if [ "$1" = "models" ]; then
   echo "opencode/fake-cap-model"
   exit 0

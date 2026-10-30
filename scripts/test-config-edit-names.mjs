@@ -224,7 +224,7 @@ async function main() {
       caps: {
         task_size_target_turns: 25,
         planner: {max_turns: 40, max_tokens: 200000, extra_sessions: 3, wrap_up_at_tokens: 180000},
-        plan_reviewer: {max_turns: 30, max_tokens: 150000, extra_sessions: 2, wrap_up_at_tokens: 130000},
+        plan_reviewer: {max_turns: 30, max_tokens: 150000, extra_sessions: 4, wrap_up_at_tokens: 130000},
         implementer: {max_turns: 50, max_tokens: 250000, extra_sessions: 8, wrap_up_at_tokens: 200000},
         code_reviewer: {max_turns: 30, max_tokens: 150000, extra_sessions: 2, wrap_up_at_tokens: 130000},
         verifier: {max_turns: 30, max_tokens: 150000, extra_sessions: 2, wrap_up_at_tokens: 130000},

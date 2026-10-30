@@ -1,11 +1,12 @@
 import { discoverAgentContract } from './agent-contract.mjs';
 import { discoverCapabilities } from './model-discovery.mjs';
 
-export async function buildDiscoveryCaches(availableIds, agentsMap, discoverFn = discoverAgentContract) {
+export async function buildDiscoveryCaches(availableIds, agentsMap, discoverFn = discoverAgentContract, {onStart = null} = {}) {
   const capabilityCache = new Map();
   const contractCache = new Map();
   for (const id of availableIds) {
     try {
+      if (typeof onStart === "function") onStart(id, agentsMap[id]);
       const contract = await discoverFn(id, agentsMap[id]);
       contractCache.set(id, contract);
       capabilityCache.set(id, contract?.capabilities || await discoverCapabilities(agentsMap[id]));

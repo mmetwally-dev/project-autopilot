@@ -104,9 +104,9 @@ Per-role turn, token and session caps plus the mission token backstop.
 | `caps.planner.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
 | `caps.planner.wrap_up_at_tokens` | `180000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
 | `caps.plan_reviewer.max_turns` | `30` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
-| `caps.plan_reviewer.max_tokens` | `150000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
-| `caps.plan_reviewer.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
-| `caps.plan_reviewer.wrap_up_at_tokens` | `135000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
+| `caps.plan_reviewer.max_tokens` | `250000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
+| `caps.plan_reviewer.extra_sessions` | `4` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
+| `caps.plan_reviewer.wrap_up_at_tokens` | `225000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
 | `caps.implementer.max_turns` | `40` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.implementer.max_tokens` | `180000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.implementer.extra_sessions` | `5` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
@@ -184,6 +184,8 @@ Gate commands, reviewer requirement and verification policy.
 | `tests.browser` | `"native"` | `"native"`, `"playwright"`, `"both"` | Browser capability used for verification: native (the agent's own browser), playwright or both. |
 | `tests.require_browser` | `"when-task-requires"` | `"always"`, `"when-task-requires"`, `"never"` | How browser capabilities are required for the verifier: always adds them to every call; when-task-requires and never add them only when the task itself needs a browser. |
 | `tests.verify_denylist` | `[]` | — | Commands or paths that a task or verification step may never run; empty adds no bans beyond the built-in full-suite ban. |
+| `tests.e2e` | `null` | `"playwright"`, `"cypress"`, `"none"`, `null` | End-to-end test tool for UI projects: playwright, cypress or none. Unset (null) = setup asks once; treated as none until answered. |
+| `tests.e2e_setup_pending` | `false` | — | True while an end-to-end tool setup is still pending for the project; unset or false means nothing is pending. |
 
 ### safety
 

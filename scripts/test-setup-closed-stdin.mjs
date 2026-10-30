@@ -5,6 +5,15 @@ import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+// Backlog #27: setup probes the installed CLIs before it reaches/exits on the
+// closed stdin, which takes ~30s here and longer under a loaded pool.
+// `test-all` sets AP_TEST_TIMEOUT_FACTOR (default 2); standalone runs keep
+// factor 1 unless the operator sets it.
+const TIMEOUT_FACTOR = (() => {
+  const value = Number(process.env.AP_TEST_TIMEOUT_FACTOR);
+  return Number.isFinite(value) && value > 0 ? value : 1;
+})();
+const SETUP_TIMEOUT_MS = Math.ceil(120000 * TIMEOUT_FACTOR);
 let failed = 0;
 function assert(cond, msg) {
   console.log(`  ${cond ? '✓' : '✗'} ${msg}`);
@@ -17,7 +26,7 @@ for (const input of ['', '\n\n']) {
   try {
     spawnSync('git', ['init', '-q', d]);
     const r = spawnSync('node', [join(root, 'bin/ap.cjs'), 'setup', '--repo', d], {
-      input, encoding: 'utf8', timeout: 60000
+      input, encoding: 'utf8', timeout: SETUP_TIMEOUT_MS
     });
     const all = `${r.stdout}\n${r.stderr}`;
     assert(r.status !== 0 && r.status !== null, `non-zero exit (got ${r.status})`);

@@ -238,7 +238,7 @@ function realResolvedAgentConfig(cwd, configContent) {
     cwd, encoding: "utf8", stdio: "pipe", shell: false, timeout: 30000,
     env: {...withoutOuterGitGuard({...process.env}), OPENCODE_CONFIG_CONTENT: configContent}
   });
-  if (r.status !== 0) throw new Error(`opencode debug agent ${OPENCODE_READONLY_AGENT} failed (status ${r.status}): ${r.stderr || r.stdout}`);
+  if (r.status !== 0) throw new Error(`opencode debug agent ${OPENCODE_READONLY_AGENT} failed (status ${r.status}, signal ${r.signal}, error ${r.error?.code || "none"}): ${r.stderr || r.stdout}`);
   return JSON.parse(r.stdout);
 }
 if (!opencodeAvailable()) {
@@ -307,10 +307,10 @@ if [ "$ROLE" = "planner" ]; then
     mkdir -p "$(dirname "$PLAN_FILE")"
     if [ -n "$TASKS_FILE" ]; then
       mkdir -p "$(dirname "$TASKS_FILE")"
-      printf '# Plan\n\n## Objective\nAdd a fixture line to README.md so the repository contains a one-line marker confirming this automated run touched it.\n\n## Scope\nRepository root README.md only.\n\n## Risks\nNone / trivial for a fixture marker.\n\n## Strategy\nCreate-or-append the exact marker line "Fixture marker: automated verification touch." as the final line of README.md.\n\n## Verification\nRun tail -n 1 README.md: it must print exactly the marker line, confirming README.md exists and ends with it.\n' > "$PLAN_FILE"
-      printf '## Phase 1: General\n\n- [ ] **1.1** Create README.md at the repository root if it does not already exist, and append this exact line as its final line: "Fixture marker: automated verification touch." — accept: README.md exists at the repository root and its final line is exactly the marker line ; verify: run tail -n 1 README.md and confirm it prints exactly the marker line (matches PLAN.md Verification)\n' > "$TASKS_FILE"
+      printf '# Plan\n\n## Objective\nAdd a fixture line to README.md so the repository contains a one-line marker confirming this automated run touched it.\n\n## Scope\nREADME.md only; no other file is part of this deliverable.\n\n## Constraints\nREADME.md must end with the exact marker line "Fixture marker: automated verification touch." and contain exactly one line equal to it.\n\n## Risks\nNone: a single marker line in the fixture README is trivial and reversible.\n\n## Verification strategy\nRun tail -n 1 README.md; it must print exactly the marker line. Run grep -cFx "Fixture marker: automated verification touch." README.md; it must print exactly 1, proving the marker line appears once.\n\n## Phase boundaries\nA single phase is used because this is one deliverable (one marker line in README.md); no phase boundary exists.\n' > "$PLAN_FILE"
+      printf '## Phase 1: General\n\n- [ ] **1.1** Create README.md if it does not already exist, then ensure its final line is exactly "Fixture marker: automated verification touch." — accept: README.md ends with that exact marker line and contains exactly one line equal to it ; verify: tail -n 1 README.md prints the marker line and grep -cFx "Fixture marker: automated verification touch." README.md prints 1\n' > "$TASKS_FILE"
     else
-      printf '# Plan\n\nObjective: Add a fixture line to README.md so the repository contains a one-line marker confirming this automated run touched it.\n\n- [ ] Create README.md at the repository root if it does not already exist, and append this exact line as its final line: "Fixture marker: automated verification touch."\n\nVerification notes: confirm README.md exists at the repository root and its content includes the exact line "Fixture marker: automated verification touch."\n' > "$PLAN_FILE"
+      printf '# Plan\n\n## Objective\nAdd a fixture line to README.md so the repository contains a one-line marker confirming this automated run touched it.\n\n## Scope\nREADME.md only; no other file is part of this deliverable.\n\n## Constraints\nREADME.md must end with the exact marker line "Fixture marker: automated verification touch." and contain exactly one line equal to it.\n\n## Risks\nNone: a single marker line in the fixture README is trivial and reversible.\n\n## Verification strategy\nRun tail -n 1 README.md; it must print exactly the marker line. Run grep -cFx "Fixture marker: automated verification touch." README.md; it must print exactly 1, proving the marker line appears once.\n\n## Phase boundaries\nA single phase is used because this is one deliverable (one marker line in README.md); no phase boundary exists.\n' > "$PLAN_FILE"
     fi
   fi
   echo "planner ok"

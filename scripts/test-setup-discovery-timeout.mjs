@@ -7,6 +7,10 @@ import {spawnSync} from "node:child_process";
 import {discoverModelCatalog, discoverCapabilities, normalizeReasoning, parseOpenCodeVerboseOutput, DISCOVERY_TIMEOUT_MS} from "./model-discovery.mjs";
 import {buildDiscoveryCaches} from "./setup-discovery.mjs";
 
+// The production model-list timeout is deliberately generous (30 s). Keep
+// this regression test fast by shrinking it through the supported override.
+process.env.AP_MODEL_DISCOVERY_TIMEOUT_MS = "1500";
+
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ap-discovery-timeout-"));
 
 function makeBin(name, scriptPath) {
@@ -55,6 +59,7 @@ try {
 
     assert.ok(Array.isArray(result), "hanging discovery must return an array");
     assert.equal(result.length, 0, "hanging discovery must return empty on timeout");
+    assert.equal(result.status, "timeout", "hanging discovery must report a timeout status");
     assert.ok(elapsed < DISCOVERY_TIMEOUT_MS + 5000, `must complete within timeout + margin, took ${elapsed}ms`);
     console.log("PASS: hanging OpenCode discovery terminated within timeout");
   }
@@ -76,6 +81,7 @@ try {
 
     assert.ok(Array.isArray(result), "hanging codex must return an array");
     assert.equal(result.length, 0, "hanging codex must return empty on timeout");
+    assert.equal(result.status, "timeout", "hanging codex must report a timeout status");
     assert.ok(elapsed < 12000, `must complete within codex timeout + margin, took ${elapsed}ms`);
     console.log("PASS: hanging Codex app-server discovery terminated within timeout");
   }
@@ -106,8 +112,11 @@ try {
     const {capabilityCache} = await buildDiscoveryCaches(["opencode"], agents);
     const elapsed = Date.now() - start;
 
+    // Backlog #5: a timed-out model list is retried once with double the
+    // effective budget, so the bound must include that second attempt.
+    const retryBudgetMs = 2 * Number(process.env.AP_MODEL_DISCOVERY_TIMEOUT_MS);
     assert.ok(capabilityCache.has("opencode"), "cache must have entry even after timeout");
-    assert.ok(elapsed < DISCOVERY_TIMEOUT_MS + 5000, `must complete within timeout + margin, took ${elapsed}ms`);
+    assert.ok(elapsed < DISCOVERY_TIMEOUT_MS + retryBudgetMs + 5000, `must complete within timeout + retry + margin, took ${elapsed}ms`);
     console.log("PASS: buildDiscoveryCaches continues after discovery timeout");
   }
 

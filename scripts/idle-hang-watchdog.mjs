@@ -76,6 +76,10 @@ export const RATE_LIMIT_CONFIRM_MATCHES = 1;
 export const RATE_LIMIT_CONFIRM_GAP_MS = 60_000;
 // Bounded log reads: only appended bytes are ever scanned, capped.
 export const RATE_LIMIT_LOG_TAIL_BYTES = 256 * 1024;
+// The reason value a free-tier quota/billing rejection records. Exported so
+// call sites (autopilot.mjs, adapter-drivers.mjs) never hand-build the
+// literal; it is a label on the unchanged RATE_LIMITED path, not a new class.
+export const FREE_QUOTA_REASON = "free_quota_exhausted";
 
 // opencode's OWN log (logfmt), not model prose: `AI_APICallError` and
 // `AI_RetryError` are engine-level error values. Observed live in
@@ -85,8 +89,26 @@ export const RATE_LIMIT_LOG_TAIL_BYTES = 256 * 1024;
 //   exceeded. Please retry after a brief wait."
 // Bare AI_RetryError ALSO fires for non-rate-limit errors ("Cannot connect
 // to API"), so the rate-limit marker is required in both branches.
-const RATE_LIMIT_MARKER = /rate[_\s]limit[_\s]exceeded|endpoint is unavailable|insufficient account funds|status_?code[=:"\s]+429\b/i;
+// Backlog #14: a free-tier quota rejection has no status code at all:
+//   error.error="AI_APICallError: Free usage limit reached. Free models work
+//   in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep
+//   going: https://opencode.ai/go"
+// It is the same operator-visible state as a 429 (stop, switch model), so
+// the marker covers quota/billing exhaustion too. The source check below
+// still requires an engine error token, so model prose never matches.
+const FREE_QUOTA_MARKER = /free usage limit reached|usage limit reached|insufficient[_\s-]?quota|quota[_\s-]?(?:exceeded|exhausted)|subscribe to [^\n]{0,80}to keep going/i;
+const RATE_LIMIT_MARKER = new RegExp(`rate[_\\s]limit[_\\s]exceeded|endpoint is unavailable|insufficient account funds|status_?code[=:"\\s]+429\\b|${FREE_QUOTA_MARKER.source}`, "i");
+// Backlog #107: the small title-generation model's stream errors
+// (small=true agent=title) say nothing about the role's own model. Shared
+// with adapter-drivers.mjs so both stderr scanners ignore the same lines.
+export const OPENCODE_TITLE_MODEL_LINE_RE = /\bsmall=true\b|\bagent=title\b/;
 const RATE_LIMIT_SOURCE = /AI_APICallError|AI_RetryError/;
+// 2.x logfmt ERROR lines do not name the 1.x AI SDK error class; they carry
+// server-role/cause structure instead (real 2.2.0 capture in
+// scripts/test-fixtures/opencode-2x-run-bad-model.stderr.txt). Accept those
+// too, but only as a logfmt line — the JSON-stdout and no-source guards in
+// rateLimitLineInfo() below still keep model prose/tool text out.
+const OPENCODE_2X_ENGINE_ERROR_LINE = /\blevel=ERROR\b[^\n]*(?:\brole=server\b|\bcause=)/;
 const PROVIDER_ID_RE = /providerID=([^\s]+)/;
 const MODEL_ID_RE = /modelID=([^\s]+)/;
 const LOG_TIMESTAMP_RE = /timestamp=([0-9T:.\-+Z]+)/;
@@ -131,11 +153,15 @@ export function rateLimitLineInfo(line) {
   const text = String(line ?? "");
   // Backlog #107: the small title-generation model's stream errors (small=true
   // agent=title) say nothing about the role's own model.
-  if (/\bsmall=true\b|\bagent=title\b/.test(text)) return null;
-  if (!RATE_LIMIT_SOURCE.test(text) || !RATE_LIMIT_MARKER.test(text)) return null;
+  if (OPENCODE_TITLE_MODEL_LINE_RE.test(text)) return null;
+  // Only opencode's own logfmt ERROR lines count. A JSON event is the model's
+  // stdout channel (tool text can quote a log line verbatim), never the
+  // engine log, so it must not be mistaken for a provider rejection.
+  if (/^\s*\{/.test(text)) return null;
+  if (!(RATE_LIMIT_SOURCE.test(text) || OPENCODE_2X_ENGINE_ERROR_LINE.test(text)) || !RATE_LIMIT_MARKER.test(text)) return null;
   const provider = text.match(PROVIDER_ID_RE)?.[1] ?? null;
   const model = text.match(MODEL_ID_RE)?.[1] ?? null;
-  return {provider, model};
+  return {provider, model, reason: FREE_QUOTA_MARKER.test(text) ? FREE_QUOTA_REASON : "rate_limit"};
 }
 
 // Newest *.log under <baseDir>/log/ (opencode rotates there). Null when the
@@ -590,11 +616,12 @@ export function formatIdleHangMessage({role, adapter, model, idleMs, maxSilence 
   return `IDLE_HANG: ${who} produced no output, ran no command and wrote no file for ${formatIdleMinutes(idleMs)}`;
 }
 
-export function formatRateLimitedMessage({role, adapter, model, provider}) {
+export function formatRateLimitedMessage({role, adapter, model, provider, freeQuota = false}) {
   const modelLabel = model || adapter;
   const providerLabel = provider && provider !== adapter ? `${provider}/${modelLabel}` : modelLabel;
+  const quotaLabel = freeQuota ? " — free quota used up" : "";
   return (
-    `RATE_LIMITED: ${role} (${adapter}, ${model || "unknown model"}) hit a provider rate limit (${providerLabel}); ` +
+    `RATE_LIMITED: ${role} (${adapter}, ${model || "unknown model"}) hit a provider rate limit${quotaLabel} (${providerLabel}); ` +
     `opencode retried silently in its own log. The operator may need to wait or re-login ` +
     `(\`opencode auth login\` inside WSL — the WSL and Windows opencode accounts are separate).`
   );
@@ -854,7 +881,7 @@ export function evaluateIdleWatch(watch, {now = Date.now(), platform = process.p
       /* log tailing is best-effort; the idle watchdog still applies */
     }
     if (rateLimitConfirmed(watch, now)) {
-      return {status: "rate_limited", provider: watch.rateLimitDetail?.provider ?? null, model: watch.rateLimitDetail?.model ?? null};
+      return {status: "rate_limited", provider: watch.rateLimitDetail?.provider ?? null, model: watch.rateLimitDetail?.model ?? null, reason: watch.rateLimitDetail?.reason ?? null};
     }
   }
   const quietFor = now - watch.lastActivityAt;

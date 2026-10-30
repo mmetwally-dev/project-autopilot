@@ -142,11 +142,29 @@ function seedMission(repo, dirName, {tasks = true, plan = true, runs = 1} = {}) 
   } finally { cleanup(repo, binDir); }
 }
 
-// ---- 7. E2E SpecKit pin: a NEW SpecKit request never reuses an existing
-//         folder of the same name (SpecKit always takes nextMissionSeq).
+// ---- 7. E2E SpecKit: an empty provisional folder IS reused (no orphan 002).
 {
-  const repo = makeFixtureRepo("reuse-speckit");
-  const binDir = makeFixtureBin("reuse-speckit");
+  const repo = makeFixtureRepo("reuse-speckit-provisional");
+  const binDir = makeFixtureBin("reuse-speckit-provisional");
+  try {
+    writeConfig(repo, {planningFramework: "speckit"});
+    const dir = path.join(repo, ".autopilot", "missions", "001-smoke-test-health-endpoint");
+    fs.mkdirSync(dir, {recursive: true});
+    fs.writeFileSync(path.join(dir, "WATCH-REPORT.md"), "# watch\n");
+    setScenario(repo, "speckit_boundary_violation");
+    const run = runAutopilot(repo, binDir, {request: "smoke test the health endpoint", timeoutMs: MISSION_TIMEOUT_MS});
+
+    check("e2e speckit: boundary-violation mission did not complete", run.status !== 0, run.status);
+    const state = JSON.parse(fs.readFileSync(path.join(repo, ".autopilot", "state.json"), "utf8"));
+    check("e2e speckit: provisional empty folder reused", state.missionSeq === "001", state.missionSeq);
+    check("e2e speckit: no orphan 002 folder created", !fs.existsSync(path.join(repo, ".autopilot", "missions", "002-smoke-test-health-endpoint")), state.mission);
+  } finally { cleanup(repo, binDir); }
+}
+
+// ---- 7b. E2E SpecKit guarantee: a folder with real work is NEVER adopted.
+{
+  const repo = makeFixtureRepo("reuse-speckit-finished");
+  const binDir = makeFixtureBin("reuse-speckit-finished");
   try {
     writeConfig(repo, {planningFramework: "speckit"});
     const oldDir = seedMission(repo, "001-smoke-test-health-endpoint");
@@ -157,7 +175,7 @@ function seedMission(repo, dirName, {tasks = true, plan = true, runs = 1} = {}) 
 
     check("e2e speckit: boundary-violation mission did not complete", run.status !== 0, run.status);
     const state = JSON.parse(fs.readFileSync(path.join(repo, ".autopilot", "state.json"), "utf8"));
-    check("e2e speckit: never reuses the existing folder's sequence", state.missionSeq === "002", state.missionSeq);
+    check("e2e speckit: finished folder not reused (new sequence allocated)", state.missionSeq === "002", state.missionSeq);
     check("e2e speckit: seeded mission folder untouched", sha(path.join(oldDir, "TASKS.md")) === tasksHash && sha(path.join(oldDir, "PLAN.md")) === planHash);
   } finally { cleanup(repo, binDir); }
 }

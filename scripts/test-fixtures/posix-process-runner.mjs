@@ -31,6 +31,16 @@
 import {spawn as defaultSpawn} from "node:child_process";
 import fs from "node:fs";
 
+// `test-all` scales load-sensitive waits with AP_TEST_TIMEOUT_FACTOR
+// (default 2); standalone runs keep factor 1 unless the operator sets it.
+// The post-SIGKILL confirmation window below is a wait for an observable
+// event ("the group is gone") and can exceed its short default on a loaded
+// box, so it (and the preceding SIGTERM grace) scales with it too.
+const TIMEOUT_FACTOR = (() => {
+  const value = Number(process.env.AP_TEST_TIMEOUT_FACTOR);
+  return Number.isFinite(value) && value > 0 ? value : 1;
+})();
+
 function groupAlive(pid) {
   try {
     process.kill(-pid, 0);
@@ -311,16 +321,29 @@ function newStreamState(maxOutputBytes) {
 // dead before settlement, output is byte-bounded, and settlement happens
 // exactly once. The leader's observed status/signal are preserved.
 //
+// `readyWhen` is an optional callback polled at the same cadence as
+// markerFile. When it returns true, the runner waits `settleMs` (default
+// 1000) so the intended hang is actually in progress, then terminates the
+// tree exactly as on the marker path and reports `readyObserved: true`.
+// This lets a test whose fake agent hangs deterministically end as soon as
+// the hang is observable instead of burning the whole deadline. The marker
+// still wins if both are true, and `timeoutMs` remains the safety net.
+// Existing callers that pass no `readyWhen` behave exactly as before.
+//
 // Result: {status, signal, stdout, stderr, timedOut, outputLimitExceeded,
-// terminationFailed, terminationConfirmed, markerObserved, killed, error}.
-// `killed` means this call terminated a confirmed-dead tree (marker or
-// deadline trigger); a process that exited on its own reports killed:false.
-// On win32 (no process groups) only the direct child is signalled and
-// terminationConfirmed reflects the observed close.
+// terminationFailed, terminationConfirmed, markerObserved, readyObserved,
+// killed, error}.
+// `killed` means this call terminated a confirmed-dead tree (marker,
+// ready, or deadline trigger); a process that exited on its own reports
+// killed:false. On win32 (no process groups) only the direct child is
+// signalled and terminationConfirmed reflects the observed close; the
+// readyWhen path is platform-independent (it only reads disk state).
 export function runTreeUntilMarker(file, args, {
   cwd = undefined,
   env = undefined,
   markerFile,
+  readyWhen = null,
+  settleMs = 1000,
   pollMs = 50,
   timeoutMs = 30000,
   killGraceMs = 1000,
@@ -334,6 +357,9 @@ export function runTreeUntilMarker(file, args, {
   return new Promise((resolve) => {
     const posix = process.platform !== "win32";
     const state = newStreamState(maxOutputBytes);
+    const effectiveKillGraceMs = Math.ceil(killGraceMs * TIMEOUT_FACTOR);
+    const effectiveBackstopMs = Math.ceil(backstopMs * TIMEOUT_FACTOR);
+    const effectiveConfirmAttempts = Math.ceil(confirmAttempts * TIMEOUT_FACTOR);
     let settled = false;
     let terminating = false;
     let terminateReason = null;
@@ -341,21 +367,23 @@ export function runTreeUntilMarker(file, args, {
     let terminationFailed = false;
     let terminationConfirmed = false;
     let markerObserved = false;
+    let readyObserved = false;
     let status = null;
     let signal = null;
     let closeObserved = false;
     let spawnError = null;
     let deadlineTimer = null;
     let pollTimer = null;
+    let settleTimer = null;
     let killTimer = null;
     let backstopTimer = null;
     let cleanupTimer = null;
 
     const clearTimers = () => {
-      for (const t of [deadlineTimer, pollTimer, killTimer, backstopTimer, cleanupTimer]) {
+      for (const t of [deadlineTimer, pollTimer, settleTimer, killTimer, backstopTimer, cleanupTimer]) {
         if (t) clearTimeout(t);
       }
-      deadlineTimer = pollTimer = killTimer = backstopTimer = cleanupTimer = null;
+      deadlineTimer = pollTimer = settleTimer = killTimer = backstopTimer = cleanupTimer = null;
     };
     const refreshMarkerObserved = () => {
       try {
@@ -373,8 +401,8 @@ export function runTreeUntilMarker(file, args, {
         stdout: streams.stdout, stderr: streams.stderr,
         timedOut,
         outputLimitExceeded: streams.overflow,
-        terminationFailed, terminationConfirmed, markerObserved,
-        killed: terminationConfirmed && (terminateReason === "marker" || terminateReason === "deadline"),
+        terminationFailed, terminationConfirmed, markerObserved, readyObserved,
+        killed: terminationConfirmed && (terminateReason === "marker" || terminateReason === "ready" || terminateReason === "deadline"),
         error: spawnError
       });
     };
@@ -405,8 +433,8 @@ export function runTreeUntilMarker(file, args, {
       killTimer = setTimeout(() => {
         if (settled) return;
         if (posix && groupAlive(child.pid)) killGroup(child.pid, "SIGKILL");
-        confirmLoop(confirmAttempts);
-      }, killGraceMs);
+        confirmLoop(effectiveConfirmAttempts);
+      }, effectiveKillGraceMs);
     };
 
     let child = null;
@@ -463,6 +491,18 @@ export function runTreeUntilMarker(file, args, {
         beginTermination("marker");
         return;
       }
+      if (typeof readyWhen === "function") {
+        let ready = false;
+        try { ready = readyWhen() === true; } catch { /* treat a throwing probe as not ready */ }
+        if (ready) {
+          readyObserved = true;
+          settleTimer = setTimeout(() => {
+            if (settled || terminating) return;
+            beginTermination("ready");
+          }, settleMs);
+          return;
+        }
+      }
       pollTimer = setTimeout(pollTick, pollMs);
     };
     pollTimer = setTimeout(pollTick, pollMs);
@@ -484,7 +524,7 @@ export function runTreeUntilMarker(file, args, {
       }
       terminationFailed = true;
       settle();
-    }, timeoutMs + killGraceMs + backstopMs);
+    }, timeoutMs + effectiveKillGraceMs + effectiveBackstopMs);
 
     function groupAliveSafe() {
       if (!posix) return false;

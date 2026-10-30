@@ -72,12 +72,13 @@ const caps = reread.caps;
 const expectedRoles = ['planner', 'plan_reviewer', 'code_reviewer', 'verifier'];
 for (const role of expectedRoles) {
   if (!caps[role]) throw new Error(`Missing caps for role ${role}`);
-  const expTokens = role === 'planner' ? 200000 : 150000;
-  const expWrapup = role === 'planner' ? 180000 : 135000;
+  const expTokens = role === 'planner' ? 200000 : role === 'plan_reviewer' ? 250000 : 150000;
+  const expWrapup = role === 'planner' ? 180000 : role === 'plan_reviewer' ? 225000 : 135000;
   const expTurns = (role === "verifier" || role === "planner" || role === "plan_reviewer") ? 30 : 22; // backlog #59(b), #111
+  const expSessions = role === "plan_reviewer" ? 4 : 2;
   if (caps[role].max_turns !== expTurns) throw new Error(`${role}.max_turns !== ${expTurns}: ${caps[role].max_turns}`);
   if (caps[role].max_tokens !== expTokens) throw new Error(`${role}.max_tokens !== ${expTokens}: ${caps[role].max_tokens}`);
-  if (caps[role].extra_sessions !== 2) throw new Error(`${role}.extra_sessions !== 2: ${caps[role].extra_sessions}`);
+  if (caps[role].extra_sessions !== expSessions) throw new Error(`${role}.extra_sessions !== ${expSessions}: ${caps[role].extra_sessions}`);
   if (caps[role].wrap_up_at_tokens !== expWrapup) throw new Error(`${role}.wrap_up_at_tokens !== ${expWrapup}: ${caps[role].wrap_up_at_tokens}`);
 }
 
@@ -104,9 +105,9 @@ if (presetCaps.planner.max_tokens !== 60000) throw new Error(`Operator planner.m
 if (presetCaps.planner.extra_sessions !== 3) throw new Error(`Operator planner.extra_sessions overwritten: ${presetCaps.planner.extra_sessions}`);
 if (presetCaps.planner.wrap_up_at_tokens !== 55000) throw new Error(`Operator planner.wrap_up_at_tokens overwritten: ${presetCaps.planner.wrap_up_at_tokens}`);
 if (presetCaps.plan_reviewer.max_turns !== 25) throw new Error(`Operator plan_reviewer.max_turns overwritten: ${presetCaps.plan_reviewer.max_turns}`);
-if (presetCaps.plan_reviewer.max_tokens !== 150000) throw new Error(`plan_reviewer.max_tokens not backfilled to per-turn default: ${presetCaps.plan_reviewer.max_tokens}`);
-if (presetCaps.plan_reviewer.extra_sessions !== 2) throw new Error(`plan_reviewer.extra_sessions not backfilled: ${presetCaps.plan_reviewer.extra_sessions}`);
-if (presetCaps.plan_reviewer.wrap_up_at_tokens !== 135000) throw new Error(`plan_reviewer.wrap_up_at_tokens not backfilled to per-turn default: ${presetCaps.plan_reviewer.wrap_up_at_tokens}`);
+if (presetCaps.plan_reviewer.max_tokens !== 250000) throw new Error(`plan_reviewer.max_tokens not backfilled to per-turn default: ${presetCaps.plan_reviewer.max_tokens}`);
+if (presetCaps.plan_reviewer.extra_sessions !== 4) throw new Error(`plan_reviewer.extra_sessions not backfilled: ${presetCaps.plan_reviewer.extra_sessions}`);
+if (presetCaps.plan_reviewer.wrap_up_at_tokens !== 225000) throw new Error(`plan_reviewer.wrap_up_at_tokens not backfilled to per-turn default: ${presetCaps.plan_reviewer.wrap_up_at_tokens}`);
 
 // Mission 044 Phase 1 task 1.4: an untouched config that persisted the SHIPPED
 // cumulative defaults is rewritten to the per-turn defaults (global implementer
@@ -126,8 +127,8 @@ if (legacyShipped.caps.implementer.max_tokens !== 180000) throw new Error(`legac
 if (legacyShipped.caps.implementer.wrap_up_at_tokens !== 160000) throw new Error(`legacy handoff_wrapup_tokens 690000 not rewritten to the per-turn default: ${legacyShipped.caps.implementer.wrap_up_at_tokens}`);
 const legacyCaps = legacyShipped.caps;
 for (const role of ['planner', 'plan_reviewer', 'code_reviewer']) {
-  const expTokens = role === 'planner' ? 200000 : 150000;
-  const expWrapup = role === 'planner' ? 180000 : 135000;
+  const expTokens = role === 'planner' ? 200000 : role === 'plan_reviewer' ? 250000 : 150000;
+  const expWrapup = role === 'planner' ? 180000 : role === 'plan_reviewer' ? 225000 : 135000;
   if (legacyCaps[role].max_tokens !== expTokens) throw new Error(`legacy ${role}.max_tokens not rewritten: ${legacyCaps[role].max_tokens}`);
   if (legacyCaps[role].wrap_up_at_tokens !== expWrapup) throw new Error(`legacy ${role}.wrap_up_at_tokens not rewritten: ${legacyCaps[role].wrap_up_at_tokens}`);
 }

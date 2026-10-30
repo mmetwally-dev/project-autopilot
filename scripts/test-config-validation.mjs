@@ -117,7 +117,7 @@ const capsCases = [
   ["valid caps block for all review roles", {
     caps: {
       planner: {max_turns: 20, max_tokens: 200000, extra_sessions: 1},
-      plan_reviewer: {max_turns: 18, max_tokens: 150000, extra_sessions: 2},
+      plan_reviewer: {max_turns: 18, max_tokens: 150000, extra_sessions: 4},
       code_reviewer: {max_turns: 22, max_tokens: 150000, extra_sessions: 0},
       verifier: {max_turns: 15, max_tokens: 150000, extra_sessions: 3},
     }
@@ -125,7 +125,7 @@ const capsCases = [
   ["valid caps with wrap_up_tokens_threshold", {
     caps: {
       planner: {max_turns: 20, max_tokens: 200000, extra_sessions: 1, wrap_up_tokens_threshold: 180000},
-      plan_reviewer: {max_turns: 18, max_tokens: 150000, extra_sessions: 2, wrap_up_tokens_threshold: 135000},
+      plan_reviewer: {max_turns: 18, max_tokens: 150000, extra_sessions: 4, wrap_up_tokens_threshold: 135000},
     }
   }, true],
   ["valid caps with partial roles", {
@@ -177,6 +177,12 @@ const capsCases = [
   ["planner defaults with wrap-up accepted", {
     caps: {planner: {max_turns: 22, max_tokens: 200000, extra_sessions: 2, wrap_up_tokens_threshold: 180000}},
   }, true],
+  ["plan_reviewer defaults above global ceiling accepted", {
+    caps: {plan_reviewer: {max_turns: 30, max_tokens: 250000, extra_sessions: 4, wrap_up_tokens_threshold: 225000}},
+  }, true],
+  ["code_reviewer max_tokens above global ceiling rejected", {
+    caps: {code_reviewer: {max_turns: 22, max_tokens: 250000, extra_sessions: 2}},
+  }, false],
   ["max_tokens below custom ceiling accepted", {
     caps: {planner: {max_turns: 20, max_tokens: 200000, extra_sessions: 1}},
     per_task_max_tokens: 300000

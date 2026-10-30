@@ -64,6 +64,10 @@ export { readRolloverDeadEnds };
 export const PLANNING_CONTINUATION_SCOPES = [
   "task:standalone:planning:planner",
   "task:standalone:planning:plan_reviewer",
+  "task:speckit:planning:planner",
+  "task:speckit:planning:plan_reviewer",
+  "task:gsd:planning:planner",
+  "task:gsd:planning:plan_reviewer",
 ];
 
 // Shared spent-continuation predicate: true when the scope is a planning
@@ -92,6 +96,44 @@ export function hasSpentPlanningContinuations(s) {
   return false;
 }
 
+// Drop one planning role scope's continuation entries: the
+// continuationBudgetKey(scope) entries from
+// continuationBudgets/noProgressGenerations/rolloverDeadEnds, the bare-scope
+// entry from planningProgressDigests, the backstopLedgerKey(scope) entry from
+// backstopFirings (via the existing clearBackstopFirings), and
+// lastContinuation when it names this scope. Implementer keys, failureBudgets
+// and every OTHER planning scope survive. Returns the number of entries
+// dropped. Called when that role finishes a run, so a new stage starts with a
+// fresh continuation allowance instead of inheriting the previous stage's.
+export function clearPlanningContinuationScope(s, scope) {
+  if (!s || typeof s !== "object" || !isPlanningContinuationScope(scope)) return 0;
+  let cleared = 0;
+  const budgetKey = continuationBudgetKey(scope);
+  if (s.continuationBudgets && typeof s.continuationBudgets === "object" && budgetKey in s.continuationBudgets) {
+    delete s.continuationBudgets[budgetKey];
+    cleared += 1;
+  }
+  if (s.noProgressGenerations && typeof s.noProgressGenerations === "object" && budgetKey in s.noProgressGenerations) {
+    delete s.noProgressGenerations[budgetKey];
+    cleared += 1;
+  }
+  if (s.rolloverDeadEnds && typeof s.rolloverDeadEnds === "object" && budgetKey in s.rolloverDeadEnds) {
+    delete s.rolloverDeadEnds[budgetKey];
+    cleared += 1;
+  }
+  if (s.planningProgressDigests && typeof s.planningProgressDigests === "object" && scope in s.planningProgressDigests) {
+    delete s.planningProgressDigests[scope];
+    cleared += 1;
+  }
+  if (clearBackstopFirings(s, scope)) cleared += 1;
+  if (s.lastContinuation && typeof s.lastContinuation === "object"
+    && s.lastContinuation.scope === scope) {
+    delete s.lastContinuation;
+    cleared += 1;
+  }
+  return cleared;
+}
+
 // Drop every planning continuation entry: the continuationBudgetKey(scope)
 // entries from continuationBudgets/noProgressGenerations/rolloverDeadEnds,
 // the bare-scope entries from planningProgressDigests, the
@@ -103,29 +145,7 @@ export function clearPlanningContinuations(s) {
   if (!s || typeof s !== "object") return 0;
   let cleared = 0;
   for (const scope of PLANNING_CONTINUATION_SCOPES) {
-    const budgetKey = continuationBudgetKey(scope);
-    if (s.continuationBudgets && typeof s.continuationBudgets === "object" && budgetKey in s.continuationBudgets) {
-      delete s.continuationBudgets[budgetKey];
-      cleared += 1;
-    }
-    if (s.noProgressGenerations && typeof s.noProgressGenerations === "object" && budgetKey in s.noProgressGenerations) {
-      delete s.noProgressGenerations[budgetKey];
-      cleared += 1;
-    }
-    if (s.rolloverDeadEnds && typeof s.rolloverDeadEnds === "object" && budgetKey in s.rolloverDeadEnds) {
-      delete s.rolloverDeadEnds[budgetKey];
-      cleared += 1;
-    }
-    if (s.planningProgressDigests && typeof s.planningProgressDigests === "object" && scope in s.planningProgressDigests) {
-      delete s.planningProgressDigests[scope];
-      cleared += 1;
-    }
-    if (clearBackstopFirings(s, scope)) cleared += 1;
-  }
-  if (s.lastContinuation && typeof s.lastContinuation === "object"
-    && isPlanningContinuationScope(s.lastContinuation.scope)) {
-    delete s.lastContinuation;
-    cleared += 1;
+    cleared += clearPlanningContinuationScope(s, scope);
   }
   return cleared;
 }

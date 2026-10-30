@@ -41,7 +41,7 @@ check("monitor: evaluator no-ops once settled or breached", /if\(capSettled\|\|c
 check("monitor: live totals decode for every role (usageDriver, not implementer-gated capDriver)",
   /const usageDriver=adapterDriver\(role\.adapter\);/.test(src)
   && /usageDriver\.decodeEvents\(capStdout,capStderr\)/.test(src)
-  && /accumulateUsage\(role\.adapter,capEvents\)/.test(src));
+  && /accumulateUsage\(role\.adapter,capEvents(?:,openCodeUsageOptions)?\)/.test(src));
 check("monitor: cap enforcement stays implementer-only (wrap-up turn exempt with its own ceiling)",
   /const capDriver=\(!isWrapUp && capEnabled\)\?adapterDriver\(role\.adapter\):null;/.test(src)
   && /\} else \{\s*\n\s*if\(!capDriver\) return;/.test(src)
@@ -98,13 +98,12 @@ check("wrapup: the wrap-up prompt builders are gone from autopilot.mjs entirely"
   !/buildWrapUpPrompt|buildReviewWrapUpPrompt/.test(src));
 
 // ── Non-implementer roles do NOT pass capEnabled:true ──
-// (Mission 031 P6.2: planner passes capEnabled:true at the standalone
-// planning call site only, so planner is pinned by the P6.2 block below,
-// not by this guard.)
-check("non-implementer: no relay/relayAsync/review call passes capEnabled:true for other roles",
-  !/relay\("(plan_reviewer|code_reviewer|verifier)"[^}]*capEnabled:true\}/.test(src) &&
-  !/relayAsync\("(plan_reviewer|code_reviewer|verifier)"[^}]*capEnabled:true\}/.test(src) &&
-  !/review\([^)]*"(plan_reviewer|code_reviewer|verifier)"[^)]*capEnabled:true/.test(src));
+// Planner and plan_reviewer are pinned by the planning-cap blocks below;
+// this guard covers the execution review roles only.
+check("non-implementer: no relay/relayAsync/review call passes capEnabled:true for code_reviewer/verifier",
+  !/relay\("(code_reviewer|verifier)"[^}]*capEnabled:true\}/.test(src) &&
+  !/relayAsync\("(code_reviewer|verifier)"[^}]*capEnabled:true\}/.test(src) &&
+  !/review\([^)]*"(code_reviewer|verifier)"[^)]*capEnabled:true/.test(src));
 
 // ── Mission 031 phase 3 task 3.3: reviewer prompt offers INCOMPLETE ──
 check("reviewer: prompt offers INCOMPLETE alongside PASS/FAIL",
@@ -172,7 +171,7 @@ check("wrapup: breach records wrapUp:true + trigger on the capped marker",
   /if\(capBreach\.wrapUp\) result\.capped\.wrapUp=true;/.test(src)
   && /if\(capBreach\.trigger\) result\.capped\.trigger=capBreach\.trigger;/.test(src));
 check("wrapup: cap/wrap-up figures worded via the capUnitLabel helper (turns names turns, tokens keep raw context tokens)",
-  /capUnitLabel,/.test(src) && /from "\.\/per-task-budget\.mjs"/.test(src) && count(/capUnitLabel\(\w+\.capped\.type\)/g) === 9 && capUnitLabel("turns") === "turns" && capUnitLabel("tokens") === "raw context tokens" && /CAP_BREACH \| TYPE=/.test(src));
+  /capUnitLabel,/.test(src) && /from "\.\/per-task-budget\.mjs"/.test(src) && count(/capUnitLabel\(\w+\.capped\.type\)/g) === 10 && capUnitLabel("turns") === "turns" && capUnitLabel("tokens") === "raw context tokens" && /CAP_BREACH \| TYPE=/.test(src));
 check("wrapup: fallback note is built from this session's changes plus the session work digest",
   /changedFilesStat\(cwd,\{paths:sessionPaths\}\)/.test(src)
   && /buildOrchestratorFallbackNote\(taskRef,events,role\.adapter,repo,diffStat,capBreach,sessionPaths\)/.test(src)
@@ -260,7 +259,7 @@ check("wrap-up: no wrap-up resume remains (no adapter resume-capability gate)",
   && !/Adapter capability only/.test(src));
 check("wrap-up: relay args keep the forceResume plumbing for other resume callers",
   /if\(resume && \(role\.resume \|\| forceResume\)\)\{/.test(src)
-  && /buildRelayArgs\(role,a,readOnly,resume,stateForRelay,\{[^}]*forceResume:isWrapUp\}\)/.test(src));
+  && /buildRelayArgs\(role,a,readOnly,resume,stateForRelay,\{[^}]*forceResume:isWrapUp[^}]*\}\)/.test(src));
 
 // ── Backlog #27: reset-for-continuations wiring ──
 check("reset: continuation scope resolution accepts all three forms",
@@ -268,11 +267,11 @@ check("reset: continuation scope resolution accepts all three forms",
   && /continuationBudgetKey\(scope\)/.test(src)
   && /lastContinuation\?\.scope/.test(src));
 check("reset: queued continuation reset applies at all four continuation decisions + standalone code_reviewer capped (031 P4.1) + standalone verifier capped (031 P4.2) + 2 voluntary P4.3 + speckit code_reviewer capped (031 P5.1) + speckit verifier capped (031 P5.2) + 2 speckit voluntary P5.3 + standalone planner capped (031 P6.2) + standalone planner voluntary (031 P6b.1) + 2 standalone plan_reviewer capped (031 P7.1) + standalone plan_reviewer voluntary (031 P7b.1)",
-  count(/maybeApplyPendingContinuationReset\(s,contScope\);/g) === 17);
+  count(/maybeApplyPendingContinuationReset\(s,contScope\);/g) === 19);
 check("reset: escalation records the continuation for bare `ap reset` (all four sites)",
   count(/recordLastContinuation\(s,\{contScope,taskId,missionName:(mission|missionIdentity),taskRef:taskDisplayRef\(phaseTasks\[taskIndex\],taskIndex\)\}\)/g) === 4);
 check("reset: every not-converging message ends with the exact resume command",
-  count(/Resume: ap reset --scope /g) === 19); // 4 not-converging sites + standalone code_reviewer capped (031 P4.1) + standalone verifier capped (031 P4.2) + 2 voluntary P4.3 + speckit code_reviewer capped (031 P5.1) + speckit verifier capped (031 P5.2) + 2 speckit voluntary P5.3 + standalone planner capped (031 P6.2) + standalone planner voluntary (031 P6b.1) + 2 standalone plan_reviewer capped (031 P7.1) + standalone plan_reviewer voluntary (031 P7b.1) + the shared no-progress stop (#32) + planner no-progress stop (031 P6b.2)
+  count(/Resume: ap reset --scope /g) === 21); // 4 not-converging sites + standalone code_reviewer capped (031 P4.1) + standalone verifier capped (031 P4.2) + 2 voluntary P4.3 + speckit code_reviewer capped (031 P5.1) + speckit verifier capped (031 P5.2) + 2 speckit voluntary P5.3 + standalone planner capped (031 P6.2) + standalone planner voluntary (031 P6b.1) + 2 standalone plan_reviewer capped (031 P7.1) + standalone plan_reviewer voluntary (031 P7b.1) + the shared no-progress stop (#32) + planner no-progress stop (031 P6b.2)
 
 // ── Backlog #32: no-progress stop + note-cited code in the brief ──
 check("no-progress: checked at all four continuation decisions, after the allowance check (both loops)",
@@ -332,24 +331,23 @@ check("budgets: continuation consumed via the independent ledger module",
 }
 
 // ── Mission 031 phase 3 task 3.5: INCOMPLETE-as-FAIL (no continuation) ──
-check("incomplete: GSD/final-review paths name INCOMPLETE-as-FAIL explicitly",
+check("incomplete: remaining final-review paths name INCOMPLETE-as-FAIL explicitly",
   src.includes("INCOMPLETE-as-FAIL (no continuation): gsd-plan-final-review")
   && src.includes("INCOMPLETE-as-FAIL (no continuation): gsd-loop-final-review")
   && src.includes("INCOMPLETE-as-FAIL (no continuation): standalone-early-final-review")
   && src.includes("INCOMPLETE-as-FAIL (no continuation): standalone-final-review")
   && src.includes("INCOMPLETE-as-FAIL (no continuation): speckit-final-review"));
-check("incomplete: speckit plan_reviewer initial + re-review name INCOMPLETE-as-FAIL explicitly",
-  src.includes("INCOMPLETE-as-FAIL (no continuation): speckit-gate-initial-review")
-  && src.includes("INCOMPLETE-as-FAIL (no continuation): speckit-gate-re-review"));
-check("incomplete: existing-planning plan_reviewer names INCOMPLETE-as-FAIL explicitly",
-  src.includes("INCOMPLETE-as-FAIL (no continuation): existing-planning-review"));
+check("incomplete: planning review paths now consume continuation instead of INCOMPLETE-as-FAIL",
+  !src.includes("INCOMPLETE-as-FAIL (no continuation): speckit-gate-initial-review")
+  && !src.includes("INCOMPLETE-as-FAIL (no continuation): speckit-gate-re-review")
+  && !src.includes("INCOMPLETE-as-FAIL (no continuation): existing-planning-review"));
 {
   const parts = src.split("INCOMPLETE-as-FAIL (no continuation)").slice(1);
-  check("incomplete: no continuation consumed at INCOMPLETE-as-FAIL sites (8 sites)",
-    parts.length === 8 && parts.every((p) => !p.slice(0, 600).includes("consumeContinuation")),
+  check("incomplete: no continuation consumed at INCOMPLETE-as-FAIL sites (5 sites)",
+    parts.length === 5 && parts.every((p) => !p.slice(0, 600).includes("consumeContinuation")),
     parts.length);
   check("incomplete: failure budget unchanged at INCOMPLETE-as-FAIL sites",
-    parts.length === 8 && parts.every((p) => !p.slice(0, 600).includes("recordFailureBudget(")),
+    parts.length === 5 && parts.every((p) => !p.slice(0, 600).includes("recordFailureBudget(")),
     parts.length);
 }
 
@@ -581,10 +579,10 @@ check("031 P4.5: wrap-up note path stays the shared mission handoff path",
 {
   const standalonePlanningPart = (src.split("async function runStandalonePlanning")[1] ?? "").split("async function runSpecKitPlanning")[0] ?? "";
   const afterStandalonePlanning = src.split("async function runSpecKitPlanning")[1] ?? "";
-  check("031 P6.2: standalone planning planner relayAsync passes capEnabled:true (1 site, standalone planning only)",
+  check("031 P6.2: planning planners pass capEnabled:true (standalone relayAsync, SpecKit relay, GSD relayAsync)",
     callsWithOptions(standalonePlanningPart, 'relayAsync("planner",', ["capEnabled:true"]).length === 1
-    && callsWithOptions(afterStandalonePlanning, 'relayAsync("planner",', ["capEnabled:true"]).length === 0
-    && !/relay\("planner",[^\n]*capEnabled:true/.test(src));
+    && callsWithOptions(afterStandalonePlanning, 'relayAsync("planner",', ["capEnabled:true"]).length === 1
+    && count(/relay\("planner",[^\n]*capEnabled:true/g) === 1);
   check("031 P6.2: standalone planning planner passes taskRef 'standalone-planning-planner'",
     callsWithOptions(standalonePlanningPart, 'relayAsync("planner",', PLANNER_OPTS).length >= 1);
   check("031 P6.2: planner capped branch calls the planning-continuation helper (capped trigger)",
@@ -683,9 +681,10 @@ check("031 P4.5: wrap-up note path stays the shared mission handoff path",
 // ── Mission 031 phase 7 task 7.1: standalone plan_reviewer capped continuation ──
 {
   const standalonePlanningPart = (src.split("async function runStandalonePlanning")[1] ?? "").split("async function runSpecKitPlanning")[0] ?? "";
-  check("031 P7.1: standalone planning plan_reviewer relayAsync passes capEnabled:true (2 sites: initial + retry, standalone planning only)",
+  check("031 P7.1: planning plan_reviewers pass capEnabled:true (standalone 2 + existing-planning 1 + GSD 1 relayAsync, SpecKit relay 1)",
     callsWithOptions(standalonePlanningPart, 'relayAsync("plan_reviewer",', REVIEWER_OPTS).length === 2
-    && callsWithOptions(src, 'relayAsync("plan_reviewer",', ["capEnabled:true"]).length === 2);
+    && callsWithOptions(src, 'relayAsync("plan_reviewer",', ["capEnabled:true"]).length === 4
+    && count(/relay\("plan_reviewer",[^\n]*capEnabled:true/g) === 1);
   check("031 P7.1: plan_reviewer capped branch calls the planning-continuation helper (capped trigger, pre- and post-retry)",
     (standalonePlanningPart.match(/handlePlanningContinuation\(s,'plan_reviewer',reviewResult,'task:standalone:planning:plan_reviewer',c\.policy,'capped'\)/g) ?? []).length === 2);
   check("031 P7.1: pre-helper capped check runs before the retry helper (capped marker never reaches the failure budget)",
@@ -701,6 +700,48 @@ check("031 P4.5: wrap-up note path stays the shared mission handoff path",
     && /Prior reviewer handoff note/.test(standalonePlanningPart));
   check("031 P7.1: non-capped reviewer outcome clears the plan_reviewer handoff note (no stale continue-from-where-it-stopped)",
     /clearHandoffNote\(mission,'standalone-planning-plan_reviewer'\)/.test(standalonePlanningPart));
+}
+
+// ── Backlog #1: SpecKit gate confirmation/re-review cap coverage ──
+{
+  const speckitPart = (src.split("async function runSpecKitPlanning")[1] ?? "").split("function gsdPlanningReviewPrompt")[0] ?? "";
+  check("backlog#1: SpecKit gate reviewer helper passes capEnabled + plan_reviewer taskRef",
+    /const runCappedReview=async\(prompt,opts=\{\}\)=>\{[\s\S]*?relay\("plan_reviewer"[\s\S]*?capEnabled:true,taskRef:planReviewerTaskRef/.test(speckitPart));
+  check("backlog#1: SpecKit initial, confirmation, and re-review all route through runCappedReview",
+    speckitPart.includes("rr=await runCappedReview(initialReviewPrompt)")
+    && speckitPart.includes("cr=await runCappedReview(confirmationPrompt,confirmationRelayOpts)")
+    && speckitPart.includes("retry=deterministicRetry||await runCappedReview(reReviewPrompt)"));
+  check("backlog#1: SpecKit gate reviewer handles capped + incomplete continuations",
+    /if\(result\.capped\)\{[\s\S]{0,300}?handleCappedPlanningResult\(\{c,s,framework:"speckit",role:"plan_reviewer"/.test(speckitPart)
+    && /parseIncompleteSignal\(result\.review \?\? result\)[\s\S]{0,300}?handleIncompletePlanningResult\(\{c,s,framework:"speckit",role:"plan_reviewer"/.test(speckitPart));
+  check("backlog#1: SpecKit gate reviewer prompt carries continuation context and clears its note",
+    speckitPart.includes('planningContinuationText(s,"speckit","plan_reviewer")')
+    && speckitPart.includes('planningBudgetReminderFor(s,c,"plan_reviewer")')
+    && speckitPart.includes("clearHandoffNote(s.mission,planReviewerTaskRef)"));
+}
+
+// ── Backlog #1: GSD planning planner/reviewer cap coverage ──
+{
+  const gsdPart = (src.split("async function gsdPlanningStage")[1] ?? "").split("async function runGsdPlanning")[0] ?? "";
+  check("backlog#1: GSD planner relayAsync passes capEnabled + gsd-planning-planner",
+    /relayAsync\("planner",prompt,c,s,\{readOnly:false,resume,capEnabled:true,taskRef,planRevision\}\)/.test(gsdPart)
+    && gsdPart.includes('planningScopeParts("gsd","planner")'));
+  check("backlog#1: GSD planner handles capped + incomplete continuations",
+    /if\(r\.capped\)\{[\s\S]{0,300}?handleCappedPlanningResult\(\{c,s,framework:"gsd",role:"planner"/.test(gsdPart)
+    && /parsePlanningIncompleteSignal\(r\.finalMessage \?\? r\)[\s\S]{0,300}?handleIncompletePlanningResult\(\{c,s,framework:"gsd",role:"planner"/.test(gsdPart));
+  check("backlog#1: GSD planner prompt carries continuation context and a hand-off note",
+    gsdPart.includes('planningContinuationText(s,"gsd","planner")')
+    && gsdPart.includes('planningBudgetReminderFor(s,c,"planner")')
+    && gsdPart.includes("handoffNoteRelPath(s.mission, taskRef)"));
+  check("backlog#1: GSD plan_reviewer relayAsync passes capEnabled + gsd-planning-plan_reviewer",
+    /relayAsync\("plan_reviewer",prompt,c,s,\{readOnly:true,review:true,capEnabled:true,taskRef\}\)/.test(gsdPart)
+    && gsdPart.includes('planningScopeParts("gsd","plan_reviewer")'));
+  check("backlog#1: GSD reviewer handles capped + incomplete continuations",
+    /if\(rr\.capped\)\{[\s\S]{0,300}?handleCappedPlanningResult\(\{c,s,framework:"gsd",role:"plan_reviewer"/.test(gsdPart)
+    && /parseIncompleteSignal\(rr\.review \?\? rr\)[\s\S]{0,300}?handleIncompletePlanningResult\(\{c,s,framework:"gsd",role:"plan_reviewer"/.test(gsdPart));
+  check("backlog#1: GSD final planning review reuses the capped reviewer helper",
+    src.includes('const finalReview=await reviewGsdPlanningStage(c,s,"plan-check",phase,request,finalFindings,{allowIncompleteContinuation:false});')
+    && /for\(;;\)\{[\s\S]{0,300}?const finalReview=await reviewGsdPlanningStage\(c,s,"plan-check",phase,request,finalFindings/.test(src));
 }
 
 // ── Mission 031 phase 7 task 7b.1: plan_reviewer voluntary early-stop continuation ──
@@ -795,8 +836,8 @@ check("031 P10.3: 4 code_reviewer sites pass explicit continuationAllowance",
   count(/consumeContinuation\(s,c\.policy,contScope,resolvePerRoleLimits\('code_reviewer',c\.policy\)\.continuationAllowance\)/g) === 4);
 check("031 P10.3: 4 verifier sites pass explicit continuationAllowance",
   count(/consumeContinuation\(s,c\.policy,contScope,resolvePerRoleLimits\('verifier',c\.policy\)\.continuationAllowance\)/g) === 4);
-check("031 P10.3: 5 handlePlanningContinuation call sites total (planner 2 + plan_reviewer 3)",
-  count(/handlePlanningContinuation\(s,/g) === 5);
+check("031 P10.3: 7 handlePlanningContinuation call sites total (planner 2 + plan_reviewer 3 + 2 shared helpers)",
+  count(/handlePlanningContinuation\(s,/g) === 7);
 check("031 P10.3: planner capped + incomplete planning sites (1 each)",
   count(/handlePlanningContinuation\(s,'planner',planner,'task:standalone:planning:planner',c\.policy,'capped'\)/g) === 1
   && count(/handlePlanningContinuation\(s,'planner',planner,'task:standalone:planning:planner',c\.policy,'incomplete'\)/g) === 1);

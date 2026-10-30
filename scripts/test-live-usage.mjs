@@ -177,18 +177,19 @@ check("cells: TURNS stays unprefixed while running",
   const ROLES_031 = ["code_reviewer", "verifier", "planner", "plan_reviewer"];
   for (const role of ROLES_031) {
     const limits = resolvePerRoleLimits(role, {});
-    const expTokens = role === "planner" ? 200000 : 150000;
-    const expWrapup = role === "planner" ? 180000 : 135000;
+    const expTokens = role === "planner" ? 200000 : role === "plan_reviewer" ? 250000 : 150000;
+    const expWrapup = role === "planner" ? 180000 : role === "plan_reviewer" ? 225000 : 135000;
     const expTurns = (role === "verifier" || role === "planner" || role === "plan_reviewer") ? 30 : 22; // backlog #59(b), #111 (plan_reviewer 30)
-    check(`caps/${role}: defaults are ${expTurns} turns / ${expTokens} tokens / allowance 2`,
-      limits.perTaskMaxTurns === expTurns && limits.perTaskMaxTokens === expTokens && limits.continuationAllowance === 2,
+    const expAllowance = role === "plan_reviewer" ? 4 : 2;
+    check(`caps/${role}: defaults are ${expTurns} turns / ${expTokens} tokens / allowance ${expAllowance}`,
+      limits.perTaskMaxTurns === expTurns && limits.perTaskMaxTokens === expTokens && limits.continuationAllowance === expAllowance,
       limits);
     check(`caps/${role}: wrap-up threshold ${expWrapup} sits below the ${expTokens} cap`,
       limits.wrapUpTokenThreshold === expWrapup && limits.wrapUpTokenThreshold < limits.perTaskMaxTokens,
       limits);
     check(`caps/${role}: PER_ROLE_CAPS_DEFAULT matches resolved limits`,
       PER_ROLE_CAPS_DEFAULT[role]?.maxTurns === expTurns && PER_ROLE_CAPS_DEFAULT[role]?.maxTokens === expTokens
-      && PER_ROLE_CAPS_DEFAULT[role]?.extraSessions === 2 && PER_ROLE_WRAPUP_TOKENS_DEFAULT[role] === expWrapup);
+      && PER_ROLE_CAPS_DEFAULT[role]?.extraSessions === expAllowance && PER_ROLE_WRAPUP_TOKENS_DEFAULT[role] === expWrapup);
     const atTurnCap = {turns: expTurns, input: 10, cacheRead: 10};
     const overTurnCap = {turns: expTurns + 1, input: 10, cacheRead: 10};
     check(`caps/${role}: ${expTurns} turns is not a breach (cap is exclusive)`,

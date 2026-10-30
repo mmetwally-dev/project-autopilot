@@ -513,20 +513,27 @@ export function runAutopilot(repo, binDir, {request = "fixture request", timeout
 // can then write plan artifacts after the interruption and corrupt the
 // resumed run. Termination of the whole group is confirmed before return;
 // output is byte-bounded; settlement happens exactly once. Result:
-// {markerObserved, killed, status, code, signal, timedOut,
+// {markerObserved, readyObserved, killed, status, code, signal, timedOut,
 // terminationConfirmed, terminationFailed, outputLimitExceeded,
 // stdout, stderr, error}.
-export async function runAutopilotUntilMarker(repo, binDir, {request, markerFile, pollMs = 50, timeoutMs = 30000} = {}) {
+//
+// `readyWhen` (optional) is polled like markerFile; when it returns true the
+// tree is killed after `settleMs` and readyObserved is reported. See
+// runTreeUntilMarker. hangStarted() below is the on-disk probe for a fake
+// agent that is deliberately hanging. A caller without readyWhen behaves
+// exactly as before.
+export async function runAutopilotUntilMarker(repo, binDir, {request, markerFile, readyWhen = null, settleMs = 1000, pollMs = 50, timeoutMs = 30000} = {}) {
   const delimiter = process.platform === "win32" ? ";" : ":";
   const base = withoutOuterGitGuard(process.env);
   const env = {...base, PATH: `${binDir}${delimiter}${base.PATH || ""}`};
   const result = await runTreeUntilMarker(
     process.execPath,
     [path.join(skillRoot, "scripts", "autopilot.mjs"), "run", request, "--repo", repo],
-    {cwd: repo, env, markerFile, pollMs, timeoutMs}
+    {cwd: repo, env, markerFile, readyWhen, settleMs, pollMs, timeoutMs}
   );
   return {
     markerObserved: result.markerObserved,
+    readyObserved: result.readyObserved,
     killed: result.killed,
     status: result.status,
     code: result.status,
@@ -570,6 +577,43 @@ export function readObservedEvents(repo) {
   });
   events.sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt) || Date.parse(a.finishedAt) - Date.parse(b.finishedAt));
   return events;
+}
+
+// True when the nth (1-based) on-disk launch of `role` exists and has not
+// written result.json yet — i.e. that role run is still in progress. This
+// detects a fake agent's deliberate hang from what the orchestrator itself
+// writes at launch (status.json), never from a write the fake agent would
+// have to make: read-only roles run under a read-only bind and cannot write
+// their own marker. Launches are ordered by the started_at recorded at
+// launch, with the run-dir sequence number as a tiebreaker for launches in
+// the same second. Safe to call from a readyWhen poll: it only reads under
+// .autopilot/ and treats a transient unreadable file as "not yet".
+export function hangStarted(repo, role, nth = 1) {
+  const launches = [];
+  (function walk(dir) {
+    if (!fs.existsSync(dir)) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, {withFileTypes: true}); } catch { return; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { walk(full); continue; }
+      if (entry.name !== "status.json") continue;
+      let status;
+      try { status = JSON.parse(fs.readFileSync(full, "utf8")); } catch { continue; }
+      if (status?.role !== role) continue;
+      const runDir = path.dirname(full);
+      const seq = Number.parseInt(path.basename(runDir), 10);
+      launches.push({
+        runDir,
+        seq: Number.isFinite(seq) ? seq : 0,
+        at: Date.parse(status?.started_at) || 0
+      });
+    }
+  })(path.join(repo, ".autopilot"));
+  launches.sort((a, b) => a.at - b.at || a.seq - b.seq);
+  const launch = launches[nth - 1];
+  if (!launch) return false;
+  return !fs.existsSync(path.join(launch.runDir, "result.json"));
 }
 
 export function cleanup(...dirs) {

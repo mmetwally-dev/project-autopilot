@@ -60,17 +60,19 @@
 //      (both the in-loop mark gate and the allowlist-gate bypass).
 //
 // Read-only roles cannot drop crash-marker files under the bubblewrap
-// envelope, so reviewer/verifier interruptions use slow roles (sleep) plus
-// the harness deadline kill; the killed run's dir persists without
-// result.json, which is exactly what the fixture's hang-once logic keys
-// off. Cases 8, 9, 11, 12 of TASK-7 are covered elsewhere: 8/9 by
+// envelope, so reviewer/verifier interruptions use slow roles (sleep). The
+// harness kills the tree as soon as the orchestrator's own status.json shows
+// the intended launch is in progress with no result.json yet (hangStarted);
+// the killed run's dir persists without result.json, which is exactly what
+// the fixture's hang-once logic keys off. Cases 8, 9, 11, 12 of TASK-7 are
+// covered elsewhere: 8/9 by
 // test-phase-stage-checkpoint.mjs, 11 by
 // test-standalone-snapshot-resume.mjs, 12 by the suites re-run in Phase 7.
 import fs from "node:fs";
 import path from "node:path";
 import {
   makeFixtureRepo, makeFixtureBin, makeSpecKitPhaseFixture, writeConfig, setScenario,
-  runAutopilot, runAutopilotUntilMarker, readObservedEvents, cleanup,
+  runAutopilot, runAutopilotUntilMarker, readObservedEvents, hangStarted, cleanup,
 } from "./test-fixtures/workflow-order-harness.mjs";
 import {ensureBaseline, scopedDelta, sanitizeKeySegment} from "./implementation-baseline.mjs";
 import {phases as speckitPhases} from "../adapters/speckit.mjs";
@@ -137,10 +139,11 @@ const SINGLE_PHASE_TASKS = "## Phase 1: General\n\n- [ ] Do the fixture task\n";
 // rather than assumed.
 const SPECKIT_REQUEST = "implement the fixture task";
 const SPECKIT_MISSION_TIMEOUT_MS = 180000;
-// Kill deadline for the S1 reviewer hang: planning plus the Implementer
-// take ~7s under WSL, the hang then sleeps 120s, so a 60s deadline lands
-// inside the hang for any plausible planning duration while the mission
-// cannot complete before it (the hang blocks completion).
+// Safety-net deadline for the S1 reviewer hang: the run is normally killed
+// as soon as the hanging launch is visible on disk (hangStarted), so this
+// only bounds a scenario where that launch never appears. The hang sleeps
+// 120s, so even the upper bound lands inside it for any plausible planning
+// duration while the mission cannot complete before it.
 const SPECKIT_KILL_TIMEOUT_MS = 60000;
 
 function setupSpeckitMission(prefix, scenario, configExtra = {}) {
@@ -198,9 +201,12 @@ function tasksText(repo) {
   const {repo, binDir} = setupMission("stage-resume-c1", "standalone_reviewer_hang", SINGLE_PHASE_TASKS);
   try {
     const run1 = await runAutopilotUntilMarker(repo, binDir, {
-      request: REQUEST, markerFile: path.join(repo, NEVER_MARKER), timeoutMs: KILL_TIMEOUT_MS,
+      request: REQUEST, markerFile: path.join(repo, NEVER_MARKER),
+      readyWhen: () => hangStarted(repo, "code_reviewer", 1), timeoutMs: KILL_TIMEOUT_MS,
     });
-    check("c1: interrupted mid-review (deadline kill)", run1.killed && run1.timedOut, {killed: run1.killed, timedOut: run1.timedOut});
+    check("c1: interrupted mid-review (ready observed, tree confirmed dead)",
+      run1.readyObserved && run1.killed && run1.terminationConfirmed,
+      {readyObserved: run1.readyObserved, killed: run1.killed, terminationConfirmed: run1.terminationConfirmed, timedOut: run1.timedOut});
     check("c1: implementer completed once before the kill", (roleCounts(repo).implementer || 0) === 1, roleCounts(repo));
     const s1 = readState(repo);
     check("c1: checkpoint waits at code_reviewer",
@@ -222,9 +228,12 @@ function tasksText(repo) {
   const {repo, binDir} = setupMission("stage-resume-c2", "standalone_verifier_hang", SINGLE_PHASE_TASKS);
   try {
     const run1 = await runAutopilotUntilMarker(repo, binDir, {
-      request: REQUEST, markerFile: path.join(repo, NEVER_MARKER), timeoutMs: KILL_TIMEOUT_MS,
+      request: REQUEST, markerFile: path.join(repo, NEVER_MARKER),
+      readyWhen: () => hangStarted(repo, "verifier", 1), timeoutMs: KILL_TIMEOUT_MS,
     });
-    check("c2: interrupted mid-verification (deadline kill)", run1.killed && run1.timedOut);
+    check("c2: interrupted mid-verification (ready observed, tree confirmed dead)",
+      run1.readyObserved && run1.killed && run1.terminationConfirmed,
+      {readyObserved: run1.readyObserved, killed: run1.killed, terminationConfirmed: run1.terminationConfirmed, timedOut: run1.timedOut});
     const counts1 = roleCounts(repo);
     check("c2: implementer and reviewer completed once each", counts1.implementer === 1 && counts1.code_reviewer === 1, counts1);
     const s1 = readState(repo);
@@ -467,9 +476,12 @@ function tasksText(repo) {
   const {repo, binDir} = setupMission("stage-resume-c10", "standalone_attempts_survive", SINGLE_PHASE_TASKS);
   try {
     const run1 = await runAutopilotUntilMarker(repo, binDir, {
-      request: REQUEST, markerFile: path.join(repo, NEVER_MARKER), timeoutMs: KILL_TIMEOUT_MS,
+      request: REQUEST, markerFile: path.join(repo, NEVER_MARKER),
+      readyWhen: () => hangStarted(repo, "code_reviewer", 2), timeoutMs: KILL_TIMEOUT_MS,
     });
-    check("c10: first interruption (deadline kill)", run1.killed && run1.timedOut);
+    check("c10: first interruption mid-reviewer retry (ready observed, tree confirmed dead)",
+      run1.readyObserved && run1.killed && run1.terminationConfirmed,
+      {readyObserved: run1.readyObserved, killed: run1.killed, terminationConfirmed: run1.terminationConfirmed, timedOut: run1.timedOut});
     const s1 = readState(repo);
     check("c10: first kill lands mid-reviewer retry",
       s1[CHECKPOINT_STATE_KEY]?.runningStage === "code_reviewer", s1[CHECKPOINT_STATE_KEY]);
@@ -477,9 +489,12 @@ function tasksText(repo) {
       s1[CHECKPOINT_STATE_KEY]?.attempts?.implementer === 1 && s1[CHECKPOINT_STATE_KEY]?.attempts?.code_reviewer === 1,
       s1[CHECKPOINT_STATE_KEY]?.attempts);
     const run2 = await runAutopilotUntilMarker(repo, binDir, {
-      request: REQUEST, markerFile: path.join(repo, NEVER_MARKER), timeoutMs: KILL_TIMEOUT_MS,
+      request: REQUEST, markerFile: path.join(repo, NEVER_MARKER),
+      readyWhen: () => hangStarted(repo, "verifier", 1), timeoutMs: KILL_TIMEOUT_MS,
     });
-    check("c10: second interruption (deadline kill)", run2.killed && run2.timedOut);
+    check("c10: second interruption mid-verifier (ready observed, tree confirmed dead)",
+      run2.readyObserved && run2.killed && run2.terminationConfirmed,
+      {readyObserved: run2.readyObserved, killed: run2.killed, terminationConfirmed: run2.terminationConfirmed, timedOut: run2.timedOut});
     const s2 = readState(repo);
     check("c10: second kill lands mid-verifier",
       s2[CHECKPOINT_STATE_KEY]?.runningStage === "verifier", s2[CHECKPOINT_STATE_KEY]);
@@ -503,9 +518,12 @@ if (process.platform === "win32") {
   const {repo, binDir} = setupSpeckitMission("speckit-resume-s1", "speckit_reviewer_hang");
   try {
     const run1 = await runAutopilotUntilMarker(repo, binDir, {
-      request: SPECKIT_REQUEST, markerFile: path.join(repo, NEVER_MARKER), timeoutMs: SPECKIT_KILL_TIMEOUT_MS,
+      request: SPECKIT_REQUEST, markerFile: path.join(repo, NEVER_MARKER),
+      readyWhen: () => hangStarted(repo, "code_reviewer", 1), timeoutMs: SPECKIT_KILL_TIMEOUT_MS,
     });
-    check("s1: interrupted mid-review (deadline kill)", run1.killed && run1.timedOut, {killed: run1.killed, timedOut: run1.timedOut});
+    check("s1: interrupted mid-review (ready observed, tree confirmed dead)",
+      run1.readyObserved && run1.killed && run1.terminationConfirmed,
+      {readyObserved: run1.readyObserved, killed: run1.killed, terminationConfirmed: run1.terminationConfirmed, timedOut: run1.timedOut});
     check("s1: implementer completed once before the kill", (roleCounts(repo).implementer || 0) === 1, roleCounts(repo));
     const s1 = readState(repo);
     check("s1: speckit checkpoint waits at code_reviewer",
@@ -647,17 +665,19 @@ if (process.platform === "win32") {
 }
 
 // ── S8 (SpecKit): reviewer PASS, stop before verification → resume at Verifier ──
-// The 45s verifier hang starts ~9s in (after planning, Implementer, and
-// Reviewer); a 30s deadline kill lands inside it for any plausible
-// planning duration, and the mission cannot complete before the deadline
-// (the hang blocks it).
+// The harness kills the tree as soon as the verifier launch is visible on
+// disk without a result; the 30s timeout remains only as a safety net for a
+// launch that never appears (the 45s hang blocks completion).
 {
   const {repo, binDir} = setupSpeckitMission("speckit-resume-s8", "speckit_verifier_hang");
   try {
     const run1 = await runAutopilotUntilMarker(repo, binDir, {
-      request: SPECKIT_REQUEST, markerFile: path.join(repo, NEVER_MARKER), timeoutMs: 30000,
+      request: SPECKIT_REQUEST, markerFile: path.join(repo, NEVER_MARKER),
+      readyWhen: () => hangStarted(repo, "verifier", 1), timeoutMs: 30000,
     });
-    check("s8: interrupted mid-verification (deadline kill)", run1.killed && run1.timedOut, {killed: run1.killed, timedOut: run1.timedOut});
+    check("s8: interrupted mid-verification (ready observed, tree confirmed dead)",
+      run1.readyObserved && run1.killed && run1.terminationConfirmed,
+      {readyObserved: run1.readyObserved, killed: run1.killed, terminationConfirmed: run1.terminationConfirmed, timedOut: run1.timedOut});
     const counts1 = roleCounts(repo);
     check("s8: implementer and reviewer completed once each", counts1.implementer === 1 && counts1.code_reviewer === 1, counts1);
     const s1 = readState(repo);

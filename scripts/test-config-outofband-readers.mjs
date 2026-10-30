@@ -53,7 +53,7 @@ const v4 = {
   caps: {
     task_size_target_turns: 12,
     planner: { max_turns: 30, max_tokens: 200000, extra_sessions: 2, wrap_up_at_tokens: 180000 },
-    plan_reviewer: { max_turns: 30, max_tokens: 150000, extra_sessions: 2, wrap_up_at_tokens: 135000 },
+    plan_reviewer: { max_turns: 30, max_tokens: 150000, extra_sessions: 4, wrap_up_at_tokens: 135000 },
     implementer: { max_turns: 40, max_tokens: 180000, extra_sessions: 5, wrap_up_at_tokens: 160000 },
     code_reviewer: { max_turns: 22, max_tokens: 150000, extra_sessions: 2, wrap_up_at_tokens: 135000 },
     verifier: { max_turns: 30, max_tokens: 150000, extra_sessions: 2, wrap_up_at_tokens: 135000 },

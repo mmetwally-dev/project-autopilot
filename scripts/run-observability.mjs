@@ -169,6 +169,10 @@ export function initRun(dir, meta = {}) {
     // This is the field to read; `taskGroup` above is grouping-only (see
     // observabilityMeta in autopilot.mjs) and may be stale or null.
     taskRef: meta.taskRef ?? null,
+    // SpecKit/GSD planning stage this run worked on (`spec`/`plan`/`tasks` or
+    // `discuss`/`research`/`plan`/`plan-check`). Null for every other run and
+    // for standalone planning, whose report label stays `plan/tasks`.
+    planningStage: meta.planningStage ?? null,
     attempt: meta.attempt ?? null,
     // Backlog #26 Step B: wrap-up marker (`note: "wrap-up"` on the forced
     // hand-off run). Shown in the watch report so the extra run after a cap
@@ -182,6 +186,11 @@ export function initRun(dir, meta = {}) {
     configuredModel: meta.configuredModel ?? null,
     resolvedModel: meta.resolvedModel ?? null,
     modelMismatch: meta.modelMismatch ?? null,
+    // Backlog #7: reasoning level / opencode variant of the model actually
+    // launched (the active fallback/escalation entry's own values, never the
+    // primary's). Null when the CLI default applies. Additive.
+    reasoning: meta.reasoning ?? null,
+    variant: meta.variant ?? null,
     // Mission 093 Part 1 task 2.3: run-scoped layout fields. snapshotBeforeAt
     // and snapshotAfterAt are the end wall-clock times of the relay's safety
     // snapshots; the matching *StartedAt fields let the report print the
@@ -207,16 +216,51 @@ export function initRun(dir, meta = {}) {
     // list; a non-list or empty list degrades to null here. Additive — every
     // reader above is untouched.
     carriedForwardTasks: (Array.isArray(meta.carriedForwardTasks) && meta.carriedForwardTasks.length > 0 ? meta.carriedForwardTasks : null),
-    last_action: "started",
+    // The pre-run seed call defers the START line until the child process
+    // actually exists (onStart re-inits with the real pid). Until then the
+    // run is visibly PREPARING, never a fake START with PID=-.
+    last_action: meta.last_action ?? (meta.deferStart === true ? "preparing" : "started"),
   };
   fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify(status, null, 2));
-  appendProgress(dir, `START | ROLE=${meta.role ?? "-"} | PHASE=${meta.phase ?? "-"} | TASK=${meta.taskRef ?? "-"} | ATTEMPT=${meta.attempt ?? "-"} | PID=${meta.pid ?? "-"}`);
+  if (meta.deferStart !== true) {
+    appendProgress(dir, `START | ROLE=${meta.role ?? "-"} | PHASE=${meta.phase ?? "-"} | TASK=${meta.taskRef ?? "-"} | ATTEMPT=${meta.attempt ?? "-"} | PID=${meta.pid ?? "-"}`);
+  } else {
+    // Seed an empty progress.log so readers can tail it while the pre-run
+    // steps write their PREPARE lines; no fake START with PID=-.
+    const progressFile = path.join(dir, "progress.log");
+    if (!fs.existsSync(progressFile)) fs.writeFileSync(progressFile, "");
+  }
   // Mission 094 Phase 3 task 3.2: keep the compact watch-summary cache current
   // at the run-write points so a later render never re-reads every run dir.
   // Best-effort (a failed cache write must never break a run); a dir that is
   // not a mission run dir is a no-op.
   updateSummaryForRunDir(dir);
   return status;
+}
+
+// Mark a run as PREPARING (before its CLI exists) so status.json, and therefore
+// the watch report, names the setup step that is running instead of showing a
+// running run with pid null. Best-effort like every observability write.
+export function setRunPreparing(dir, action) {
+  const name = String(action || "").trim();
+  if (!name) return false;
+  updateStatus(dir, { updated_at: localIso(), last_action: `preparing: ${name}` });
+  try { updateSummaryForRunDir(dir); } catch { /* ignore */ }
+  return true;
+}
+
+// Append one `PREPARE | <action>[ (<detail>)] | DURATION=<h:mm:ss>` line for a
+// completed pre-run step (git guard, snapshot-before, …). The START line stays
+// the only line that names the real PID, and keeps its existing format.
+export function prepareRun(dir, { action, detail = null, durationMs = null } = {}) {
+  const name = String(action || "").trim();
+  if (!name) return false;
+  const suffix = detail ? ` (${detail})` : "";
+  const duration = Number.isFinite(Number(durationMs)) && Number(durationMs) >= 0 ? ` | DURATION=${formatDuration(Number(durationMs))}` : "";
+  appendProgress(dir, `PREPARE | ${name}${suffix}${duration}`);
+  updateStatus(dir, { updated_at: localIso(), last_action: `preparing: ${name}` });
+  try { updateSummaryForRunDir(dir); } catch { /* ignore */ }
+  return true;
 }
 
 export function observe(dir, { stream = "stdout", bytes = 0, minIntervalMs = 1000, last } = {}) {

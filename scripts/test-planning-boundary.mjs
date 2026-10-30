@@ -370,6 +370,40 @@ function readerFor(files) {
   });
   check("plan: tasks.md written during plan (same feature dir) is rejected", wrongStage.ok === false && wrongStage.violations.find(v => v.path.endsWith("tasks.md")).reason === "wrong_stage_artifact");
 
+  // Backlog #9 option (a): a gate revision in 'plan' may also edit the earlier
+  // stage's spec.md (same feature dir), but never a later stage's tasks.md.
+  const planRevisionOk = evaluatePlanningWriteBoundary({
+    stage: "plan",
+    touchedFiles: ["specs/999-smoke-test/plan.md", "specs/999-smoke-test/spec.md"],
+    resolvedFeatureDir: "999-smoke-test",
+    preexistingFeatureDirs: [],
+    revision: true
+  });
+  check("plan (revision): spec.md edited during plan is allowed", planRevisionOk.ok === true);
+  const planNonRevision = evaluatePlanningWriteBoundary({
+    stage: "plan",
+    touchedFiles: ["specs/999-smoke-test/plan.md", "specs/999-smoke-test/spec.md"],
+    resolvedFeatureDir: "999-smoke-test",
+    preexistingFeatureDirs: []
+  });
+  check("plan (non-revision): spec.md edited during plan is rejected", planNonRevision.ok === false);
+  const planRevisionTasks = evaluatePlanningWriteBoundary({
+    stage: "plan",
+    touchedFiles: ["specs/999-smoke-test/plan.md", "specs/999-smoke-test/tasks.md"],
+    resolvedFeatureDir: "999-smoke-test",
+    preexistingFeatureDirs: [],
+    revision: true
+  });
+  check("plan (revision): tasks.md still rejected", planRevisionTasks.ok === false && planRevisionTasks.violations.find(v => v.path.endsWith("tasks.md")).reason === "wrong_stage_artifact");
+  const planRevisionFeatureJson = evaluatePlanningWriteBoundary({
+    stage: "plan",
+    touchedFiles: ["specs/999-smoke-test/plan.md", ".specify/feature.json"],
+    resolvedFeatureDir: "999-smoke-test",
+    preexistingFeatureDirs: [],
+    revision: true
+  });
+  check("plan (revision): feature.json still rejected", planRevisionFeatureJson.ok === false);
+
   const claudeOutside = evaluatePlanningWriteBoundary({
     stage: "plan",
     touchedFiles: ["specs/999-smoke-test/plan.md", "CLAUDE.md"],
@@ -423,6 +457,24 @@ function readerFor(files) {
     preexistingFeatureDirs: []
   });
   check("tasks: plan.md re-written during tasks is rejected", wrongStage.ok === false && wrongStage.violations.find(v => v.path.endsWith("plan.md")).reason === "wrong_stage_artifact");
+
+  // Backlog #9 option (a): a gate revision in 'tasks' may also edit earlier
+  // stages' spec.md and plan.md (same feature dir), but never feature.json.
+  const tasksRevisionOk = evaluatePlanningWriteBoundary({
+    stage: "tasks",
+    touchedFiles: ["specs/999-smoke-test/tasks.md", "specs/999-smoke-test/spec.md", "specs/999-smoke-test/plan.md"],
+    resolvedFeatureDir: "999-smoke-test",
+    preexistingFeatureDirs: [],
+    revision: true
+  });
+  check("tasks (revision): spec.md+plan.md edited during tasks are allowed", tasksRevisionOk.ok === true);
+  const tasksNonRevision = evaluatePlanningWriteBoundary({
+    stage: "tasks",
+    touchedFiles: ["specs/999-smoke-test/tasks.md", "specs/999-smoke-test/plan.md"],
+    resolvedFeatureDir: "999-smoke-test",
+    preexistingFeatureDirs: []
+  });
+  check("tasks (non-revision): plan.md edited during tasks is rejected", tasksNonRevision.ok === false);
 
   const unresolved = evaluatePlanningWriteBoundary({
     stage: "tasks",
@@ -540,6 +592,53 @@ function readerFor(files) {
   } finally {
     fs.rmSync(root, {recursive: true, force: true});
   }
+}
+
+// ---------------------------------------------------------------------
+// Backlog #9 wiring: boundaryNoteFor / earlierStageEditsNote live in
+// autopilot.mjs (not importable: it runs main), so the real function source is
+// extracted and executed here.
+{
+  const src = fs.readFileSync(new URL("./autopilot.mjs", import.meta.url), "utf8");
+  const grab = (name) => {
+    const start = src.indexOf(`function ${name}(`);
+    if (start < 0) throw new Error(`function ${name} not found in autopilot.mjs`);
+    let depth = 0, i = src.indexOf("{", src.indexOf(")", start));
+    const open = i;
+    for (; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}" && --depth === 0) break;
+    }
+    return { text: src.slice(start, i + 1), open, end: i };
+  };
+  const noteFn = grab("boundaryNoteFor");
+  const editsFn = grab("earlierStageEditsNote");
+  const boundaryNoteFor = new Function("CLAUDE_MD_MARKER_BEGIN", "CLAUDE_MD_MARKER_END", `${noteFn.text}; return boundaryNoteFor;`)(CLAUDE_MD_MARKER_BEGIN, CLAUDE_MD_MARKER_END);
+  const earlierStageEditsNote = new Function(`${editsFn.text}; return earlierStageEditsNote;`)();
+
+  check("boundaryNoteFor source has no literal backslash-n template start", !/`\\\\n/.test(noteFn.text));
+  for (const step of ["specify", "plan", "tasks"]) {
+    for (const revision of [false, true]) {
+      const note = boundaryNoteFor(step, "999-x", { revision });
+      check(`boundaryNoteFor(${step}, revision=${revision}) starts with a real newline and has no literal backslash-n`, note.startsWith("\n") && !note.includes("\\n"));
+    }
+  }
+  check("boundaryNoteFor(plan): revision text only in revision mode",
+    boundaryNoteFor("plan", "999-x", { revision: true }).includes("Revision mode") && !boundaryNoteFor("plan", "999-x").includes("Revision mode"));
+  check("boundaryNoteFor(plan, revision): asks for the hand-off note record",
+    boundaryNoteFor("plan", "999-x", { revision: true }).includes("hand-off note"));
+  check("planner prompt has no second revision-permission suffix", !/Revision mode: you may fix a cited/.test(src));
+
+  const edits = { stage: "plan", files: ["specs/999-x/spec.md"] };
+  check("earlierStageEditsNote names the files for the matching stage", earlierStageEditsNote({ planningEarlierStageEdits: edits }, "plan").includes("specs/999-x/spec.md"));
+  check("earlierStageEditsNote is empty for another stage", earlierStageEditsNote({ planningEarlierStageEdits: edits }, "tasks") === "");
+  check("earlierStageEditsNote is empty with nothing recorded", earlierStageEditsNote({}, "plan") === "");
+
+  // Clearing: the gate PASS path (the block that clears the stage's review
+  // feedback) must drop planningEarlierStageEdits too.
+  const passAt = src.indexOf("clearReviewFeedback(s,speckitStageFeedbackKey(gateStage));");
+  const passBlock = src.slice(passAt - 300, passAt + 600);
+  check("gate PASS path clears planningEarlierStageEdits", passAt > 0 && /delete s\.planningEarlierStageEdits;/.test(passBlock));
 }
 
 if (failures) {

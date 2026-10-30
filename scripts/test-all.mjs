@@ -71,7 +71,8 @@ console.log(`Excluded ${excludedPendingUnrelatedBug.size} test file(s) blocked b
 
 // Test files (and the parts of files split by suite-schedule.mjs's `shards`)
 // run in parallel, `jobs` at a time (--jobs N / -j N, or
-// AP_TEST_JOBS; --jobs 1 is the old one-at-a-time behavior). Each file's
+// AP_TEST_JOBS; --jobs 1 is the old one-at-a-time behavior). The default is
+// one less than the CPU count, capped at 10. Each file's
 // output is held until it exits so files never interleave. By default the
 // runner is fail-fast: the first failing file prints its full output, every
 // other running file is stopped, and the runner exits with that file's
@@ -88,7 +89,7 @@ function parseJobs() {
     if (argv[i] === "--jobs" || argv[i] === "-j") value = argv[++i];
     else if (argv[i].startsWith("--jobs=")) value = argv[i].slice("--jobs=".length);
   }
-  if (value === undefined) return Math.max(1, Math.min(6, (os.availableParallelism?.() ?? os.cpus().length) - 1));
+  if (value === undefined) return Math.max(1, Math.min(10, (os.availableParallelism?.() ?? os.cpus().length) - 1));
   const jobs = Number(value);
   if (!Number.isInteger(jobs) || jobs < 1) {
     console.error(`Invalid job count: ${value} (expected a whole number >= 1)`);

@@ -1,5 +1,32 @@
+import {isOpenCodeAdapter, openCodeUsesModelSuffix, detectOpenCodeGeneration} from "./opencode-generation.mjs";
+
+// OpenCode 2.x has no --variant flag: its effort level rides the model value
+// as provider/model#level. 1.x (and an unreadable probe) keeps the manifest's
+// declared --variant flag unchanged.
+function effectiveEffortMode(adapter) {
+  if (isOpenCodeAdapter(adapter)) {
+    return detectOpenCodeGeneration(adapter) === "2" ? "model_suffix" : "flag";
+  }
+  if (adapter?.effort_mode === "config") return "config";
+  if (adapter?.effort_mode === "model_suffix") return "model_suffix";
+  return "flag";
+}
+
+// 2.x needs a private server for a config-defined agent (autopilot_readonly)
+// to be visible. The manifest stays the 1.x argv; this adds the flag only on
+// the generation that requires it.
+function addOpenCodeStandalone(args, adapter) {
+  if (!openCodeUsesModelSuffix(adapter)) return args;
+  if (args.includes("--standalone")) return args;
+  const runIndex = args.indexOf("run");
+  if (runIndex < 0) return args;
+  args.splice(runIndex + 1, 0, "--standalone");
+  return args;
+}
+
 export function applyAgentSelections(args, role, adapter) {
   const out = [...args];
+  const effortMode = role?.reasoning ? effectiveEffortMode(adapter) : null;
 
   if (role?.model) {
     if (!adapter?.model_flag) {
@@ -9,12 +36,12 @@ export function applyAgentSelections(args, role, adapter) {
   }
 
   if (role?.reasoning) {
-    if (adapter.effort_mode === "config") {
+    if (effortMode === "config") {
       if (!adapter.effort_config_key) {
         throw new Error(`${adapter.binary || "agent"} does not declare an effort config key.`);
       }
       out.push("--config", `${adapter.effort_config_key}=${JSON.stringify(role.reasoning)}`);
-    } else if (adapter.effort_mode === "model_suffix") {
+    } else if (effortMode === "model_suffix") {
       if (!adapter.model_flag || !role.model) {
         throw new Error(`${adapter.binary || "agent"} effort requires a selected model.`);
       }
@@ -52,7 +79,7 @@ export function applyAgentSelections(args, role, adapter) {
     }
   }
 
-  return out;
+  return addOpenCodeStandalone(out, adapter);
 }
 
 export function verifyAgentInvocation(args, role, adapter) {
@@ -62,7 +89,7 @@ export function verifyAgentInvocation(args, role, adapter) {
   if (role?.model) {
     const i = adapter?.model_flag ? list.lastIndexOf(String(adapter.model_flag)) : -1;
     if (i < 0 || String(list[i + 1] || "") !== String(role.model)) {
-      if (adapter?.variant_mode === "model_suffix" && i >= 0 && String(list[i + 1] || "").startsWith(`${role.model}#`)) {
+      if ((adapter?.variant_mode === "model_suffix" || openCodeUsesModelSuffix(adapter)) && i >= 0 && String(list[i + 1] || "").startsWith(`${role.model}#`)) {
         // model suffix is an intentional transport for variants/effort.
       } else {
         errors.push(`model '${role.model}' was not present in the final CLI invocation.`);
@@ -77,7 +104,7 @@ export function verifyAgentInvocation(args, role, adapter) {
       if (index < 0 || list[index + 1] !== expected) {
         errors.push(`reasoning/effort '${role.reasoning}' was not present in the final CLI config invocation.`);
       }
-    } else if (adapter?.effort_mode === "model_suffix") {
+    } else if (adapter?.effort_mode === "model_suffix" || (isOpenCodeAdapter(adapter) && effectiveEffortMode(adapter) === "model_suffix")) {
       const i = adapter?.model_flag ? list.lastIndexOf(String(adapter.model_flag)) : -1;
       const value = i >= 0 ? String(list[i + 1] || "") : "";
       if (!value.endsWith(`#${role.reasoning}`)) {

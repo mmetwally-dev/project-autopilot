@@ -25,21 +25,47 @@ function adapterFile(name, body) { const f = path.join(dir, name); fs.writeFileS
 
 // Fake read-only adapter. No marker is passed for it, so a live child of the
 // adapter looks like "tool work" exactly like the sandboxed opencode did.
-async function run(file, {idleHangMs, firstOutputMs, maxSilenceMs = 0, timeoutMs = 15000}) {
+async function run(file, {idleHangMs, firstOutputMs, maxSilenceMs = 0, timeoutMs = 15000, startAfterFirstOutput = false}) {
   const child = spawn(process.execPath, [file], {cwd: repo, stdio: ["ignore", "pipe", "pipe"]});
-  const watch = createIdleWatch({idleHangMs, firstOutputMs, maxSilenceMs, pid: child.pid, adapter: "opencode", repoRoot: repo});
-  const onData = () => noteIdleOutput(watch);
-  child.stdout.on("data", onData); child.stderr.on("data", onData);
   const t0 = Date.now();
+  let watch = null;
+  let firstOutputSeen = false;
+  let resolveFirstOutput;
+  const firstOutput = new Promise(resolve => { resolveFirstOutput = resolve; });
+  const onData = () => {
+    if (!firstOutputSeen) { firstOutputSeen = true; resolveFirstOutput(); }
+    if (watch) noteIdleOutput(watch);
+  };
+  child.stdout.on("data", onData); child.stderr.on("data", onData);
+  const closed = new Promise(resolve => child.on("close", resolve));
+  if (startAfterFirstOutput) {
+    // Under CPU load the child's first byte can take longer than the
+    // first-output window. B/C test the idle/cap clocks, so arm them only
+    // once the child has actually spoken (bounded by the case timeout).
+    let waitTimer;
+    await Promise.race([
+      firstOutput,
+      closed,
+      new Promise(resolve => { waitTimer = setTimeout(resolve, timeoutMs); }),
+    ]);
+    clearTimeout(waitTimer);
+  }
+  watch = createIdleWatch({idleHangMs, firstOutputMs, maxSilenceMs, pid: child.pid, adapter: "opencode", repoRoot: repo});
+  if (firstOutputSeen) noteIdleOutput(watch);
+  const watchStart = Date.now();
   let breach = null;
-  await new Promise(resolve => {
-    const timer = setInterval(() => {
-      const v = evaluateIdleWatch(watch);
-      if (v.status !== "ok" && !breach) { breach = {...v, at: Date.now() - t0}; child.kill("SIGKILL"); }
-      if (Date.now() - t0 > timeoutMs) { child.kill("SIGKILL"); }
-    }, 200);
-    child.on("close", () => { clearInterval(timer); resolve(); });
-  });
+  if (child.exitCode === null && child.signalCode === null) {
+    await new Promise(resolve => {
+      const timer = setInterval(() => {
+        const v = evaluateIdleWatch(watch);
+        // Timed against the watchdog window so a slow first byte (spawn +
+        // node startup under load) cannot stretch the idle/cap assertions.
+        if (v.status !== "ok" && !breach) { breach = {...v, at: Date.now() - watchStart}; child.kill("SIGKILL"); }
+        if (Date.now() - watchStart > timeoutMs) { child.kill("SIGKILL"); }
+      }, 200);
+      closed.then(() => { clearInterval(timer); resolve(); });
+    });
+  }
   return {breach, elapsed: Date.now() - t0};
 }
 
@@ -51,18 +77,18 @@ check("A: silent verifier -> IDLE_HANG noOutput near first-output limit",
 
 // B: emits once, short child, then silent -> hung after idle limit (child exit no longer suspends).
 const shortChild = adapterFile("short.mjs", `import {spawn} from "node:child_process"; console.log("hello"); spawn(process.execPath,["-e","setTimeout(()=>{},500)"],{stdio:"ignore"}); setTimeout(()=>{},60000);`);
-const b = await run(shortChild, {idleHangMs: 2000, firstOutputMs: 1000, maxSilenceMs: 0});
+const b = await run(shortChild, {idleHangMs: 2000, firstOutputMs: 1000, maxSilenceMs: 0, startAfterFirstOutput: true});
 check("B: emit, short child, silence -> hung after idle limit",
   b.breach?.status === "hung" && b.breach.noOutput === false && b.breach.at >= 1900 && b.breach.at < 6000, JSON.stringify(b));
 
 // C: long-running child beyond the max-silence cap -> hung at the cap, not suspended.
 const longChild = adapterFile("long.mjs", `import {spawn} from "node:child_process"; console.log("hello"); spawn(process.execPath,["-e","setTimeout(()=>{},60000)"],{stdio:"ignore"}); setTimeout(()=>{},60000);`);
-const c = await run(longChild, {idleHangMs: 1500, firstOutputMs: 1000, maxSilenceMs: 4000});
+const c = await run(longChild, {idleHangMs: 1500, firstOutputMs: 1000, maxSilenceMs: 4000, startAfterFirstOutput: true});
 check("C: long child beyond max-silence cap -> hung at the cap",
   c.breach?.status === "hung" && c.breach.maxSilence === true && c.breach.at >= 3900 && c.breach.at < 7000, JSON.stringify(c));
 
 // C2: without a cap the same long child still suspends the watch (existing behaviour kept for write roles).
-const c2 = await run(longChild, {idleHangMs: 1500, firstOutputMs: 1000, maxSilenceMs: 0, timeoutMs: 5000});
+const c2 = await run(longChild, {idleHangMs: 1500, firstOutputMs: 1000, maxSilenceMs: 0, timeoutMs: 5000, startAfterFirstOutput: true});
 check("C2: no cap -> live child keeps the session (not hung)", c2.breach === null, JSON.stringify(c2));
 
 // D: resolvers and validation.
