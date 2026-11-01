@@ -7,6 +7,7 @@ import {fileURLToPath} from "node:url";
 import {runAlone, serialAtEnd, exclusiveGroups, shards, liveTests} from "./suite-schedule.mjs";
 import {stopProcessGroup, killGroupNow} from "./process-group-stop.mjs";
 import {snapshotLiveFiles, changedLiveFiles, suiteGuardLine} from "./suite-live-file-guard.mjs";
+import {collectLiveSkipLines, formatLiveSkipSummary} from "./live-test-model.mjs";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(directory, "..");
@@ -216,10 +217,22 @@ function runTest({file, shard, name}) {
 }
 
 let finished = 0;
+// Live tests deliberately skip when no free OpenCode model is available or
+// its free quota is exhausted. Those are passing exits, so their output would
+// otherwise be discarded; keep the LIVE SKIPPED lines for the final summary.
+const liveSkippedLines = new Set();
+function collectSkipped(result) {
+  for (const line of collectLiveSkipLines(result.output)) liveSkippedLines.add(line);
+}
+function printLiveSkipped() {
+  const summary = formatLiveSkipSummary([...liveSkippedLines]);
+  if (summary) console.log(`\n${summary}\n`);
+}
 async function report(result) {
   if (stopping) return;
   finished++;
   timings[result.name] = result.ms;
+  collectSkipped(result);
   const progress = `[${finished}/${runs.length}]`;
   if (result.status === 0) {
     console.log(`PASS ${(result.ms / 1000).toFixed(1).padStart(7)}s  ${result.name}  ${progress}`);
@@ -233,6 +246,7 @@ async function report(result) {
     await stopAll();
     saveTimings();
     checkLiveFiles();
+    printLiveSkipped();
     if (earlyStopExited) return;
     earlyStopExited = true;
     process.exit(result.status ?? 1);
@@ -298,6 +312,7 @@ if (!(keepGoing && keepGoingFailures.length >= maxFailures)) await runPool(seria
 if (!(keepGoing && keepGoingFailures.length >= maxFailures)) await runPool(aloneRuns, 1);
 saveTimings();
 const liveChanged = checkLiveFiles();
+printLiveSkipped();
 if (keepGoing && (keepGoingFailures.length > 0 || liveChanged)) {
   if (liveChanged) keepGoingFailures.push({name: "suite guard (live repository file modified)", firstCheck: suiteGuardLine(liveChanged[0])});
   console.error(`\n${keepGoingFailures.length} test file(s) failed (--keep-going):`);

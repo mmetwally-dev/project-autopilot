@@ -47,3 +47,13 @@ export function recordCommand(state, name, stopAfter = null) {
   state.command = { name, stopAfter };
   return state;
 }
+
+// Resume a mission started with `ap plan` as planning unless overridden.
+export function resumeStageFor(state, { request, stage } = {}) {
+  if (stage != null) return null;
+  if (request != null && String(request).trim() !== "") return null;
+  if (state?.command?.stopAfter !== "planning") return null;
+  const stillPlanning = state.phase === "planning" ||
+    (state.phase === "escalated" && String(state.step || "").includes("planning"));
+  return stillPlanning ? "planning" : null;
+}

@@ -182,6 +182,14 @@ export function validatePolicyConfig(policy = {}) {
     if (sizeTarget != null && (!Number.isInteger(sizeTarget) || sizeTarget <= 0)) {
       errors.push("policy.task_size_target_turns must be a positive integer.");
     }
+    const maxPhaseTasks = policy.max_phase_tasks;
+    if (maxPhaseTasks != null && (!Number.isInteger(maxPhaseTasks) || maxPhaseTasks <= 0)) {
+      errors.push("policy.max_phase_tasks must be a positive integer.");
+    }
+    const minPhaseTasks = policy.min_phase_tasks;
+    if (minPhaseTasks != null && (!Number.isInteger(minPhaseTasks) || minPhaseTasks <= 0)) {
+      errors.push("policy.min_phase_tasks must be a positive integer.");
+    }
     const freeTurns = policy.free_model_turns_cap;
     if (freeTurns != null && (!Number.isInteger(freeTurns) || freeTurns < 0)) {
       errors.push("policy.free_model_turns_cap must be a non-negative integer (0 or null disables).");
@@ -525,6 +533,8 @@ const LEGACY_KEY_TARGETS = {
     continuation_allowance: "caps.implementer.extra_sessions",
     handoff_wrapup_tokens: "caps.implementer.wrap_up_at_tokens",
     task_size_target_turns: "caps.task_size_target_turns",
+    max_phase_tasks: "caps.max_phase_tasks",
+    min_phase_tasks: "caps.min_phase_tasks",
     backstop_raw_tokens: "caps.mission_token_backstop",
     max_plan_revisions: "retries.plan_revisions",
     no_progress_generations: "retries.no_progress_sessions",
@@ -595,7 +605,7 @@ const ESCALATION_MODEL_KEYS = new Set(["cli", "model", "reasoning", "variant"]);
 
 const CAPS_REVIEW_ROLE_KEYS = new Set(["max_turns", "max_tokens", "extra_sessions", "wrap_up_at_tokens", "backstop_raw_tokens"]);
 const CAPS_IMPLEMENTER_KEYS = new Set(["max_turns", "max_tokens", "extra_sessions", "wrap_up_at_tokens"]);
-const CAPS_TOP_KEYS = new Set(["task_size_target_turns", "planner", "plan_reviewer", "implementer", "code_reviewer", "verifier", "mission_token_backstop"]);
+const CAPS_TOP_KEYS = new Set(["task_size_target_turns", "max_phase_tasks", "min_phase_tasks", "planner", "plan_reviewer", "implementer", "code_reviewer", "verifier", "mission_token_backstop"]);
 
 const RETRIES_KEYS = new Set([
   "plan_revisions",
@@ -640,6 +650,8 @@ const TESTS_KEYS = new Set([
   "gate_commands",
   "gate_network",
   "gate_env_allowlist",
+  "not_run_in_missions",
+  "not_run_in_missions_original_command",
   "require_reviewer",
   "browser",
   "require_browser",
@@ -869,6 +881,12 @@ function validateCapsConfig(caps, path, errors, warnings) {
   if (caps.task_size_target_turns !== undefined) {
     validateType(caps.task_size_target_turns, "integer", `${path}.task_size_target_turns`, errors, null, {minimum: 1});
   }
+  if (caps.max_phase_tasks !== undefined) {
+    validateType(caps.max_phase_tasks, "integer", `${path}.max_phase_tasks`, errors, null, {minimum: 1});
+  }
+  if (caps.min_phase_tasks !== undefined) {
+    validateType(caps.min_phase_tasks, "integer", `${path}.min_phase_tasks`, errors, null, {minimum: 1});
+  }
   if (caps.mission_token_backstop !== undefined) {
     validateType(caps.mission_token_backstop, "integer", `${path}.mission_token_backstop`, errors, null, {minimum: 1});
   }
@@ -1003,6 +1021,40 @@ function validateTestsConfig(tests, path, errors, warnings) {
           errors.push(`${path}.gate_env_allowlist[${i}]: must be a string.`);
         }
       }
+    }
+  }
+  if (tests.not_run_in_missions !== undefined) {
+    if (!Array.isArray(tests.not_run_in_missions)) {
+      errors.push(`${path}.not_run_in_missions: must be an array.`);
+    } else {
+      for (let i = 0; i < tests.not_run_in_missions.length; i++) {
+        const entry = tests.not_run_in_missions[i];
+        const label = `${path}.not_run_in_missions[${i}]`;
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+          errors.push(`${label}: must be an object with files, reason and command.`);
+          continue;
+        }
+        if (!Array.isArray(entry.files) || entry.files.length === 0) {
+          errors.push(`${label}.files: must be a non-empty array of file paths.`);
+        } else {
+          for (let j = 0; j < entry.files.length; j++) {
+            if (typeof entry.files[j] !== "string" || entry.files[j].trim().length === 0) {
+              errors.push(`${label}.files[${j}]: must be a non-empty string.`);
+            }
+          }
+        }
+        if (typeof entry.reason !== "string" || entry.reason.trim().length === 0) {
+          errors.push(`${label}.reason: must be a non-empty string.`);
+        }
+        if (typeof entry.command !== "string" || entry.command.trim().length === 0) {
+          errors.push(`${label}.command: must be a non-empty string.`);
+        }
+      }
+    }
+  }
+  if (tests.not_run_in_missions_original_command !== undefined) {
+    if (typeof tests.not_run_in_missions_original_command !== "string") {
+      errors.push(`${path}.not_run_in_missions_original_command: must be a string.`);
     }
   }
   if (tests.require_reviewer !== undefined) validateType(tests.require_reviewer, "boolean", `${path}.require_reviewer`, errors);

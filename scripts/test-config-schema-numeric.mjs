@@ -19,6 +19,8 @@ const TIME_LIMIT_LEAVES = [
 const expectedMinimums = {
   "roles.free_models.max_turns": 0,
   "caps.task_size_target_turns": 1,
+  "caps.max_phase_tasks": 1,
+  "caps.min_phase_tasks": 1,
   "caps.mission_token_backstop": 1,
   "retries.plan_revisions": 0,
   "retries.implementation": 0,

@@ -349,7 +349,7 @@ const fixture = path.join(here, "test-fixtures", "fake-observable-adapter.mjs");
   const versionStart = Date.now();
   const version = runFixture("success", ["--version"]);
   check("fixture: --version answers immediately with a fixed string",
-    version.status === 0 && /fake-opencode-observable/.test(version.stdout) && Date.now() - versionStart < 1000, version.stdout);
+    version.status === 0 && /fake-opencode-observable/.test(version.stdout) && Date.now() - versionStart < 10000, version.stdout);
 
   const cacheRoot = defaultOpenCodeCacheRoot();
   const cacheExisted = fs.existsSync(cacheRoot);

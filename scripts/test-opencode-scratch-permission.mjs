@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+// Generation selection: this test uses whichever `opencode` binary is first on
+// PATH. Run it under the OpenCode 2 environment (source ~/.opencode2/env.sh)
+// to exercise the 2.x code paths; a PATH with ~/.opencode/bin first
+// exercises 1.x (the default in this repo's environment).
 // OpenCode sanctioned-scratch permission fix — behavioral proof (second
 // correction).
 //
@@ -67,10 +71,12 @@
 //     all the way through the orchestrator to `result.verdict.decision ===
 //     "PASS"` — not merely that the sentinel string appears somewhere in
 //     stdout. This is the one test in this file that spends real API budget
-//     (a single tiny DeepSeek call) and requires real `opencode auth`
-//     credentials in this environment; it fails closed (not skip) if either
-//     is unavailable on Linux/WSL2, matching this file's existing policy for
-//     tests A/B.
+//     (a single tiny call on an explicit opencode/*-free model — backlog #12:
+//     never the CLI default, which can be a paid provider) and requires real
+//     `opencode auth` credentials in this environment; it fails closed (not
+//     skip) if either is unavailable on Linux/WSL2, matching this file's
+//     existing policy for tests A/B. No free model, or an exhausted free
+//     quota, prints one `LIVE SKIPPED:` line instead of failing.
 // Requires Linux/WSL: A/B/E need the real `opencode` CLI (installed only in
 // this environment's WSL2 distro, not natively on Windows); C additionally
 // needs bubblewrap; E additionally needs real opencode auth credentials.
@@ -83,6 +89,9 @@ import path from "node:path";
 import {spawnSync} from "node:child_process";
 import {withoutOuterGitGuard} from "./test-fixtures/workflow-order-harness.mjs";
 import {fileURLToPath} from "node:url";
+import {resolveLiveFreeOpenCodeModel, isLiveQuotaExhausted, liveSkipLine} from "./live-test-model.mjs";
+import {detectOpenCodeGeneration, OPENCODE_GENERATION_1, OPENCODE_GENERATION_2} from "./opencode-generation.mjs";
+import {classifyLiveRunFailure} from "./live-run-diagnostics.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skillRoot = path.resolve(here, "..");
@@ -233,7 +242,49 @@ function lastMatchingRule(rules, permission, pattern) {
   for (const r of rules || []) { if (r.permission === permission && r.pattern === pattern) last = r; }
   return last;
 }
+function globToRegExp(glob) {
+  const escaped = String(glob).replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  const regex = escaped.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*");
+  return new RegExp("^" + regex + "$");
+}
+function permissionMatches(rulePermission, permission) {
+  return rulePermission === permission;
+}
+function resourceMatches(rulePattern, resource) {
+  if (rulePattern === resource) return true;
+  if (rulePattern === "*") return true;
+  try { return globToRegExp(rulePattern).test(String(resource)); } catch { return false; }
+}
+// 2.x permission evaluator: last matching rule wins, honouring "*" permission
+// types and "*" / glob resources. Returns the rule's effect (allow/deny/ask)
+// or null when nothing matches.
+function evaluatePermission(rules, permission, resource) {
+  let effect = null;
+  for (const r of rules || []) {
+    if (permissionMatches(r.permission, permission) && resourceMatches(r.pattern, resource)) {
+      effect = r.action;
+    }
+  }
+  return effect;
+}
 function realResolvedAgentConfig(cwd, configContent) {
+  if (isOpenCode2) {
+    const r = spawnSync("opencode", ["debug", "agents", "--standalone"], {
+      cwd, encoding: "utf8", stdio: "pipe", shell: false, timeout: 30000,
+      env: {...withoutOuterGitGuard({...process.env}), OPENCODE_CONFIG_CONTENT: configContent}
+    });
+    if (r.status !== 0) throw new Error(`opencode debug agents --standalone failed (status ${r.status}, signal ${r.signal}, error ${r.error?.code || "none"}): ${r.stderr || r.stdout}`);
+    const combined = `${r.stdout || ""}\n${r.stderr || ""}`;
+    const idx = combined.indexOf("[");
+    if (idx < 0) throw new Error(`opencode debug agents --standalone produced no JSON array: ${combined.slice(0, 500)}`);
+    const arr = JSON.parse(combined.slice(idx));
+    const agent = arr.find(a => a && (a.id === OPENCODE_READONLY_AGENT || a.name === OPENCODE_READONLY_AGENT));
+    if (!agent) throw new Error(`agent ${OPENCODE_READONLY_AGENT} not found in debug agents output`);
+    const normalized = (Array.isArray(agent.permissions) ? agent.permissions : []).map(p => ({
+      permission: p.action, pattern: p.resource, action: p.effect
+    }));
+    return {name: agent.name || agent.id, mode: agent.mode, permission: normalized, tools: agent.tools};
+  }
   const r = spawnSync("opencode", ["debug", "agent", OPENCODE_READONLY_AGENT], {
     cwd, encoding: "utf8", stdio: "pipe", shell: false, timeout: 30000,
     env: {...withoutOuterGitGuard({...process.env}), OPENCODE_CONFIG_CONTENT: configContent}
@@ -241,28 +292,41 @@ function realResolvedAgentConfig(cwd, configContent) {
   if (r.status !== 0) throw new Error(`opencode debug agent ${OPENCODE_READONLY_AGENT} failed (status ${r.status}, signal ${r.signal}, error ${r.error?.code || "none"}): ${r.stderr || r.stdout}`);
   return JSON.parse(r.stdout);
 }
+const opencodeGeneration = opencodeAvailable()
+  ? (detectOpenCodeGeneration({binary: "opencode"}) || OPENCODE_GENERATION_1)
+  : null;
+const isOpenCode2 = opencodeGeneration === OPENCODE_GENERATION_2;
+
 if (!opencodeAvailable()) {
   console.error("FAIL A/B prerequisite: the real `opencode` CLI is not available on PATH in this Linux/WSL2 environment — cannot verify the real permission-resolution engine. Failing closed rather than skipping.");
   failures += 1;
 } else {
   // A: a clean project (no hostile config) resolves our custom agent's
-  // scratch pattern to allow, has both write and edit tools enabled, and
-  // never carries a "*" deny for edit/external_directory anywhere (the
-  // deny-wins trap this correction exists to avoid reintroducing).
+  // scratch pattern to allow, and never carries a "*" deny for
+  // edit/external_directory anywhere (the deny-wins trap this correction
+  // exists to avoid reintroducing). Tool-enabled checks only exist on 1.x's
+  // `debug agent` output; on 2.x `debug agents` exposes no tools field, so
+  // those two assertions are skipped (not silently passed) there.
   {
     const repo = makeRepo("ap-opencode-scratch-clean-");
     try {
       const resolved = realResolvedAgentConfig(repo, EXPECTED_OPENCODE_CONFIG_CONTENT);
-      const editScratch = lastMatchingRule(resolved.permission, "edit", OPENCODE_SCRATCH_GLOB);
-      const extScratch = lastMatchingRule(resolved.permission, "external_directory", OPENCODE_SCRATCH_GLOB);
-      const editStar = lastMatchingRule(resolved.permission, "edit", "*");
-      const extStar = lastMatchingRule(resolved.permission, "external_directory", "*");
-      check("A: real OpenCode resolves edit scratch to allow for the custom read-only agent", editScratch?.action === "allow", JSON.stringify(editScratch));
-      check("A: real OpenCode resolves external_directory scratch to allow for the custom read-only agent", extScratch?.action === "allow", JSON.stringify(extScratch));
-      check("A: our own config never introduces an edit \"*\" deny (no deny-wins trap)", !(editStar?.action === "deny"), JSON.stringify(editStar));
-      check("A: our own config never introduces an external_directory \"*\" deny (no deny-wins trap)", !(extStar?.action === "deny"), JSON.stringify(extStar));
-      check("A: real OpenCode resolves the custom agent's write tool as enabled", resolved.tools?.write === true, JSON.stringify(resolved.tools));
-      check("A: real OpenCode resolves the custom agent's edit tool as enabled", resolved.tools?.edit === true, JSON.stringify(resolved.tools));
+      const rules = resolved.permission;
+      const editScratchEffect = evaluatePermission(rules, "edit", OPENCODE_SCRATCH_GLOB);
+      const extScratchEffect = evaluatePermission(rules, "external_directory", OPENCODE_SCRATCH_GLOB);
+      const editStarEffect = evaluatePermission(rules, "edit", "*");
+      const extStarEffect = evaluatePermission(rules, "external_directory", "*");
+      check("A: real OpenCode resolves edit scratch to allow for the custom read-only agent", editScratchEffect === "allow", JSON.stringify(editScratchEffect));
+      check("A: real OpenCode resolves external_directory scratch to allow for the custom read-only agent", extScratchEffect === "allow", JSON.stringify(extScratchEffect));
+      check("A: our own config never introduces an edit \"*\" deny (no deny-wins trap)", !(editStarEffect === "deny"), JSON.stringify(editStarEffect));
+      check("A: our own config never introduces an external_directory \"*\" deny (no deny-wins trap)", !(extStarEffect === "deny"), JSON.stringify(extStarEffect));
+      if (isOpenCode2) {
+        console.log(liveSkipLine("A: write-tool-enabled assertion has no 2.x equivalent (no tools field in `debug agents`)"));
+        console.log(liveSkipLine("A: edit-tool-enabled assertion has no 2.x equivalent (no tools field in `debug agents`)"));
+      } else {
+        check("A: real OpenCode resolves the custom agent's write tool as enabled", resolved.tools?.write === true, JSON.stringify(resolved.tools));
+        check("A: real OpenCode resolves the custom agent's edit tool as enabled", resolved.tools?.edit === true, JSON.stringify(resolved.tools));
+      }
     } finally { fs.rmSync(repo, {recursive: true, force: true}); }
   }
   // B: the SAME assertions, now against a project whose own opencode.json
@@ -272,10 +336,11 @@ if (!opencodeAvailable()) {
     const repo = makeRepo("ap-opencode-scratch-hostile-", {hostileOpencodeConfig: true});
     try {
       const resolved = realResolvedAgentConfig(repo, EXPECTED_OPENCODE_CONFIG_CONTENT);
-      const editScratch = lastMatchingRule(resolved.permission, "edit", OPENCODE_SCRATCH_GLOB);
-      const extScratch = lastMatchingRule(resolved.permission, "external_directory", OPENCODE_SCRATCH_GLOB);
-      check("B: hostile config targeting the SAME agent name cannot flip our edit scratch rule away from allow", editScratch?.action === "allow", JSON.stringify(editScratch));
-      check("B: hostile config targeting the SAME agent name cannot flip our external_directory scratch rule away from allow", extScratch?.action === "allow", JSON.stringify(extScratch));
+      const rules = resolved.permission;
+      const editScratchEffect = evaluatePermission(rules, "edit", OPENCODE_SCRATCH_GLOB);
+      const extScratchEffect = evaluatePermission(rules, "external_directory", OPENCODE_SCRATCH_GLOB);
+      check("B: hostile config targeting the SAME agent name cannot flip our edit scratch rule away from allow", editScratchEffect === "allow", JSON.stringify(editScratchEffect));
+      check("B: hostile config targeting the SAME agent name cannot flip our external_directory scratch rule away from allow", extScratchEffect === "allow", JSON.stringify(extScratchEffect));
     } finally { fs.rmSync(repo, {recursive: true, force: true}); }
   }
 }
@@ -406,13 +471,13 @@ function makeBinDir({includeFakeOpencode = true, cursorAgentSource = null} = {})
   return binDir;
 }
 
-function makeConfig(repo, {implementerAdapter = "opencode"} = {}) {
+function makeConfig(repo, {implementerAdapter = "opencode", planReviewerModel = ""} = {}) {
   const config = {
     schema_version: "3.0",
     project: {repo: ".", planning_framework: "standalone", state_file: ".autopilot/state.json", runs_dir: ".autopilot/runs"},
     roles: {
       planner: {adapter: "cursor", model: "", reasoning: "", variant: "", resume: false, model_source: "default", model_verified_at: null, capabilities_verified_at: null},
-      plan_reviewer: {adapter: "opencode", model: "", reasoning: "", variant: "", resume: false, model_source: "default", model_verified_at: null, capabilities_verified_at: null},
+      plan_reviewer: {adapter: "opencode", model: planReviewerModel, reasoning: "", variant: "", resume: false, model_source: planReviewerModel ? "live" : "default", model_verified_at: planReviewerModel ? new Date().toISOString() : null, capabilities_verified_at: null},
       implementer: {adapter: implementerAdapter, model: "", reasoning: "", variant: "", resume: false, model_source: "default", model_verified_at: null, capabilities_verified_at: null},
       code_reviewer: {adapter: "cursor", model: "", reasoning: "", variant: "", resume: false, model_source: "default", model_verified_at: null, capabilities_verified_at: null},
       verifier: {adapter: "cursor", model: "", reasoning: "", variant: "", resume: false, model_source: "default", model_verified_at: null, capabilities_verified_at: null}
@@ -597,38 +662,149 @@ if (!opencodeAvailable()) {
   console.error("FAIL E prerequisite: no OpenCode auth credentials found at ~/.local/share/opencode/auth.json in this Linux/WSL2 environment — cannot make the one real model call this test requires. Failing closed rather than skipping.");
   failures += 1;
 } else {
-  const repo = makeRepo("ap-opencode-scratch-live-");
-  const binDir = makeBinDir({includeFakeOpencode: false, cursorAgentSource: FAKE_CURSOR_LIVE_TARGET});
-  try {
-    makeConfig(repo, {implementerAdapter: "cursor"});
-    const delimiter = process.platform === "win32" ? ";" : ":";
-        // Strip any outer mission/gate git guard (PATH shim + hooks): the
-    // nested mission installs its own, and every git call through both
-    // ran the mission several times slower under the orchestrator gate.
-    const base = withoutOuterGitGuard({...process.env});
-    const env = {...base, PATH: `${binDir}${delimiter}${base.PATH || ""}`};
-    const run = spawnSync(process.execPath, [path.join(skillRoot, "scripts", "autopilot.mjs"), "run", "add a fixture line to README.md", "--repo", repo], {
-      cwd: repo, encoding: "utf8", env, timeout: 180000, stdio: ["ignore", "pipe", "pipe"], shell: false
-    });
-
-    const pr = findRole(path.join(repo, ".autopilot"), "plan_reviewer");
-    check("E: real ap-run plan_reviewer (real opencode CLI, real model call) produced a result.json", pr != null,
-      `run.status=${run.status} stdout=${(run.stdout || "").slice(-1500)} stderr=${(run.stderr || "").slice(-1500)}`);
-    if (pr) {
-      check("E: real ap-run plan_reviewer ran inside the read-only envelope", pr.result.executionPlaneSafety?.envelopeApplied === true);
-      check("E: real ap-run plan_reviewer completed (no STRUCTURED_OUTPUT_MISSING / PERMISSION_DENIED)", pr.result.status === "completed", JSON.stringify(pr.result).slice(0, 1500));
-      check("E: real ap-run plan_reviewer failure class is not set", pr.result.failure == null, JSON.stringify(pr.result.failure));
-      // The exact production sentinel, verified against the orchestrator's
-      // OWN parsed verdict — not a raw-stdout substring match.
-      check("E: result.verdict.decision === \"PASS\" (real model, real sentinel, real orchestrator parse)", pr.result.verdict?.decision === "PASS", JSON.stringify(pr.result.verdict));
-      check("E: result.verdict.findings is the empty array the PASS template specifies", Array.isArray(pr.result.verdict?.findings) && pr.result.verdict.findings.length === 0, JSON.stringify(pr.result.verdict?.findings));
+  // Backlog #12(a): never let this live call run on OpenCode's CLI default.
+  // The default resolves inside the sandbox's fresh HOME and can be a paid
+  // provider the operator is logged into. Pin an explicit free model from the
+  // live `opencode models` list, or skip the part with one clear line.
+  const liveModel = resolveLiveFreeOpenCodeModel();
+  if (!liveModel.model) {
+    console.log(liveModel.skip);
+  } else {
+    // Helper: gather run dirs / progress tail / status.json for diagnostics.
+    function gatherRunDiagnostics(repoPath) {
+      const runDirs = [];
+      try {
+        const missionsDir = path.join(repoPath, ".autopilot", "missions");
+        if (fs.existsSync(missionsDir)) {
+          for (const m of fs.readdirSync(missionsDir)) {
+            const runsDir = path.join(missionsDir, m, "runs");
+            if (!fs.existsSync(runsDir)) continue;
+            for (const r of fs.readdirSync(runsDir)) {
+              const full = path.join(runsDir, r);
+              try { if (fs.statSync(full).isDirectory()) runDirs.push(full); } catch {}
+            }
+          }
+        }
+      } catch {}
+      runDirs.sort((a, b) => {
+        try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch { return 0; }
+      });
+      const newest = runDirs[0] || null;
+      let progressTail = "";
+      let statusJson = null;
+      if (newest) {
+        const progressPath = path.join(newest, "progress.log");
+        if (fs.existsSync(progressPath)) {
+          const lines = fs.readFileSync(progressPath, "utf8").split(/\r?\n/);
+          progressTail = lines.slice(-20).join("\n");
+        }
+        const statusPath = path.join(newest, "status.json");
+        if (fs.existsSync(statusPath)) {
+          try { statusJson = JSON.parse(fs.readFileSync(statusPath, "utf8")); }
+          catch { statusJson = fs.readFileSync(statusPath, "utf8"); }
+        }
+      }
+      return {runDirs, newest, progressTail, statusJson};
     }
 
-    const after = {entries: fs.readdirSync(repo).sort(), tracked: fs.readFileSync(path.join(repo, "tracked.txt"), "utf8")};
-    check("E: repository contents unchanged on host after the real live-model run", after.tracked === "one", after.tracked);
-  } finally {
-    fs.rmSync(repo, {recursive: true, force: true});
-    fs.rmSync(binDir, {recursive: true, force: true});
+    const runOneAttempt = () => {
+      const repo = makeRepo("ap-opencode-scratch-live-");
+      const binDir = makeBinDir({includeFakeOpencode: false, cursorAgentSource: FAKE_CURSOR_LIVE_TARGET});
+      let run, pr, output;
+      try {
+        makeConfig(repo, {implementerAdapter: "cursor", planReviewerModel: liveModel.model});
+        const delimiter = process.platform === "win32" ? ";" : ":";
+        const base = withoutOuterGitGuard({...process.env});
+        const env = {...base, PATH: `${binDir}${delimiter}${base.PATH || ""}`};
+        run = spawnSync(process.execPath, [path.join(skillRoot, "scripts", "autopilot.mjs"), "run", "add a fixture line to README.md", "--repo", repo], {
+          cwd: repo, encoding: "utf8", env, timeout: 180000, stdio: ["ignore", "pipe", "pipe"], shell: false
+        });
+        pr = findRole(path.join(repo, ".autopilot"), "plan_reviewer");
+        output = `${run.stdout || ""}\n${run.stderr || ""}`;
+      } catch (e) {
+        run = {status: null, signal: null, stdout: "", stderr: String(e)};
+        pr = null;
+        output = String(e);
+      }
+      return {repo, binDir, run, pr, output};
+    };
+
+    // First attempt.
+    let attempt = runOneAttempt();
+    let retried = false;
+    if (attempt.pr == null) {
+      console.log("E: retrying once after an empty first attempt");
+      // cleanup first attempt (unless keep)
+      if (process.env.AP_KEEP_TMP !== "1") {
+        try { fs.rmSync(attempt.repo, {recursive: true, force: true}); } catch {}
+        try { fs.rmSync(attempt.binDir, {recursive: true, force: true}); } catch {}
+        tempDirs.delete(attempt.repo); tempDirs.delete(attempt.binDir);
+      }
+      retried = true;
+      attempt = runOneAttempt();
+    }
+
+    const {repo, binDir, run, pr, output} = attempt;
+
+    const isEmpty = (pr == null);
+    const diag = isEmpty ? gatherRunDiagnostics(repo) : null;
+
+    if (isEmpty) {
+      console.error("E diagnostics:");
+      console.error(`ap-run exit code: ${run.status} signal: ${run.signal}`);
+      const combined = `${run.stdout || ""}\n${run.stderr || ""}`;
+      const lines = combined.split(/\r?\n/);
+      console.error("last 40 lines of ap run stdout+stderr:");
+      console.error(lines.slice(-40).join("\n"));
+      console.error("run dirs under .autopilot/missions/*/runs/:");
+      for (const rd of (diag?.runDirs || [])) console.error("  " + rd);
+      if (diag?.newest) {
+        console.error(`newest run: ${diag.newest}`);
+        console.error("last 20 lines of newest run progress.log:");
+        console.error(diag.progressTail);
+        if (diag.statusJson != null) {
+          console.error("newest run status.json:");
+          console.error(typeof diag.statusJson === "string" ? diag.statusJson : JSON.stringify(diag.statusJson));
+        }
+      }
+      if (process.env.AP_KEEP_TMP === "1") {
+        console.error(`AP_KEEP_TMP=1: keeping temp dir ${repo}`);
+      }
+    }
+
+    // Classification across quota + provider-side problems.
+    const classificationText = isEmpty
+      ? `${output}\n${diag?.progressTail || ""}\n${diag?.statusJson != null ? (typeof diag.statusJson === "string" ? diag.statusJson : JSON.stringify(diag.statusJson)) : ""}`
+      : output;
+    const cls = classifyLiveRunFailure({output: classificationText, failureClass: pr?.result?.failure?.class});
+
+    // quota check (existing) also via classifier
+    if (cls.skip) {
+      console.log(liveSkipLine(`E: ${cls.reason}`));
+    } else if (isLiveQuotaExhausted({failureClass: pr?.result?.failure?.class, output})) {
+      console.log(liveSkipLine("E: free quota/rate limit exhausted"));
+    } else {
+      check("E: real ap-run plan_reviewer (real opencode CLI, real model call) produced a result.json", pr != null,
+        `run.status=${run.status} stdout=${(run.stdout || "").slice(-1500)} stderr=${(run.stderr || "").slice(-1500)}`);
+      if (pr) {
+        check("E: real ap-run plan_reviewer ran inside the read-only envelope", pr.result.executionPlaneSafety?.envelopeApplied === true);
+        check("E: real ap-run plan_reviewer completed (no STRUCTURED_OUTPUT_MISSING / PERMISSION_DENIED)", pr.result.status === "completed", JSON.stringify(pr.result).slice(0, 1500));
+        check("E: real ap-run plan_reviewer failure class is not set", pr.result.failure == null, JSON.stringify(pr.result.failure));
+        check("E: result.verdict.decision === \"PASS\" (real model, real sentinel, real orchestrator parse)", pr.result.verdict?.decision === "PASS", JSON.stringify(pr.result.verdict));
+        check("E: result.verdict.findings is the empty array the PASS template specifies", Array.isArray(pr.result.verdict?.findings) && pr.result.verdict.findings.length === 0, JSON.stringify(pr.result.verdict?.findings));
+      }
+
+      const after = {entries: fs.readdirSync(repo).sort(), tracked: fs.readFileSync(path.join(repo, "tracked.txt"), "utf8")};
+      check("E: repository contents unchanged on host after the real live-model run", after.tracked === "one", after.tracked);
+    }
+
+    if (process.env.AP_KEEP_TMP !== "1") {
+      try { fs.rmSync(repo, {recursive: true, force: true}); } catch {}
+      try { fs.rmSync(binDir, {recursive: true, force: true}); } catch {}
+      tempDirs.delete(repo); tempDirs.delete(binDir);
+    } else {
+      console.error(`AP_KEEP_TMP=1: kept temp dir ${repo} (binDir ${binDir})`);
+    }
   }
 }
 

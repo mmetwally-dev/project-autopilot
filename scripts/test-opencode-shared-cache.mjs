@@ -98,8 +98,17 @@ try {
 } catch {}
 check("prereq: opencode CLI resolves via the production adapter driver", !!resolvedBinary, resolvedBinary);
 if (!resolvedBinary) { console.error("FAIL closed: real opencode CLI missing on Linux/WSL2."); process.exit(1); }
-const authConfigured = fs.existsSync(path.join(os.homedir(), ".local", "share", "opencode", "auth.json"));
-check("prereq: opencode auth credentials present (real model calls required)", authConfigured);
+// Credential presence only (never reading the files): the operator may keep
+// OpenCode's store under a non-default XDG_DATA_HOME (OpenCode 2 installs
+// commonly do). Accept either that location or the 1.x default, so this
+// prerequisite is independent of whether the test shell exports XDG_*.
+const authDataRoots = [
+  process.env.XDG_DATA_HOME ? path.join(process.env.XDG_DATA_HOME, "opencode") : null,
+  path.join(os.homedir(), ".local", "share", "opencode")
+].filter(Boolean);
+const authConfigured = authDataRoots.some((dir) =>
+  fs.existsSync(path.join(dir, "auth.json")) || fs.existsSync(path.join(dir, "opencode.db")));
+check("prereq: opencode auth credentials present (real model calls required)", authConfigured, authDataRoots);
 if (!authConfigured) { console.error("FAIL closed: no opencode auth on Linux/WSL2."); process.exit(1); }
 {
   // Envelope availability probe: bwrap missing/unusable must fail closed.

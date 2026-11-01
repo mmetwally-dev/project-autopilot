@@ -24,6 +24,8 @@ import {
   PER_TASK_MAX_TOKENS_DEFAULT,
   CONTINUATION_ALLOWANCE_DEFAULT,
   TASK_SIZE_TARGET_TURNS_DEFAULT,
+  MAX_PHASE_TASKS_DEFAULT,
+  MIN_PHASE_TASKS_DEFAULT,
   HANDOFF_MAX_CHARS_DEFAULT,
   HANDOFF_NOTE_MAX_CHARS_DEFAULT,
   HANDOFF_WRAPUP_TOKENS_DEFAULT,
@@ -89,6 +91,8 @@ export const DEFAULTS = {
   },
   caps: {
     task_size_target_turns: TASK_SIZE_TARGET_TURNS_DEFAULT,
+    max_phase_tasks: MAX_PHASE_TASKS_DEFAULT,
+    min_phase_tasks: MIN_PHASE_TASKS_DEFAULT,
     planner: {
       max_turns: PER_ROLE_CAPS_DEFAULT.planner.maxTurns,
       max_tokens: PER_ROLE_CAPS_DEFAULT.planner.maxTokens,
@@ -161,6 +165,10 @@ export const DEFAULTS = {
     gate_commands: [],
     gate_network: false,
     gate_env_allowlist: [],
+    // Backlog #4 Part A: failing files setup excluded from mission gates,
+    // with the reason and the exact command to run them by hand.
+    not_run_in_missions: [],
+    not_run_in_missions_original_command: "",
     require_reviewer: true,
     browser: "native",
     require_browser: "when-task-requires",
@@ -379,6 +387,8 @@ const FAILURE_BUDGET_MAP = [
 const GATES_MAP = [
   ["gate_commands", "commands"],
   ["gate_env_allowlist", "env_allowlist"],
+  ["not_run_in_missions", "not_run_in_missions"],
+  ["not_run_in_missions_original_command", "not_run_in_missions_original_command"],
   ["require_reviewer", "require_reviewer"],
 ];
 
@@ -581,6 +591,10 @@ export function toRuntimeConfig(layout = {}) {
   else if (has(legacyPolicy, "handoff_wrapup_tokens")) policy.handoff_wrapup_tokens = legacyPolicy.handoff_wrapup_tokens;
   if (has(caps, "task_size_target_turns")) policy.task_size_target_turns = caps.task_size_target_turns;
   else if (has(legacyPolicy, "task_size_target_turns")) policy.task_size_target_turns = legacyPolicy.task_size_target_turns;
+  if (has(caps, "max_phase_tasks")) policy.max_phase_tasks = caps.max_phase_tasks;
+  else if (has(legacyPolicy, "max_phase_tasks")) policy.max_phase_tasks = legacyPolicy.max_phase_tasks;
+  if (has(caps, "min_phase_tasks")) policy.min_phase_tasks = caps.min_phase_tasks;
+  else if (has(legacyPolicy, "min_phase_tasks")) policy.min_phase_tasks = legacyPolicy.min_phase_tasks;
   if (has(caps, "mission_token_backstop")) policy.backstop_raw_tokens = caps.mission_token_backstop;
   else if (has(legacyPolicy, "backstop_raw_tokens")) policy.backstop_raw_tokens = legacyPolicy.backstop_raw_tokens;
 
@@ -661,6 +675,7 @@ export function toRuntimeConfig(layout = {}) {
         "caps", "free_model_turns_cap", "per_task_max_turns", "per_task_max_tokens",
         "continuation_allowance", "handoff_wrapup_tokens", "handoff_max_chars",
         "handoff_note_max_chars", "fallback_retry_primary_minutes", "task_size_target_turns",
+        "max_phase_tasks", "min_phase_tasks",
         "backstop_raw_tokens", "relay_timeout_ms", "role_timeout_ms", "role_deadline_floor_ms",
         "idle_hang_ms", "first_output_ms", "max_silence_ms", "retry_delay_ms",
         "checkpoint_after_task", "checkpoint_after_phase", "fail_closed_on_relay_violation",
@@ -834,6 +849,8 @@ export function toNewLayoutConfig(runtimeConfig = {}, schemaRef = "./config.sche
 
   // caps
   if (has(policy, "task_size_target_turns")) layout.caps.task_size_target_turns = policy.task_size_target_turns;
+  if (has(policy, "max_phase_tasks")) layout.caps.max_phase_tasks = policy.max_phase_tasks;
+  if (has(policy, "min_phase_tasks")) layout.caps.min_phase_tasks = policy.min_phase_tasks;
   const runtimeCaps = isObject(policy.caps) ? policy.caps : {};
   for (const role of REVIEW_ROLES) {
     const entry = runtimeCaps[role];

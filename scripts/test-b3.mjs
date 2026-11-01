@@ -63,7 +63,7 @@ check("planner/reviewer prompts wire the concrete size rule and 10-task limit", 
   assert.match(autopilotSource, /\$\{taskSizingRuleText\(/);
   assert.match(autopilotSource, /taskSizeReviewText\(/);
   assert.ok(autopilotSource.includes("Task size wins over phase count"));
-  assert.ok(autopilotSource.includes("FAIL any phase with more than ${MAX_PHASE_TASKS} tasks"));
+  assert.ok(autopilotSource.includes("FAIL any phase with more than ${resolveMaxPhaseTasks(c.policy)} tasks"));
 });
 
 check("phase task limit is ten, eleven fails", () => {

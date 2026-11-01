@@ -68,6 +68,10 @@ st.phase = "cancelled";
 fs.writeFileSync(path.join(repo, ".autopilot", "state.json"), JSON.stringify(st, null, 2));
 
 // cached render must not re-read any run-dir status/result/progress file.
+// Both the cached and the from-scratch render get the same injected clock: the
+// PIPELINE STATE header stamp is time-derived, so a fixed `now` keeps the
+// byte-for-byte comparison stable across a second boundary (backlog #11).
+const fixedNow = "2026-10-31T12:00:00+00:00";
 const originalRead = fs.readFileSync;
 let runDirReads = 0;
 fs.readFileSync = (...args) => {
@@ -75,14 +79,23 @@ fs.readFileSync = (...args) => {
   if (p.includes("/runs/") && /(status\.json|result\.json|progress\.log)$/.test(p)) runDirReads++;
   return originalRead(...args);
 };
-const cached = renderWatchReport(repo, mission);
+const cached = renderWatchReport(repo, mission, { now: fixedNow });
 fs.readFileSync = originalRead;
 check("wiring: cached render reads no run-dir logs", runDirReads === 0, runDirReads);
 
 // from-scratch fallback (deleted cache) produces byte-identical output.
 fs.rmSync(summaryPath(repo, mission), { force: true });
-const fromScratch = renderWatchReport(repo, mission);
+const fromScratch = renderWatchReport(repo, mission, { now: fixedNow });
 check("wiring: from-scratch fallback matches cached render", cached === fromScratch);
+
+// The PIPELINE STATE header stamp is part of the byte comparison, so the same
+// injected clock must keep two renders identical even when real time crosses a
+// second boundary between them (backlog #11).
+const spaced = renderWatchReport(repo, mission, { now: fixedNow });
+await new Promise((resolve) => setTimeout(resolve, 1100));
+const spacedLater = renderWatchReport(repo, mission, { now: fixedNow });
+check("wiring: identical renders 1.1 s apart under the same now", spaced === spacedLater,
+  spaced === spacedLater ? undefined : { first: spaced.split("\n")[0], second: spacedLater.split("\n")[0] });
 
 // finalize updates status and the cache reflects it.
 const statusBefore = JSON.parse(fs.readFileSync(path.join(runDir, "status.json"), "utf8"));

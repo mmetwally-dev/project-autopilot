@@ -22,8 +22,27 @@ export function inspect(repo){
   const workflow=path.join(repo,".specify","workflows","speckit","workflow.yml");
   if(!detect(repo)) return {id:"speckit",detected:false};
   const steps=parseWorkflow(workflow);
+  const tasksIdx=steps.findIndex(s=>String(s.id||"").includes("tasks") && s.type!=="gate");
+  const hasTasksGate=steps.some(s=>s.type==="gate" && String(s.id||"").includes("tasks"));
+  if(tasksIdx!==-1 && !hasTasksGate){
+    steps.splice(tasksIdx+1,0,{id:"review-tasks",type:"gate",message:"Run SpecKit analyze on spec.md, plan.md and tasks.md before implementation.",injected:true});
+  }
   return {id:"speckit",detected:true,workflowFile:workflow,steps,
     commands:steps.filter(x=>x.command),gates:steps.filter(x=>x.type==="gate")};
+}
+
+export function analyzeCommandFile(repo, exists = (p) => fs.existsSync(p)){
+  const list=[
+    ".claude/skills/speckit-analyze/SKILL.md",
+    ".agents/skills/speckit-analyze/SKILL.md",
+    ".opencode/command/speckit.analyze.md",
+    ".claude/commands/speckit.analyze.md",
+    ".specify/templates/commands/analyze.md"
+  ];
+  for(const f of list){
+    if(exists(repo?path.join(repo,f):f)) return f;
+  }
+  return null;
 }
 
 export function taskFiles(repo,candidates){

@@ -99,6 +99,8 @@ Per-role turn, token and session caps plus the mission token backstop.
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
 | `caps.task_size_target_turns` | `30` | >= 1 | Implementer turns the planner should aim for per task when splitting work; this is guidance, not a hard limit. |
+| `caps.max_phase_tasks` | `10` | >= 1 | Most tasks one phase may hold; the plan review fails a larger phase and asks to split it. |
+| `caps.min_phase_tasks` | `3` | >= 1 | Phases with fewer tasks are merged into a neighbouring related phase when possible; guidance only, never a review failure. |
 | `caps.planner.max_turns` | `30` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.planner.max_tokens` | `200000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.planner.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
@@ -180,6 +182,10 @@ Gate commands, reviewer requirement and verification policy.
 | `tests.gate_commands` | `[]` | — | Commands run after each phase and at the end as the gate; a failing command fails the phase, and an empty list runs no gate. |
 | `tests.gate_network` | `false` | — | Allow the gate commands to use the network (true); false keeps them network-isolated. |
 | `tests.gate_env_allowlist` | `[]` | — | Environment variable names allowed through to gate commands; empty passes no extra variables. |
+| `tests.not_run_in_missions[].files` | — | — | Repository-relative test files that are not run in mission gates. |
+| `tests.not_run_in_missions[].reason` | — | — | Plain reason the files were excluded, for example server not reachable on 127.0.0.1:3000 or missing environment variable DATABASE_URL. |
+| `tests.not_run_in_missions[].command` | — | — | Exact command that runs these files by hand after the mission. |
+| `tests.not_run_in_missions_original_command` | `""` | — | The full test command setup ran before excluding not_run_in_missions files; empty when no files were excluded. |
 | `tests.require_reviewer` | `true` | — | Intended to require a reviewer verdict before a phase passes. Fixed in this version; changing it has no effect. |
 | `tests.browser` | `"native"` | `"native"`, `"playwright"`, `"both"` | Browser capability used for verification: native (the agent's own browser), playwright or both. |
 | `tests.require_browser` | `"when-task-requires"` | `"always"`, `"when-task-requires"`, `"never"` | How browser capabilities are required for the verifier: always adds them to every call; when-task-requires and never add them only when the task itself needs a browser. |

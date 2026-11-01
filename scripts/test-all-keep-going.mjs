@@ -26,6 +26,7 @@ function makeFixture(fakes) {
   fs.copyFileSync(path.join(repoScripts, "process-group-stop.mjs"), path.join(scriptsDir, "process-group-stop.mjs"));
   fs.copyFileSync(path.join(repoScripts, "bounded-process-tree.mjs"), path.join(scriptsDir, "bounded-process-tree.mjs"));
   fs.copyFileSync(path.join(repoScripts, "suite-live-file-guard.mjs"), path.join(scriptsDir, "suite-live-file-guard.mjs"));
+  fs.copyFileSync(path.join(repoScripts, "live-test-model.mjs"), path.join(scriptsDir, "live-test-model.mjs"));
   for (const [name, src] of Object.entries(fakes)) {
     fs.writeFileSync(path.join(scriptsDir, name), src);
   }

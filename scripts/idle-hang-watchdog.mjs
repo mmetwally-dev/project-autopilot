@@ -80,6 +80,12 @@ export const RATE_LIMIT_LOG_TAIL_BYTES = 256 * 1024;
 // call sites (autopilot.mjs, adapter-drivers.mjs) never hand-build the
 // literal; it is a label on the unchanged RATE_LIMITED path, not a new class.
 export const FREE_QUOTA_REASON = "free_quota_exhausted";
+// Backlog #15: a paid provider's empty balance/credit is NOT the free tier's
+// quota and never refills by waiting. It stays on the RATE_LIMITED path (so
+// fallback/escalation is unchanged) but carries its own reason so every
+// operator-facing line can say "top up the balance or switch model" instead
+// of "resume after the limit lifts".
+export const PROVIDER_BALANCE_REASON = "provider_balance_exhausted";
 
 // opencode's OWN log (logfmt), not model prose: `AI_APICallError` and
 // `AI_RetryError` are engine-level error values. Observed live in
@@ -97,7 +103,13 @@ export const FREE_QUOTA_REASON = "free_quota_exhausted";
 // the marker covers quota/billing exhaustion too. The source check below
 // still requires an engine error token, so model prose never matches.
 const FREE_QUOTA_MARKER = /free usage limit reached|usage limit reached|insufficient[_\s-]?quota|quota[_\s-]?(?:exceeded|exhausted)|subscribe to [^\n]{0,80}to keep going/i;
-const RATE_LIMIT_MARKER = new RegExp(`rate[_\\s]limit[_\\s]exceeded|endpoint is unavailable|insufficient account funds|status_?code[=:"\\s]+429\\b|${FREE_QUOTA_MARKER.source}`, "i");
+// Backlog #15: paid-balance/credit exhaustion. Checked BEFORE the free-quota
+// marker because OpenCode 2.x wraps the same line in
+// `AI.Error.QuotaExceeded: Insufficient Balance` — the quota wording there is
+// engine class noise, not the free tier. "Payment Required"/HTTP 402 are the
+// provider's own insufficient-credit signals.
+const PROVIDER_BALANCE_MARKER = /insufficient[\s_-]?balance|insufficient[_\s-]?account funds|insufficient[_\s-]?credits?|credit balance is too low|payment required|(?:status(?:_?code)?|http(?:\/[0-9.]+)?)[=:"'\s-]*402\b/i;
+const RATE_LIMIT_MARKER = new RegExp(`rate[_\\s]limit[_\\s]exceeded|endpoint is unavailable|${PROVIDER_BALANCE_MARKER.source}|status_?code[=:"\\s]+429\\b|${FREE_QUOTA_MARKER.source}`, "i");
 // Backlog #107: the small title-generation model's stream errors
 // (small=true agent=title) say nothing about the role's own model. Shared
 // with adapter-drivers.mjs so both stderr scanners ignore the same lines.
@@ -161,7 +173,11 @@ export function rateLimitLineInfo(line) {
   if (!(RATE_LIMIT_SOURCE.test(text) || OPENCODE_2X_ENGINE_ERROR_LINE.test(text)) || !RATE_LIMIT_MARKER.test(text)) return null;
   const provider = text.match(PROVIDER_ID_RE)?.[1] ?? null;
   const model = text.match(MODEL_ID_RE)?.[1] ?? null;
-  return {provider, model, reason: FREE_QUOTA_MARKER.test(text) ? FREE_QUOTA_REASON : "rate_limit"};
+  // Balance first: the 2.x balance line also contains `QuotaExceeded`.
+  const reason = PROVIDER_BALANCE_MARKER.test(text)
+    ? PROVIDER_BALANCE_REASON
+    : FREE_QUOTA_MARKER.test(text) ? FREE_QUOTA_REASON : "rate_limit";
+  return {provider, model, reason};
 }
 
 // Newest *.log under <baseDir>/log/ (opencode rotates there). Null when the
@@ -616,9 +632,18 @@ export function formatIdleHangMessage({role, adapter, model, idleMs, maxSilence 
   return `IDLE_HANG: ${who} produced no output, ran no command and wrote no file for ${formatIdleMinutes(idleMs)}`;
 }
 
-export function formatRateLimitedMessage({role, adapter, model, provider, freeQuota = false}) {
+export function formatRateLimitedMessage({role, adapter, model, provider, freeQuota = false, balanceExhausted = false}) {
   const modelLabel = model || adapter;
   const providerLabel = provider && provider !== adapter ? `${provider}/${modelLabel}` : modelLabel;
+  // Backlog #15: waiting never refills a paid balance. Say what the operator
+  // must actually do — top up, or move the role to another model.
+  if (balanceExhausted) {
+    const providerName = provider || adapter || "provider";
+    return (
+      `RATE_LIMITED: ${role} (${adapter}, ${model || "unknown model"}) — the provider's paid balance is exhausted (${providerLabel}); ` +
+      `top up the ${providerName} balance, or switch the role to another model (\`ap config\`), then \`ap run\`.`
+    );
+  }
   const quotaLabel = freeQuota ? " — free quota used up" : "";
   return (
     `RATE_LIMITED: ${role} (${adapter}, ${model || "unknown model"}) hit a provider rate limit${quotaLabel} (${providerLabel}); ` +

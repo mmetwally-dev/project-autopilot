@@ -252,7 +252,7 @@ if (process.platform === "win32") {
     const scriptsDir = path.join(tmp2, "scripts");
     fs.mkdirSync(scriptsDir, {recursive: true});
     const repoDir = path.dirname(new URL(import.meta.url).pathname);
-    for (const f of ["test-all.mjs", "suite-schedule.mjs", "process-group-stop.mjs", "bounded-process-tree.mjs", "suite-live-file-guard.mjs"]) {
+    for (const f of ["test-all.mjs", "suite-schedule.mjs", "process-group-stop.mjs", "bounded-process-tree.mjs", "suite-live-file-guard.mjs", "live-test-model.mjs"]) {
       fs.copyFileSync(path.join(repoDir, f), path.join(scriptsDir, f));
     }
     fs.writeFileSync(path.join(scriptsDir, "test-aaa-fail-fast.mjs"), `console.log("FAIL early boom");\nsetTimeout(() => process.exit(3), 1500);\n`);
@@ -308,7 +308,7 @@ if (process.platform === "win32") {
     const scriptsDir = path.join(tmp3, "scripts");
     fs.mkdirSync(scriptsDir, {recursive: true});
     const repoDir = path.dirname(new URL(import.meta.url).pathname);
-    for (const f of ["test-all.mjs", "suite-schedule.mjs", "process-group-stop.mjs", "bounded-process-tree.mjs", "suite-live-file-guard.mjs"]) {
+    for (const f of ["test-all.mjs", "suite-schedule.mjs", "process-group-stop.mjs", "bounded-process-tree.mjs", "suite-live-file-guard.mjs", "live-test-model.mjs"]) {
       fs.copyFileSync(path.join(repoDir, f), path.join(scriptsDir, f));
     }
     fs.writeFileSync(path.join(scriptsDir, "test-aaa-pass-stray.mjs"), [

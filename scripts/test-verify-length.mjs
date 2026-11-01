@@ -223,14 +223,14 @@ check("length: bound is 500", ROLE_PROGRESS_COMMAND_MAX_CHARS === 500);
   check("wiring: autopilot imports both length helpers",
     src.includes("verifyLengthFindings") && src.includes("speckitTaskVerifyLengthFindings")
     && src.includes("verifyShardFindings") && src.includes("speckitTaskVerifyShardFindings")
-    && src.includes('import {verifyDenylistFindings, effectiveVerifyDenylist, speckitTaskDenylistFindings, verifyLengthFindings, speckitTaskVerifyLengthFindings, verifyShardFindings, speckitTaskVerifyShardFindings, phaseTaskCountFindings, unrecognizedAnnotationFindings, MAX_PHASE_TASKS} from "./verify-denylist.mjs"'));
+    && src.includes('import {verifyDenylistFindings, effectiveVerifyDenylist, speckitTaskDenylistFindings, verifyLengthFindings, speckitTaskVerifyLengthFindings, verifyShardFindings, speckitTaskVerifyShardFindings, phaseTaskCountFindings, unrecognizedAnnotationFindings} from "./verify-denylist.mjs"'));
   // Site 1: standalone denylist gate hoists the shared entries const.
   check("wiring site 1 (standalone): shared entries hoisted into one const",
     src.includes("const standaloneVerifyEntries=standaloneTaskVerifyEntries(tasksFile)"));
   check("wiring site 1 (standalone): denylist and length findings merged",
     src.includes("verifyLengthFindings(standaloneVerifyEntries)")
     && src.includes("verifyShardFindings(standaloneVerifyEntries)")
-    && src.includes("[...verifyDenylistFindings(standaloneVerifyEntries,effectiveVerifyDenylist(c)),...verifyLengthFindings(standaloneVerifyEntries),...verifyShardFindings(standaloneVerifyEntries),...phaseTaskCountFindings(standaloneTasksText),...unrecognizedAnnotationFindings(standaloneTasksText)]"));
+    && src.includes("[...verifyDenylistFindings(standaloneVerifyEntries,effectiveVerifyDenylist(c)),...verifyLengthFindings(standaloneVerifyEntries),...verifyShardFindings(standaloneVerifyEntries),...phaseTaskCountFindings(standaloneTasksText, resolveMaxPhaseTasks(c.policy)),...unrecognizedAnnotationFindings(standaloneTasksText)]"));
   // Site 2: SpecKit initial tasks gate merges on tasksMdText.
   check("wiring site 2 (speckit initial): length findings merged on tasksMdText",
     src.includes("[...speckitTaskDenylistFindings(tasksMdText,effectiveVerifyDenylist(c)),...speckitTaskVerifyLengthFindings(tasksMdText),...speckitTaskVerifyShardFindings(tasksMdText)]"));
@@ -239,9 +239,9 @@ check("length: bound is 500", ROLE_PROGRESS_COMMAND_MAX_CHARS === 500);
     src.includes("[...speckitTaskDenylistFindings(revisedText,effectiveVerifyDenylist(c)),...speckitTaskVerifyLengthFindings(revisedText),...speckitTaskVerifyShardFindings(revisedText)]"));
   // Negative controls: dropping the merge at any one site fails that site's pin.
   check("wiring: fails when the standalone merge is dropped",
-    !withoutNeedle(src, "verifyLengthFindings(standaloneVerifyEntries)").includes("[...verifyDenylistFindings(standaloneVerifyEntries,effectiveVerifyDenylist(c)),...verifyLengthFindings(standaloneVerifyEntries),...verifyShardFindings(standaloneVerifyEntries),...phaseTaskCountFindings(standaloneTasksText),...unrecognizedAnnotationFindings(standaloneTasksText)]"));
+    !withoutNeedle(src, "verifyLengthFindings(standaloneVerifyEntries)").includes("[...verifyDenylistFindings(standaloneVerifyEntries,effectiveVerifyDenylist(c)),...verifyLengthFindings(standaloneVerifyEntries),...verifyShardFindings(standaloneVerifyEntries),...phaseTaskCountFindings(standaloneTasksText, resolveMaxPhaseTasks(c.policy)),...unrecognizedAnnotationFindings(standaloneTasksText)]"));
   check("wiring: fails when the standalone shard merge is dropped",
-    !withoutNeedle(src, "verifyShardFindings(standaloneVerifyEntries)").includes("[...verifyDenylistFindings(standaloneVerifyEntries,effectiveVerifyDenylist(c)),...verifyLengthFindings(standaloneVerifyEntries),...verifyShardFindings(standaloneVerifyEntries),...phaseTaskCountFindings(standaloneTasksText),...unrecognizedAnnotationFindings(standaloneTasksText)]"));
+    !withoutNeedle(src, "verifyShardFindings(standaloneVerifyEntries)").includes("[...verifyDenylistFindings(standaloneVerifyEntries,effectiveVerifyDenylist(c)),...verifyLengthFindings(standaloneVerifyEntries),...verifyShardFindings(standaloneVerifyEntries),...phaseTaskCountFindings(standaloneTasksText, resolveMaxPhaseTasks(c.policy)),...unrecognizedAnnotationFindings(standaloneTasksText)]"));
   check("wiring: fails when the speckit initial merge is dropped",
     !withoutNeedle(src, "speckitTaskVerifyLengthFindings(tasksMdText)").includes("speckitTaskVerifyLengthFindings(tasksMdText)"));
   check("wiring: fails when the speckit retry merge is dropped",
@@ -270,7 +270,7 @@ check("length: bound is 500", ROLE_PROGRESS_COMMAND_MAX_CHARS === 500);
   check("wiring: standalone denied array includes phaseTaskCountFindings and unrecognizedAnnotationFindings",
     wired.includes("phaseTaskCountFindings(") && wired.includes("unrecognizedAnnotationFindings("));
   check("wiring: standalone reviewPrompt FAILs phases over the task cap",
-    src.includes("FAIL any phase with more than ${MAX_PHASE_TASKS} tasks"));
+    src.includes("FAIL any phase with more than ${resolveMaxPhaseTasks(c.policy)} tasks"));
 }
 
 if (failures) {

@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { normalizeFindings } from "./review-feedback.mjs";
+import { formatPrimaryModelFallbackLine, primaryModelFallbackEntries } from "./primary-model-fallback.mjs";
+import { allPlanPassNotes } from "./plan-review-rounds.mjs";
 
 // Mission 094 Phase 1 task 1.1 — the core report model.
 //
@@ -1211,7 +1213,7 @@ function missionStartedAt(state, runs) {
   return earliest;
 }
 
-export function buildReportModel({ state = null, runs = [], events = [], phases = [], policy = {}, layout = null, progress = [], gateLog = null, now = null, skill = null, command = null, missionFallback = null, ownerAlive } = {}) {
+export function buildReportModel({ state = null, runs = [], events = [], phases = [], policy = {}, layout = null, progress = [], gateLog = null, now = null, skill = null, command = null, missionFallback = null, ownerAlive, notRunText = "" } = {}) {
   const eventList = Array.isArray(events) ? events : [];
   const progressList = Array.isArray(progress) ? progress : [];
   const phaseDefs = normalizePhases(phases);
@@ -1403,6 +1405,12 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
     providerTrouble: enrichedRuns
       .filter((r) => r.providerTrouble)
       .map((r) => ({ run: r.id ?? r.dirName ?? null, label: r.providerTrouble })),
+    // Backlog #6(b): persisted records of a primary model that disappeared
+    // after start. Rendered as a loud line in PIPELINE STATE (and therefore
+    // in the final WATCH-REPORT too).
+    primaryModelFallbacks: primaryModelFallbackEntries(state),
+    // Backlog #4: minor notes preserved from the PASSing plan-review round.
+    planPassNotes: allPlanPassNotes(state),
     liveProgress: decodeLiveProgress({ events: eventList, progress: progressList, gateCommand, limit: 10 }),
     current: detectCurrent({ runs: enrichedRuns, gates, status: statusInfo.status, gateLog }),
     planning,
@@ -1411,6 +1419,7 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
     unclassified,
     runs: enrichedRuns,
     events: eventList,
+    notRunText: typeof notRunText === "string" ? notRunText : "",
   };
 }
 
@@ -2119,7 +2128,7 @@ export function capsText(model) {
   }
 
   const known = CAP_ROLE_ORDER.filter((role) => layoutCaps?.[role] || legacyCaps[role]);
-  const extra = [...new Set([...Object.keys(layoutCaps || {}), ...Object.keys(legacyCaps)])].filter((role) => !CAP_ROLE_ORDER.includes(role) && role !== "implementer" && role !== "task_size_target_turns" && role !== "mission_token_backstop");
+  const extra = [...new Set([...Object.keys(layoutCaps || {}), ...Object.keys(legacyCaps)])].filter((role) => !CAP_ROLE_ORDER.includes(role) && role !== "implementer" && role !== "task_size_target_turns" && role !== "max_phase_tasks" && role !== "min_phase_tasks" && role !== "mission_token_backstop");
   const roles = [...known, ...extra];
   if (!roles.length && freeModelMaxTurns == null) return "-";
 
@@ -2154,14 +2163,33 @@ export function skillText(model) {
   return "unknown · skill copy location not recorded";
 }
 
+// Labels for planning framework: standalone -> "standalone", speckit -> "SpecKit", gsd -> "GSD".
+export function frameworkLabel(framework) {
+  if (!framework || typeof framework !== "string") return null;
+  const lower = framework.trim().toLowerCase();
+  if (lower === "standalone") return "standalone";
+  if (lower === "speckit") return "SpecKit";
+  if (lower === "gsd") return "GSD";
+  return framework;
+}
+
 // `Command:` names the entry command that started the run. autopilot records
 // it on the mission state (`skill-copy.mjs` recordCommand) at run start as
-// {name, stopAfter}; older runs have no record and print nothing.
+// {name, stopAfter}; older runs have no record and print nothing. When the
+// mission's framework is known, it is appended (e.g. ` · SpecKit`). When
+// state.command is missing but the framework is known, prints `- · SpecKit`.
+// When both are missing, prints nothing (returns null).
 export function commandText(model) {
   const name = model?.command?.name;
-  if (!name) return null;
+  const fLabel = frameworkLabel(model?.framework);
+  if (!name) {
+    if (fLabel) return `- · ${fLabel}`;
+    return null;
+  }
   const stopAfter = model.command.stopAfter;
-  return `ap ${name} (${stopAfter ? `stops after ${stopAfter}` : "full loop"})`;
+  const base = `ap ${name} (${stopAfter ? `stops after ${stopAfter}` : "full loop"})`;
+  if (fLabel) return `${base} · ${fLabel}`;
+  return base;
 }
 
 // `=== [<stamp> — ]PIPELINE STATE ===` block (watcher.md Sections): mission,
@@ -2183,6 +2211,12 @@ export function renderPipelineState(model, { stamp = null } = {}) {
     label("Caps") + capsText(model),
     label("Skill") + skillText(model),
   ];
+  // Backlog #6(b): one loud line per role whose primary model vanished after
+  // the mission started. Kept out of the deduplicated mini sections on
+  // purpose — this is an operator-visible warning, not run detail.
+  for (const entry of Array.isArray(model?.primaryModelFallbacks) ? model.primaryModelFallbacks : []) {
+    lines.push(formatPrimaryModelFallbackLine(entry));
+  }
   if (model?.eventsLine) lines.push(label("Events") + model.eventsLine);
   return lines.join("\n");
 }
@@ -2644,6 +2678,12 @@ export function renderImplementationStage(model, { widths = null, collectRows = 
         }
       }
     });
+    if (model?.stage === "IMPLEMENTATION" && phase.number === model?.phaseNumber && phase.status === "in_progress" && model.notRunText) {
+      out.push("");
+      for (const line of model.notRunText.split("\n")) {
+        out.push(`    ${line}`);
+      }
+    }
   });
   return out.join("\n");
 }
@@ -2887,6 +2927,16 @@ export function renderLiveProgress(model) {
   return out.join("\n");
 }
 
+// Backlog #4: unapplied plan-review notes from the PASSing round.
+export function renderPlanPassNotes(model) {
+  const notes = Array.isArray(model?.planPassNotes) ? model.planPassNotes : [];
+  if (!notes.length) return "";
+  return [
+    "=== Plan-review notes not applied ===",
+    ...notes.map((note, i) => `${i + 1}. ${note}`),
+  ].join("\n");
+}
+
 // The whole report. Tasks 1.5 append the current-run and live-progress sections.
 export function renderReport(model, { stamp = null } = {}) {
   // Backlog #23: one width per column for the whole report. Collect every
@@ -2912,5 +2962,7 @@ export function renderReport(model, { stamp = null } = {}) {
   if (current) sections.push("", current);
   const progress = renderLiveProgress(model);
   if (progress) sections.push("", progress);
+  const passNotes = renderPlanPassNotes(model);
+  if (passNotes) sections.push("", passNotes);
   return sections.join("\n");
 }

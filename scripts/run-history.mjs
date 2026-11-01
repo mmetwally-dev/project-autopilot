@@ -9,6 +9,7 @@ import { growingTerm } from "./per-task-budget.mjs";
 import { readOwnerPid, ownerPidAlive } from "./owner-pid.mjs";
 import { buildReportModel, renderReport } from "./watch-report.mjs";
 import { detectUiProject } from "./e2e-detect.mjs";
+import { formatNotRunInMissions } from "./command-probe.mjs";
 import { phases as standalonePhases } from "../adapters/standalone.mjs";
 
 // true = alive, false = provably gone, null = could not tell (no/invalid pid, or
@@ -566,7 +567,7 @@ export function appendNoE2eNoteToReport(repo, file) {
 }
 
 export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAlive, phases, policy, events, now, skill, gateLog } = {}) {
-  const d = new Date();
+  const d = now ? new Date(now) : new Date();
   const p = (n) => String(n).padStart(2, "0");
   const stamp = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   const runsDir = watchRunsDir(repo, mission);
@@ -654,6 +655,7 @@ export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAl
     command: state?.command ?? null,
     missionFallback: mission ?? null,
     ownerAlive,
+    notRunText: formatNotRunInMissions(config?.gates?.not_run_in_missions),
   });
   const e2eNote = noE2eReportNote(repo, configResult?.layout ?? null);
   const out = renderReport(model, { stamp });

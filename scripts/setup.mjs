@@ -41,6 +41,15 @@ import {
 import { detect as detectSpecKit } from "../adapters/speckit.mjs";
 import { detect as detectGsd } from "../adapters/gsd.mjs";
 import { detectTestCommand, resolveGatesCommands } from "./detect-test-command.mjs";
+import {
+  PROBE_TIMEOUT_MS,
+  buildExclusionCommand,
+  buildManualCommand,
+  formatNotRunInMissions,
+  groupFailures,
+  probeTestCommand,
+  tailLines
+} from "./command-probe.mjs";
 import { detectUiProject, detectE2eTool } from "./e2e-detect.mjs";
 import { discoverPlaywrightRuntime } from "./playwright-runtime.mjs";
 import { formatPlaywrightStatusBlock } from "./playwright-status-block.mjs";
@@ -262,6 +271,16 @@ function modelEntryLabel(item) {
   return item.label || item.id;
 }
 
+// Backlog #12(c): a role left on "Use CLI default" makes OpenCode choose its
+// own default inside the sandbox — which may be a paid provider the operator
+// is logged into. Say so once, right after the choice; never block setup.
+function warnOpenCodeCliDefault(label, adapterId, model) {
+  if (adapterId !== "opencode" || String(model || "").trim()) return;
+  console.log(
+    `Warning: ${label}: "Use CLI default" makes OpenCode pick its own default model inside the sandbox, which may be a paid provider you are logged into — choose an explicit model to be sure.`
+  );
+}
+
 function freeModelRegex(adapterId) {
   const raw = agents[adapterId]?.free_model_pattern;
   if (typeof raw === "string" && raw.trim()) {
@@ -448,6 +467,8 @@ async function pickModelAndCapabilities(
       ? await pickLongModelList(label, meta, current, adapterId, catalog, options, curIndex)
       : await chooseFullModelList(label, meta, options, curIndex);
 
+    warnOpenCodeCliDefault(label, adapterId, item.id || "");
+
     // Live discovery succeeded for the model list itself, but this specific
     // model's own entry reported no reasoning/effort levels (the live CLI
     // response simply didn't include any). Distinct from the model-level
@@ -559,6 +580,8 @@ async function pickModelAndCapabilities(
         modelSource: "manual"
       };
     }
+
+    warnOpenCodeCliDefault(label, adapterId, item.id || "");
 
     return {
       model: canonicalModelId(item.id || "", documented.models),
@@ -1929,6 +1952,23 @@ async function printStartScreen(detectedFrameworks) {
       );
     }
 
+    // Backlog #4 Part A: after the test-command question, offer to run it once
+    // exactly as the phase gate would. The execution waits until the network
+    // setting is resolved below so the probe cannot use a different isolation
+    // mode than the saved gate.
+    const probeCandidate = Array.isArray(gatesResolution.commands) && gatesResolution.commands.length === 1
+      ? gatesResolution.commands[0]
+      : null;
+    let probeRequested = false;
+    const existingProbeCommand = existingGateCommands.length === 1 ? existingGateCommands[0] : null;
+    const probeCommandChanged = existingProbeCommand !== null && existingProbeCommand !== probeCandidate;
+    if (gatesInScope && interactive && probeCandidate) {
+      probeRequested = await yesNo(
+        "\nRun it once now, the same way the phase gate runs it? (Enter = yes)",
+        true
+      );
+    }
+
     let execution = current?.execution;
     if (isRoleOnlyScope(scope)) {
       execution = preserveExecutionForRoleScope(current?.execution);
@@ -2049,6 +2089,104 @@ async function printStartScreen(detectedFrameworks) {
     const e2eChoice = await askE2eChoice(current, repo, interactive);
     const e2ePending = storedE2e(current) == null && (e2eChoice === "playwright" || e2eChoice === "cypress");
 
+    // Backlog #4 Part A: the probe runs here, after the final network setting
+    // is known, through the gate's own guarded runner (runGuardedCommand) and
+    // the same shell environment the phase gate builds.
+    let finalGateCommands = gatesResolution.commands;
+    let notRunInMissions = null;
+    let notRunOriginalCommand = null;
+    if (probeRequested && probeCandidate) {
+      console.log(
+        `\nRunning tests once (up to ${Math.round(PROBE_TIMEOUT_MS / 60000)} min, ` +
+        `${networkIsolation ? "network isolated" : "network allowed"} like the phase gate)…`
+      );
+      let probe = null;
+      try {
+        probe = await probeTestCommand({
+          repo,
+          command: probeCandidate,
+          networkIsolation,
+          envAllowlist: Array.isArray(current?.gates?.env_allowlist) ? current.gates.env_allowlist : []
+        });
+      } catch (error) {
+        console.log(`\n⚠ Could not run the test command: ${error?.message || error}`);
+        console.log("  Keeping the command as configured; the gate will report its real failure later.");
+      }
+      if (probe?.ok) {
+        console.log("\n✓ Test command passed. Saving it unchanged.");
+        notRunInMissions = [];
+        notRunOriginalCommand = "";
+      } else if (probe) {
+        const output = probe.output || probe.tail || "";
+        const analysis = groupFailures(output, { command: probeCandidate, repoRoot: repo });
+        if (probe.timedOut) {
+          console.log(`\n⚠ Test command timed out after ${Math.round(PROBE_TIMEOUT_MS / 60000)} min.`);
+          console.log(tailLines(output, 20));
+          console.log("  Keeping the command as configured.");
+          if (probeCommandChanged) {
+            notRunInMissions = [];
+            notRunOriginalCommand = "";
+          }
+        } else if (!analysis.files.length || analysis.runner === "unknown") {
+          console.log("\n⚠ The test command failed, but its runner/output could not be recognised,");
+          console.log("  so no failing test files were identified. Keeping the command as today.");
+          console.log(tailLines(output, 40));
+          if (probeCommandChanged) {
+            notRunInMissions = [];
+            notRunOriginalCommand = "";
+          }
+        } else {
+          console.log("\n✗ Test command failed. Failing test files grouped by cause:");
+          for (const group of analysis.groups) {
+            console.log(`\n  ${group.reason}`);
+            for (const file of group.files) console.log(`    - ${file}`);
+          }
+          const envGroups = analysis.groups.filter(group => group.kind !== "other");
+          const envFiles = envGroups.flatMap(group => group.files);
+          const otherFiles = analysis.groups
+            .filter(group => group.kind === "other")
+            .flatMap(group => group.files);
+          if (otherFiles.length) {
+            console.log(
+              `\n⚠ ${otherFiles.length} file(s) fail for a real test reason and are NOT excluded; ` +
+              "the gate will keep failing until they are fixed:"
+            );
+            for (const file of otherFiles) console.log(`    - ${file}`);
+          }
+          if (!envFiles.length) {
+            console.log("  No environment-caused files to skip; keeping the command as today.");
+          } else {
+            const skipAnswer = await ask(
+              "\nSkip the environment-caused files in mission gates? (Enter = yes; type \"keep\" or \"-\" to keep them) [Y/n]: "
+            );
+            const keep = String(skipAnswer).trim().toLowerCase();
+            const typedKeep = ["-", "keep", "k", "n", "no"].includes(keep);
+            if (typedKeep) {
+              console.log("  Keeping every file in the gate command.");
+              notRunInMissions = [];
+              notRunOriginalCommand = "";
+            } else {
+              const excluded = buildExclusionCommand(probeCandidate, envFiles, analysis.runner);
+              if (!excluded) {
+                console.log(`  The ${analysis.runner} runner has no known exclusion flag; keeping the command as today.`);
+              } else {
+                finalGateCommands = [excluded];
+                notRunInMissions = envGroups.map(group => ({
+                  files: group.files,
+                  reason: group.reason,
+                  command: buildManualCommand(probeCandidate, group.files)
+                }));
+                notRunOriginalCommand = probeCandidate;
+                console.log("\nSaving the gate command without these files; the original command is recorded too:");
+                console.log(`  gate: ${excluded}`);
+                console.log("\n" + formatNotRunInMissions(notRunInMissions));
+              }
+            }
+          }
+        }
+      }
+    }
+
     const config = {
       ...(current || {}),
 
@@ -2116,7 +2254,13 @@ async function printStartScreen(detectedFrameworks) {
         // Last key on purpose: the resolved value must win over whatever
         // gates.commands the config already held (an existing [] used to
         // overwrite the proposal, so "detect + ask" could never land).
-        commands: gatesResolution.commands
+        commands: finalGateCommands,
+        ...(notRunInMissions !== null
+          ? {not_run_in_missions: notRunInMissions}
+          : {}),
+        ...(notRunOriginalCommand !== null
+          ? {not_run_in_missions_original_command: notRunOriginalCommand}
+          : {})
       },
 
       policy: (() => {

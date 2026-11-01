@@ -12,7 +12,7 @@ import path from "node:path";
 import {fileURLToPath} from "node:url";
 import {adapterDriver} from "./adapter-drivers.mjs";
 import {classifyObservedFailure} from "./failure-contract.mjs";
-import {OPENCODE_TITLE_MODEL_LINE_RE, rateLimitLineInfo} from "./idle-hang-watchdog.mjs";
+import {OPENCODE_TITLE_MODEL_LINE_RE, rateLimitLineInfo, PROVIDER_BALANCE_REASON} from "./idle-hang-watchdog.mjs";
 import {
   makeFixtureRepo, makeFixtureBin, makeSpecKitPhaseFixture, setScenario, writeConfig,
   runAutopilot, cleanup
@@ -68,8 +68,8 @@ const driver = adapterDriver("opencode");
   const roleObs = driver.observe(roleEvents, {});
   const roleHit = roleObs.find(o => o.type === "rate_limited");
   check("adapter-drivers: role line still produces a rate_limited observation", Boolean(roleHit), roleObs);
-  check("adapter-drivers: role line keeps the stderr reason",
-    roleHit?.reason === "opencode_stderr_rate_limit", roleHit);
+  check("adapter-drivers: role line (insufficient account funds) carries the provider-balance reason (backlog #15)",
+    roleHit?.reason === PROVIDER_BALANCE_REASON, roleHit);
 
   const roleClassified = classifyObservedFailure({
     exitCode: 0, stdout: "", stderr: ROLE_LINE, startError: null, timedOut: false,

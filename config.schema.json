@@ -775,6 +775,8 @@
       "description": "Per-role turn, token and session caps plus the mission token backstop.",
       "default": {
         "task_size_target_turns": 30,
+        "max_phase_tasks": 10,
+        "min_phase_tasks": 3,
         "planner": {
           "max_turns": 30,
           "max_tokens": 200000,
@@ -812,6 +814,18 @@
           "type": "number",
           "description": "Implementer turns the planner should aim for per task when splitting work; this is guidance, not a hard limit.",
           "default": 30,
+          "minimum": 1
+        },
+        "max_phase_tasks": {
+          "type": "number",
+          "description": "Most tasks one phase may hold; the plan review fails a larger phase and asks to split it.",
+          "default": 10,
+          "minimum": 1
+        },
+        "min_phase_tasks": {
+          "type": "number",
+          "description": "Phases with fewer tasks are merged into a neighbouring related phase when possible; guidance only, never a review failure.",
+          "default": 3,
           "minimum": 1
         },
         "planner": {
@@ -1305,6 +1319,8 @@
         "gate_commands": [],
         "gate_network": false,
         "gate_env_allowlist": [],
+        "not_run_in_missions": [],
+        "not_run_in_missions_original_command": "",
         "require_reviewer": true,
         "browser": "native",
         "require_browser": "when-task-requires",
@@ -1331,6 +1347,45 @@
           "items": {
             "type": "string"
           }
+        },
+        "not_run_in_missions": {
+          "type": "array",
+          "description": "Test files setup could not run in a mission gate (they need a running server, a database/.env or network); each entry records the files, a plain reason and the exact command to run them by hand after the mission.",
+          "default": [],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "patternProperties": {
+              "^_": {}
+            },
+            "properties": {
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Repository-relative test files that are not run in mission gates."
+              },
+              "reason": {
+                "type": "string",
+                "description": "Plain reason the files were excluded, for example server not reachable on 127.0.0.1:3000 or missing environment variable DATABASE_URL."
+              },
+              "command": {
+                "type": "string",
+                "description": "Exact command that runs these files by hand after the mission."
+              }
+            },
+            "required": [
+              "files",
+              "reason",
+              "command"
+            ]
+          }
+        },
+        "not_run_in_missions_original_command": {
+          "type": "string",
+          "description": "The full test command setup ran before excluding not_run_in_missions files; empty when no files were excluded.",
+          "default": ""
         },
         "require_reviewer": {
           "type": "boolean",

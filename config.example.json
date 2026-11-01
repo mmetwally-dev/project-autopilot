@@ -53,6 +53,8 @@
   },
   "caps": {
     "task_size_target_turns": 30,
+    "max_phase_tasks": 10,
+    "min_phase_tasks": 3,
     "planner": {
       "max_turns": 30,
       "max_tokens": 200000,
@@ -123,6 +125,8 @@
     "gate_commands": [],
     "gate_network": false,
     "gate_env_allowlist": [],
+    "not_run_in_missions": [],
+    "not_run_in_missions_original_command": "",
     "require_reviewer": true,
     "browser": "native",
     "require_browser": "when-task-requires",

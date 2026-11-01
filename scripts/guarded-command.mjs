@@ -84,26 +84,50 @@ async function runGuardedCommandCaptured(cwd, command, env, shellGuard, opts) {
 
   // Bounded tail buffer: keep at most the last 256 KiB in memory, then slice
   // out the last ~80 lines — enough for any realistic tail and never
-  // unbounded for a long suite.
+  // unbounded for a long suite. `collectOutput` keeps a larger, also bounded,
+  // copy for callers that must parse the whole result (the setup probe);
+  // timeoutMs kills a probe that runs past its limit (the gate passes none).
   let tailBuffer = "";
+  let fullBuffer = "";
+  const collectOutput = opts.collectOutput === true;
+  const maxOutputBytes = Number.isFinite(opts.maxOutputBytes) && opts.maxOutputBytes > 0 ? opts.maxOutputBytes : 2 * 1024 * 1024;
   return new Promise((resolve, reject) => {
     const child = spawn(plan.bin, plan.args, { cwd, env, shell: false, stdio: ["inherit", "pipe", "pipe"], ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}) });
+    let timedOut = false;
+    const timer = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
+      ? setTimeout(() => {
+        timedOut = true;
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      }, opts.timeoutMs)
+      : null;
+    const clearTimer = () => { if (timer) clearTimeout(timer); };
     child.stdout.on("data", (chunk) => {
       process.stdout.write(chunk);
       writeLog(chunk);
       tailBuffer += chunk;
       if (tailBuffer.length > 262144) tailBuffer = tailBuffer.slice(-262144);
+      if (collectOutput) {
+        fullBuffer += chunk;
+        if (fullBuffer.length > maxOutputBytes) fullBuffer = fullBuffer.slice(-maxOutputBytes);
+      }
     });
     child.stderr.on("data", (chunk) => {
       process.stderr.write(chunk);
       writeLog(chunk);
       tailBuffer += chunk;
       if (tailBuffer.length > 262144) tailBuffer = tailBuffer.slice(-262144);
+      if (collectOutput) {
+        fullBuffer += chunk;
+        if (fullBuffer.length > maxOutputBytes) fullBuffer = fullBuffer.slice(-maxOutputBytes);
+      }
     });
-    child.on("error", (err) => { reject(err); });
+    child.on("error", (err) => { clearTimer(); reject(err); });
     child.on("close", (code, signal) => {
+      clearTimer();
       const tail = tailBuffer.split("\n").filter((l) => l.length > 0).slice(-80).join("\n");
-      finish({ status: code, signal, stdout: null, stderr: null, durationMs: Date.now() - t0, logFile, tail }).then(resolve);
+      const result = { status: code, signal, stdout: null, stderr: null, durationMs: Date.now() - t0, logFile, tail, timedOut };
+      if (collectOutput) result.output = fullBuffer;
+      finish(result).then(resolve);
     });
   });
 }

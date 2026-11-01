@@ -23,6 +23,7 @@ fs.copyFileSync(path.join(repoScripts, "suite-schedule.mjs"), path.join(scriptsD
 fs.copyFileSync(path.join(repoScripts, "process-group-stop.mjs"), path.join(scriptsDir, "process-group-stop.mjs"));
 fs.copyFileSync(path.join(repoScripts, "bounded-process-tree.mjs"), path.join(scriptsDir, "bounded-process-tree.mjs"));
 fs.copyFileSync(path.join(repoScripts, "suite-live-file-guard.mjs"), path.join(scriptsDir, "suite-live-file-guard.mjs"));
+fs.copyFileSync(path.join(repoScripts, "live-test-model.mjs"), path.join(scriptsDir, "live-test-model.mjs"));
 
 // Each fake test drops a `.ran-*` marker in the temp root to prove it ran.
 const fakeRegular = `import fs from "node:fs"; fs.writeFileSync(".ran-regular", "yes"); console.log("fake regular ran");`;

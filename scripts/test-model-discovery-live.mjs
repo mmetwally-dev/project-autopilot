@@ -11,6 +11,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {discoverModelCatalog} from './model-discovery.mjs';
+import {pickFreeOpenCodeModel} from './live-test-model.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const agentsFile = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'adapters', 'agents.json'), 'utf8'));
@@ -39,6 +40,15 @@ for (const {adapter, binary} of targets) {
     throw new Error(`${adapter}: every discovered entry needs a non-empty string id — got ${JSON.stringify(catalog)}`);
   }
   console.log(`${adapter}: discovered ${catalog.length} model(s) from the real CLI — ${catalog.slice(0, 5).map(m => m.id).join(', ')}${catalog.length > 5 ? ', …' : ''}`);
+  // Backlog #12(a): the OpenCode live tests that make a real model call take
+  // their model from this same list. Name the explicit free choice (or the
+  // skip) here so discovery and the call sites cannot drift back to "".
+  if (adapter === 'opencode') {
+    const picked = pickFreeOpenCodeModel(catalog.map(model => model.id));
+    console.log(picked.model
+      ? `opencode: live model calls will use the explicit free model ${picked.model}`
+      : picked.skip);
+  }
 }
 
 if (!ran) {

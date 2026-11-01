@@ -8,6 +8,7 @@ import { normalizePreviousStatuses } from "./code-review-rounds.mjs";
 
 const STATE_KEY = "planReviewHistory";
 const NOTES_KEY = "planReviewNotes";
+const PASS_NOTES_KEY = "planPassNotes";
 const MAX_CUMULATIVE_CHARS = 16000;
 
 // The operator's severity split (backlog #8): only a problem that would make
@@ -137,6 +138,65 @@ export function clearPlanReviewNotes(state, key) {
   if (state[NOTES_KEY] && !Object.keys(state[NOTES_KEY]).length) delete state[NOTES_KEY];
 }
 
+// Minor notes preserved from the PASSing plan-review round (backlog #4).
+// Kept in a separate slot from planReviewNotes so a PASS keeps its notes
+// for the implementer and final report, while FAIL-round notes continue
+// to reach only the planner revision.
+export function planPassNotes(state, key) {
+  if (!state || typeof state !== "object" || !state[PASS_NOTES_KEY]) return [];
+  const list = state[PASS_NOTES_KEY][key];
+  return Array.isArray(list) ? list : [];
+}
+
+export function allPlanPassNotes(state, keyFilter = null) {
+  const container = state?.[PASS_NOTES_KEY];
+  if (!container || typeof container !== "object") return [];
+  const all = [];
+  for (const [key, list] of Object.entries(container)) {
+    if (typeof keyFilter === "function" && !keyFilter(key)) continue;
+    if (Array.isArray(list)) {
+      for (const note of list) {
+        if (typeof note === "string" && note && !all.includes(note)) all.push(note);
+      }
+    }
+  }
+  return all;
+}
+
+export function recordPlanPassNotes(state, key, notes) {
+  if (!state || typeof state !== "object" || !key) return [];
+  const normalized = normalizePlanReviewNotes(notes);
+  if (!state[PASS_NOTES_KEY] || typeof state[PASS_NOTES_KEY] !== "object") state[PASS_NOTES_KEY] = {};
+  if (normalized.length) state[PASS_NOTES_KEY][key] = normalized;
+  else delete state[PASS_NOTES_KEY][key];
+  if (!Object.keys(state[PASS_NOTES_KEY]).length) delete state[PASS_NOTES_KEY];
+  return normalized;
+}
+
+export function clearPlanPassNotes(state, key) {
+  if (!state?.[PASS_NOTES_KEY] || typeof state[PASS_NOTES_KEY] !== "object") return;
+  if (key) delete state[PASS_NOTES_KEY][key]; else delete state[PASS_NOTES_KEY];
+  if (state[PASS_NOTES_KEY] && !Object.keys(state[PASS_NOTES_KEY]).length) delete state[PASS_NOTES_KEY];
+}
+
+export function planPassNotesText(state, keyFilter = null) {
+  const notes = allPlanPassNotes(state, keyFilter);
+  if (!notes.length) return "";
+  return `Plan-review notes (optional — consider them only when they touch your task):\n${notes.map((note, i) => `${i + 1}. ${note}`).join("\n")}`;
+}
+
+// Pass notes for the first implementer brief of a phase.
+export function firstTaskPassNotes(state, { taskIndex, attempts, completedTaskIds } = {}) {
+  const isFirst = taskIndex === 0 && (attempts ?? 0) === 0 && (!completedTaskIds || !completedTaskIds.length);
+  return isFirst ? planPassNotesText(state) : "";
+}
+
+// Pass notes for the first GSD unit brief of a phase.
+export function firstGsdUnitPassNotes(state, phase, { isFirstOfPhase, attempt } = {}) {
+  const isFirst = Boolean(isFirstOfPhase) && attempt === 1;
+  return isFirst ? planPassNotesText(state, (key) => key.endsWith(`:${phase}`)) : "";
+}
+
 // A PASS that only came after earlier FULL reviewer rounds is a SCOPED
 // re-review: it verified the fixes, it did not look at the rest of the plan
 // again. Such a PASS needs the one full confirmation review below before it
@@ -226,4 +286,40 @@ export function plannerEarlierRoundsText(state, key, converge = true) {
   const rounds = slot(state, key).slice(0, -1);
   if (!rounds.length) return "";
   return `Findings from ALL earlier review rounds (already addressed once — keep them fixed; your fixes for the current findings must not reopen any of them):\n${render(rounds)}`;
+}
+
+// Backlog #5: demote [MEDIUM] and [LOW] findings to notes.
+export function demoteLowSeverityFindings(review) {
+  if (!review || typeof review !== "object" || !Array.isArray(review.findings)) {
+    return { review, moved: 0 };
+  }
+  const kept = [];
+  const movedList = [];
+  for (const f of review.findings) {
+    let text = "";
+    if (typeof f === "string") {
+      text = f;
+    } else if (f && typeof f === "object") {
+      const p = typeof f.problem === "string" ? f.problem.trim() : (f.problem != null ? String(f.problem).trim() : "");
+      const loc = typeof f.location === "string" ? f.location.trim() : (f.location != null ? String(f.location).trim() : "");
+      text = p || loc;
+    }
+    const trimmed = String(text).trim().toLowerCase();
+    if (trimmed.startsWith("[medium]") || trimmed.startsWith("[low]")) {
+      movedList.push(f);
+    } else {
+      kept.push(f);
+    }
+  }
+  const next = { ...review, findings: kept };
+  if (movedList.length > 0) {
+    const existingNotes = Array.isArray(review.notes) ? review.notes : [];
+    next.notes = [...existingNotes, ...movedList];
+  } else if (Array.isArray(review.notes)) {
+    next.notes = [...review.notes];
+  }
+  if (next.decision === "FAIL" && kept.length === 0 && movedList.length > 0) {
+    next.decision = "PASS";
+  }
+  return { review: next, moved: movedList.length };
 }

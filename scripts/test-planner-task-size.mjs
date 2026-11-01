@@ -19,7 +19,7 @@ const count = (re) => [...src.matchAll(re)].length;
 
 const SPLIT_TAG = "build-then-wire";
 const SPLIT_WIRE = "build, then wire";
-const TEN_TASKS = "Keep each phase to at most ${MAX_PHASE_TASKS} tasks";
+const TEN_TASKS = "Keep each phase to at most ${resolveMaxPhaseTasks(c.policy)} tasks";
 
 // ── Region slices (one per prompt; a global-only contains() would not catch
 // a single prompt dropping the rule while another keeps it) ──

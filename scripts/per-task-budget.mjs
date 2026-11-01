@@ -37,6 +37,16 @@ export function resolveTaskSizeTargetTurns(policy) {
   const raw = Number(policy?.task_size_target_turns);
   return Number.isInteger(raw) && raw > 0 ? raw : TASK_SIZE_TARGET_TURNS_DEFAULT;
 }
+export const MAX_PHASE_TASKS_DEFAULT = 10;
+export const MIN_PHASE_TASKS_DEFAULT = 3;
+export function resolveMaxPhaseTasks(policy) {
+  const raw = Number(policy?.max_phase_tasks);
+  return Number.isInteger(raw) && raw > 0 ? raw : MAX_PHASE_TASKS_DEFAULT;
+}
+export function resolveMinPhaseTasks(policy) {
+  const raw = Number(policy?.min_phase_tasks);
+  return Number.isInteger(raw) && raw > 0 ? raw : MIN_PHASE_TASKS_DEFAULT;
+}
 export const TASK_SIZE_ANNOTATION = "size: cannot split";
 // Planner wording: the concrete size rule (like SpecKit's one-action tasks),
 // the top rule "task size wins over phase count", and the background turn

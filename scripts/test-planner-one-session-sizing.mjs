@@ -17,7 +17,7 @@ function check(name, condition) {
 const src = fs.readFileSync(new URL("./autopilot.mjs", import.meta.url), "utf8");
 const count = (re) => [...src.matchAll(re)].length;
 
-const TEN_TASKS = "Keep each phase to at most ${MAX_PHASE_TASKS} tasks";
+const TEN_TASKS = "Keep each phase to at most ${resolveMaxPhaseTasks(c.policy)} tasks";
 const SPLIT_TAG = "build-then-wire";
 
 function sliceBetween(startMarker, endMarker, fromIndex = 0) {

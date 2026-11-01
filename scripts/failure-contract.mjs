@@ -1,4 +1,5 @@
 import {normalizeFindings, renderFinding} from "./review-feedback.mjs";
+import {PROVIDER_BALANCE_REASON} from "./idle-hang-watchdog.mjs";
 
 export const FAILURE_SCHEMA = "autopilot-failure.v1";
 
@@ -18,6 +19,19 @@ export const FAILURE_CLASSES = Object.freeze([
 const permissionPattern = /permission(?:\s+was)?\s+(?:denied|rejected)|auto-?denied|not permitted|read-only file system/i;
 const pathPattern = /UNC paths are not supported|no such file or directory|cannot find the path|invalid cwd/i;
 const serverPattern = /ERR_CONNECTION_REFUSED|ECONNREFUSED|server unavailable/i;
+// Backlog #6(b): the CLI's own model-not-found diagnostic (1.x
+// ProviderModelNotFoundError, 2.x ModelUnavailableError / provider.no-route).
+// A provider/model-side failure, so it takes the existing PROVIDER_ERROR
+// path and the existing configured-fallback switch; it must never degrade to
+// a generic PROCESS_EXIT_NONZERO that burns the adapter retry budget on a
+// model the provider has already said does not exist.
+const modelNotFoundPattern = /ProviderModelNotFoundError|ModelUnavailableError|Model not found|Model unavailable|provider\.no-route/i;
+// Backlog #12(b): a provider credential rejection in the CLI's own stderr is
+// the same terminal condition as a logged-out claude CLI (AUTH_REQUIRED), not
+// a generic PROCESS_EXIT_NONZERO to retry. Covers OpenCode/DeepSeek's
+// "Authentication Fails, Your api key ****xxxx is invalid", "Invalid API key",
+// `invalid_api_key`, and an explicit "401 Unauthorized".
+const providerAuthPattern = /Authentication Fails|api[\s_-]?key[^\n]{0,120}?(?:is\s+)?invalid|invalid[\s_-]api[\s_-]?key|\b401\b[^\n]{0,60}?Unauthorized|Unauthorized[^\n]{0,60}?\b401\b/i;
 
 // Mission 022 phase 2 (task 2.2): the Phase 2.1 non-terminal out-of-sandbox
 // auto-reject warning observation. It is informational only — never a
@@ -256,6 +270,31 @@ export function classifyObservedFailure(observation) {
     if (!isAutoRejectStderr && permissionPattern.test(stderrText)) return textFallbackFailure("PERMISSION_DENIED", "adapter", false, evidence, "permission", stderrText);
     if (pathPattern.test(stderrText)) return textFallbackFailure("PATH_UNSUPPORTED", "infrastructure", false, evidence, "path", stderrText);
     if (serverPattern.test(stderrText)) return textFallbackFailure("SERVER_UNAVAILABLE", "infrastructure", true, evidence, "server", stderrText);
+    // Backlog #12(b): rate-limit text keeps precedence over auth text — a
+    // free-quota rejection must never be mistaken for a bad key. This is also
+    // what reclassifySilentOpenCodeFailure() would have produced for opencode,
+    // named here so the classifier itself keeps the more specific cause.
+    // Backlog #15: balance/credit exhaustion is still RATE_LIMITED, but the
+    // reason lets the escalation/operator text say "top up or switch model"
+    // instead of "wait for the limit to lift". The dedicated balance check
+    // runs first because 2.x wraps it in `QuotaExceeded`.
+    if (OPENCODE_BALANCE_TEXT.test(stderrText)) {
+      return textFallbackFailure("RATE_LIMITED", "infrastructure", false, evidence, "provider_balance", stderrText, {reason: PROVIDER_BALANCE_REASON});
+    }
+    if (OPENCODE_LIMIT_TEXT.test(stderrText)) return textFallbackFailure("RATE_LIMITED", "infrastructure", false, evidence, "rate_limit", stderrText);
+    // Backlog #12(b): the CLI's own provider-credential rejection. Terminal
+    // for that CLI (no same-adapter retry can fix a bad key), with the adapter
+    // on the evidence so the escalation can name the right fix command.
+    if (providerAuthPattern.test(stderrText)) {
+      return textFallbackFailure("AUTH_REQUIRED", "adapter", false, evidence, "auth", stderrText, {
+        type: "auth_required",
+        adapter: observation?.adapter || null,
+        reason: "provider_key_invalid",
+      });
+    }
+    // Checked after the path/server patterns so their more specific causes
+    // keep precedence; a model-not-found line is a provider error either way.
+    if (modelNotFoundPattern.test(stderrText)) return textFallbackFailure("PROVIDER_ERROR", "infrastructure", true, evidence, "model_not_found", stderrText);
   }
   // 6. Clean exit, nothing above matched => no observed process failure.
   // (A genuine content-level failure — a reviewer FAIL verdict, a missing
@@ -273,6 +312,7 @@ export function classifyObservedFailure(observation) {
 // error line (which stays PROCESS_EXIT_NONZERO); only silence or explicit
 // limit text is reclassified, so the normal fallback path runs instead of
 // burning the adapter retry budget and stopping.
+const OPENCODE_BALANCE_TEXT = /insufficient[\s_-]?balance|insufficient[_\s-]?account funds|insufficient[_\s-]?credits?|credit balance is too low|payment required|(?:status(?:_?code)?|http(?:\/[0-9.]+)?)[=:"'\s-]*402\b/i;
 const OPENCODE_LIMIT_TEXT = /(?:\b429\b|rate[_\s-]?limit|too many requests|insufficient[_\s-]?(?:quota|funds)|quota[_\s-]?(?:exceeded|exhausted)|free usage limit reached|usage limit reached|subscribe to [^\n]{0,80}to keep going)/i;
 export function reclassifySilentOpenCodeFailure(observed, { adapter, output, stderr } = {}) {
   if (!observed || observed.class !== "PROCESS_EXIT_NONZERO" || adapter !== "opencode") return observed;
@@ -306,13 +346,16 @@ function policyFailure(policyViolation, evidence) {
 // genuinely completed result.
 const TEXT_FALLBACK_SOURCE = "stderr_text_fallback";
 const TEXT_FALLBACK_MAX_CHARS = 500;
-function textFallbackFailure(failureClass, domain, retryable, evidence, pattern, text) {
+function textFallbackFailure(failureClass, domain, retryable, evidence, pattern, text, extra = null) {
   // Bounded: the raw stderr snippet is diagnostic context, not evidence to
   // persist verbatim — a full transcript must never accumulate in state.json
   // across retries.
   const raw = String(text ?? "");
   const snippet = raw.length > TEXT_FALLBACK_MAX_CHARS ? `${raw.slice(0, TEXT_FALLBACK_MAX_CHARS).trimEnd()}…` : raw;
-  return failure(failureClass, domain, retryable, [...evidence, {source: TEXT_FALLBACK_SOURCE, pattern, text: snippet}]);
+  return failure(failureClass, domain, retryable, [
+    ...evidence,
+    {source: TEXT_FALLBACK_SOURCE, pattern, text: snippet, ...(extra && typeof extra === "object" ? extra : {})},
+  ]);
 }
 
 export function verdictFailure(roleName, verdict) {

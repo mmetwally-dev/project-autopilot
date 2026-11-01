@@ -10,14 +10,16 @@ import * as speckit from "../adapters/speckit.mjs";
 import * as gsd from "../adapters/gsd.mjs";
 import * as standalone from "../adapters/standalone.mjs";
 import { specKitState, gsdState } from "../adapters/planning-state.mjs";
-import { createGitMutationGuard, appendGuardScopeRoot, writeGuardBeforeSnapshot, guardedEnv, guardedCommandEnv, gitSnapshot, assertSupportedTopology, touchedFilesBetween, sessionFromOutput, roleSession, saveRoleSession, clearRoleSession, readGuardLog, describeGitStateChange, redactedGitSnapshot, formatRelayPolicyViolation, parsePorcelainV1ZEntries, keepEntryAfterEolFilter, classifyGitBlocks } from "./relay-guards.mjs";
+import { createGitMutationGuard, appendGuardScopeRoot, writeGuardBeforeSnapshot, guardedEnv, gitSnapshot, assertSupportedTopology, touchedFilesBetween, sessionFromOutput, roleSession, saveRoleSession, clearRoleSession, readGuardLog, describeGitStateChange, redactedGitSnapshot, formatRelayPolicyViolation, parsePorcelainV1ZEntries, keepEntryAfterEolFilter, classifyGitBlocks } from "./relay-guards.mjs";
 import { collectSnapshotGuards, decideSnapshotReuse, getCachedSnapshot, getSnapshotCacheKey, setCachedSnapshot, clearSnapshotReuseCache, makeCacheEntry } from "./snapshot-reuse-cache.mjs";
-import { createShellGuard, logShellDecision, networkIsolationPrefix } from "./shell-guard.mjs";
+import { logShellDecision, networkIsolationPrefix } from "./shell-guard.mjs";
 import { runGuardedCommand } from "./guarded-command.mjs";
+import { createGateShell } from "./gate-shell.mjs";
+import { appendNotRunInMissionsToReport, formatNotRunInMissions } from "./command-probe.mjs";
 import {loadAndMigrateConfig} from "./config-migration.mjs";
 import {planApprovalRequired, beginPlanApprovalPause, resumePlanApproval, isPlanApprovalPaused, planApprovalPauseLines} from "./plan-approval.mjs";
 import {validateNewConfig} from "./config-validation.mjs";
-import {verifyDenylistFindings, effectiveVerifyDenylist, speckitTaskDenylistFindings, verifyLengthFindings, speckitTaskVerifyLengthFindings, verifyShardFindings, speckitTaskVerifyShardFindings, phaseTaskCountFindings, unrecognizedAnnotationFindings, MAX_PHASE_TASKS} from "./verify-denylist.mjs";
+import {verifyDenylistFindings, effectiveVerifyDenylist, speckitTaskDenylistFindings, verifyLengthFindings, speckitTaskVerifyLengthFindings, verifyShardFindings, speckitTaskVerifyShardFindings, phaseTaskCountFindings, unrecognizedAnnotationFindings} from "./verify-denylist.mjs";
 import {atomicWriteFileSync} from "./atomic-state-write.mjs";
 import {readResetRequests,enqueueResetRequest,removeResetRequest,removeAllResetRequests} from "./reset-request-queue.mjs";
 import {PLAN_REVISION_RESET_SCOPE,PLAN_REVISION_RESET_KEY,clearPlanRevisionCounter,planRevisionResetRequest,applyPendingPlanRevisionReset} from "./reset-plan-revision.mjs";
@@ -47,7 +49,7 @@ export function appendOrchestratorExitEvent(missionDir, signal) {
 }
 
 import {skillRoot} from "./paths.mjs";
-import {recordSkillCopy, recordCommand} from "./skill-copy.mjs";
+import {recordSkillCopy, recordCommand, resumeStageFor} from "./skill-copy.mjs";
 import {cleanMissionScratch} from "./mission-scratch-cleanup.mjs";
 import {planningArtifactDigest,canSkipPlanningStateReview} from "./planning-artifact-digest.mjs";
 import {planUninstall, executeUninstall} from "./uninstall.mjs";
@@ -64,7 +66,7 @@ import {evaluateStandaloneReview, createStandaloneCheckpoint, artifactDigest as 
   STANDALONE_PLANNER_POSITION, STANDALONE_REVIEWER_POSITION,
   evaluateSpeckitGateReview, createSpeckitCheckpoint, manifestForGate, isReviewerPosition,
   SPECKIT_INITIAL_REVIEW, SPECKIT_PLANNER_REVISION, SPECKIT_POST_REVISION_REVIEW} from "./planning-review-checkpoint.mjs";
-import {preflightConfig} from "./preflight.mjs";
+import {preflightConfig, preflightPrimaryModels, primaryModelPreflightMessage, opencodeCliDefaultWarnings, opencodeCliDefaultWarningMessage} from "./preflight.mjs";
 import {spawnRelayChild} from "./subprocess-relay.mjs";
 import {adapterDriver, finalAgentText, sessionIdFromEvents, accumulateUsage, recordRunModel, runModelPatch, applyClaudeReadOnlyScratchAllow} from "./adapter-drivers.mjs";
 import {mergeTaskFacts,mergeTaskLineFacts,browserVerifierNote} from "./task-requirements.mjs";
@@ -81,13 +83,13 @@ import { updateSummary, updateSummaryForRunDir, scopeForRunDir } from "./watch-s
 import { recoverStaleRuns, markInterrupted } from "./run-recovery.mjs";
 import { recordCodeReviewRound, clearCodeReviewHistory, codeReviewerRoundLines, implementerEarlierRoundsText, codeReviewScopeKey } from "./code-review-rounds.mjs";
 import { scheduleEscalation, pendingEscalationModel, consumeEscalationFor, formatEscalationLog, recordVerifierRound, clearVerifierHistory, verifierRoundLines } from "./escalation-model.mjs";
-import { recordPlanReviewRound, seedPlanReviewHistory, clearPlanReviewHistory, planReviewPassNeedsConfirmation, planReviewConfirmationPending, markPlanReviewConfirmationPending, clearPlanReviewConfirmation, planReviewRevisionCount, recordPlanReviewRevision, clearPlanReviewRevisions, planReviewerRoundLines, planReviewerConfirmationLines, plannerEarlierRoundsText, recordPlanReviewNotes, planReviewNotesText, PLAN_REVIEW_SEVERITY_LINE } from "./plan-review-rounds.mjs";
+import { recordPlanReviewRound, seedPlanReviewHistory, clearPlanReviewHistory, planReviewPassNeedsConfirmation, planReviewConfirmationPending, markPlanReviewConfirmationPending, clearPlanReviewConfirmation, planReviewRevisionCount, recordPlanReviewRevision, clearPlanReviewRevisions, planReviewerRoundLines, planReviewerConfirmationLines, plannerEarlierRoundsText, recordPlanReviewNotes, planReviewNotesText, recordPlanPassNotes, planPassNotesText, allPlanPassNotes, firstTaskPassNotes, firstGsdUnitPassNotes, PLAN_REVIEW_SEVERITY_LINE, demoteLowSeverityFindings } from "./plan-review-rounds.mjs";
 import { saveReviewFeedback, loadReviewFeedback, clearReviewFeedback, clearReviewFeedbackByPrefix, feedbackText } from "./review-feedback.mjs";
 import { taskLabel, recordFindingTasks, loadFindingTasks, carryDecision, findingsForTask, renderHandledFindings, fixPassBriefExcerpts, clearFindingTasks, clearFindingTasksByPrefix, FINDING_TASKS_STATE_KEY } from "./finding-task-locality.mjs";
 import { runFinalReviewFixRounds, parseGateGreenFiles, isNoWorkPerformed, isReviewerFeedbackFixPass, buildNoWorkAnswerSection } from "./final-review-fix-rounds.mjs";
 import { classifyGateFailures, parseGateFailures, taskLinkedTestFiles, formatGateFailureEscalation } from "./gate-failure-locality.mjs";
 import { importsDeltaFile } from "./gate-locality-imports.mjs";
-import { checkGateBaseline } from "./gate-baseline-locality.mjs";
+import { checkGateBaseline, resolveGateTestFile } from "./gate-baseline-locality.mjs";
 import { findUnexpectedScratchFiles, unexpectedNewFilesNote } from "./scratch-file-locality.mjs";
 import {mapPathIntoEnvelope, SANDBOX_HOME} from "./execution-envelope.mjs";
 import {resolveAdapterTransport} from "./adapter-transport.mjs";
@@ -101,8 +103,8 @@ import {stableTaskIds} from "./role-progress-ids.mjs";
 import {prepareTaskInvocation, commitTaskResult, evaluateCrashResume} from "./role-progress-commit.mjs";
 import {attributionMap, changedPaths as attributedChangedPaths, detectWorkAhead} from "./task-attribution.mjs";
 import {parseTaskResultContract} from "./task-result-contract.mjs";
-import {taskSizingRuleText, taskSizeReviewText, resolveTaskSizeTargetTurns, resolvePerTaskLimits, resolvePerRoleLimits, checkCapBreach, capUnitLabel, growingTerm, evaluateCapGraceWindow, checkWrapupTrigger, sessionStoreRelDir, sessionStoreSandboxSubpath, consumeContinuation, clearTaskContinuation, recordRolloverDeadEnd, readRolloverDeadEnds, clearRolloverDeadEnds, deadEndTail, sessionWorkDigest, resolveHandoffMaxChars, resolveHandoffNoteMaxChars, resolveHandoffWrapupTokens, handoffNoteRelPath, continuationBudgetKey, CONTINUATION_BUDGET_KEY_PREFIX, resolveContinuationAllowance, RELAY_TIMEOUT_DEFAULT_MS, HANDOFF_WRAPUP_TOKENS_DEFAULT, PER_ROLE_WRAPUP_TOKENS_DEFAULT, WRAPUP_MAX_TURNS, WRAPUP_TIMEOUT_MS, SESSION_STORE_WARN_BYTES, recordGenerationProgress, resolveNoProgressGenerations, clearNoProgress, noProgressDisplayLabel, handoffNoteCitedExcerpts, resolveIdleHangMs, resolveFirstOutputMs, resolveMaxSilenceMs, isHandoffNoteFresh, buildOrchestratorFallbackNote, scratchHandoffNotePath, SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, pickFresherHandoffNote, handoffBudgetReminder, mergeFallbackWithPreviousNote, resolveBackstopRawTokens, evaluateBackstopBreach, recordBackstopFiring, readBackstopFirings, clearBackstopFirings, backstopLedgerKey, evaluateBackstopEscalation, handleRoleBackstopFiring, resolveSessionNumber} from "./per-task-budget.mjs";
-import {createIdleWatch, noteIdleOutput, noteIdleStdoutChunk, noteIdleStderrText, evaluateIdleWatch, formatIdleHangMessage, formatRateLimitedMessage, adapterMarkerFor, extractSessionIdFromChunk, noteIdleSessionId, IDLE_HANG_KILL_GRACE_MS, FREE_QUOTA_REASON} from "./idle-hang-watchdog.mjs";
+import {taskSizingRuleText, taskSizeReviewText, resolveTaskSizeTargetTurns, resolveMaxPhaseTasks, resolveMinPhaseTasks, resolvePerTaskLimits, resolvePerRoleLimits, checkCapBreach, capUnitLabel, growingTerm, evaluateCapGraceWindow, checkWrapupTrigger, sessionStoreRelDir, sessionStoreSandboxSubpath, consumeContinuation, clearTaskContinuation, recordRolloverDeadEnd, readRolloverDeadEnds, clearRolloverDeadEnds, deadEndTail, sessionWorkDigest, resolveHandoffMaxChars, resolveHandoffNoteMaxChars, resolveHandoffWrapupTokens, handoffNoteRelPath, continuationBudgetKey, CONTINUATION_BUDGET_KEY_PREFIX, resolveContinuationAllowance, RELAY_TIMEOUT_DEFAULT_MS, HANDOFF_WRAPUP_TOKENS_DEFAULT, PER_ROLE_WRAPUP_TOKENS_DEFAULT, WRAPUP_MAX_TURNS, WRAPUP_TIMEOUT_MS, SESSION_STORE_WARN_BYTES, recordGenerationProgress, resolveNoProgressGenerations, clearNoProgress, noProgressDisplayLabel, handoffNoteCitedExcerpts, resolveIdleHangMs, resolveFirstOutputMs, resolveMaxSilenceMs, isHandoffNoteFresh, buildOrchestratorFallbackNote, scratchHandoffNotePath, SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, pickFresherHandoffNote, handoffBudgetReminder, mergeFallbackWithPreviousNote, resolveBackstopRawTokens, evaluateBackstopBreach, recordBackstopFiring, readBackstopFirings, clearBackstopFirings, backstopLedgerKey, evaluateBackstopEscalation, handleRoleBackstopFiring, resolveSessionNumber} from "./per-task-budget.mjs";
+import {createIdleWatch, noteIdleOutput, noteIdleStdoutChunk, noteIdleStderrText, evaluateIdleWatch, formatIdleHangMessage, formatRateLimitedMessage, adapterMarkerFor, extractSessionIdFromChunk, noteIdleSessionId, IDLE_HANG_KILL_GRACE_MS, FREE_QUOTA_REASON, PROVIDER_BALANCE_REASON} from "./idle-hang-watchdog.mjs";
 import {deriveRoleDeadline, collectRoleSamples, ROLE_DEADLINE_FLOOR_MS} from "./role-deadline.mjs";
 import {assembleAdapterLaunchPlan} from "./launch-plan.mjs";
 import {ensureOpenCodeCacheSeeded, acquireOpenCodeCachePin, releaseOpenCodeCachePin, defaultOpenCodeCacheRoot, openCodeSandboxCatalog} from "./opencode-cache.mjs";
@@ -111,9 +113,18 @@ import {assembleAgentEnvironment} from "./agent-environment.mjs";
 import {extendFallbackWithFree, markTriedFreeModel} from "./free-fallback-discovery.mjs";
 import {discoverModelCatalog, discoverCapabilities} from "./model-discovery.mjs";
 import {isOpenCodeAdapter} from "./opencode-generation.mjs";
+import {
+  OPENCODE_SANDBOX_DATA_SUBPATH,
+  openCodeCredentialDataRoot,
+  openCodeSandboxCredentialsRequired,
+  prepareOpenCodeSandboxCredentials,
+  preflightOpenCodeSandboxCredentials,
+  openCodeSandboxCredentialsPreflightMessage
+} from "./opencode-credentials.mjs";
 import {runFailedBeforeFirstStep, isSessionNotFound, storedSessionMatches} from "./session-reset.mjs";
 import {failedRunDidWork, appendFailureHandoff} from "./failure-handoff.mjs";
 import {decideRoleFallback, resolveEffectiveRoleModel, formatRoleFallbackLog, decideRoleFallbackRetry, stampStickyFallback, staleStickyFallback, markExhausted, isExhausted, skipExhaustedRoleModel} from "./role-fallback.mjs";
+import {detectModelNotFoundFailure, formatPrimaryModelFallbackLine, primaryModelFallbackEntries} from "./primary-model-fallback.mjs";
 import {setTaskCheckboxes, applyTaskCheckboxStates} from "./speckit-task-state.mjs";
 import {CHECKPOINT_STATE_KEY, createCheckpoint, validateCheckpoint, isCheckpointForPhase, resumeStage, isApprovalReuseStage, phaseTaskDigest, deltaDigest, evaluatePlanningGate, decideTransition, emptyRoleProgress, retryPauseStageOf, shouldRetryPause, getCachedGateResult, setCachedGateResult, recordContinuationGateResult, takeContinuationGateResult, clearContinuationGateResult, getLastGateResult, recordLastGateResult, skipCheckpointStage} from "./phase-stage-checkpoint.mjs";
 import {validatePendingCheckboxSnapshot} from "./pending-checkbox-snapshot.mjs";
@@ -226,6 +237,37 @@ function getMissionWatchDir(s){
 // this exact success transition — an escalated/failed mission never calls
 // this, so its real failure and recovery evidence (result.json, run
 // history, s.checkpoint, s.lastReview, etc.) is untouched and preserved.
+// Backlog #4 Part A: tests that setup excluded from mission gates (because
+// they need a server, .env or network) are listed ONCE at mission completion
+// with the reason and the exact command to run them by hand. Part B owns the
+// WATCH-REPORT placement; this is the final report/terminal surface only.
+function reportNotRunInMissions(s){
+  try{
+    const migrated=loadAndMigrateConfig(cfgPath,{persist:false});
+    const list=migrated.config?.gates?.not_run_in_missions;
+    const text=formatNotRunInMissions(list);
+    if(!text) return;
+    console.log(`\n${text}`);
+    const mission=missionDirFor(repo,s);
+    if(mission) appendNotRunInMissionsToReport(path.join(repo,".autopilot","missions",mission,"REPORT.md"),list);
+  }catch{}
+}
+function reportPlanPassNotes(s){
+  try{
+    const notes=allPlanPassNotes(s);
+    if(!notes.length) return;
+    const mission=missionDirFor(repo,s);
+    if(!mission) return;
+    const reportFile=path.join(repo,".autopilot","missions",mission,"REPORT.md");
+    if(fs.existsSync(reportFile)){
+      const cur=fs.readFileSync(reportFile,"utf8");
+      if(!cur.includes("Plan-review notes not applied")){
+        const text=`Plan-review notes not applied:\n${notes.map((n,i)=>`${i+1}. ${n}`).join("\n")}`;
+        fs.writeFileSync(reportFile,`${cur.replace(/\n+$/,"")}\n\n${text}\n`);
+      }
+    }
+  }catch{}
+}
 function finalizeMissionComplete(s){
   delete s.currentTask;
   delete s.currentPhase;
@@ -260,6 +302,12 @@ function finalizeMissionComplete(s){
   // this mission's property too — never inherited by the next mission.
   delete s.gateGreenFiles;
   delete s.gateGreenMission;
+  // Backlog #6(b): the same loud line the WATCH-REPORT carries is repeated in
+  // the mission's final output, so a completed mission cannot hide that a
+  // role ran on a fallback because its primary model vanished.
+  for(const entry of primaryModelFallbackEntries(s)) console.warn(formatPrimaryModelFallbackLine(entry));
+  reportNotRunInMissions(s);
+  reportPlanPassNotes(s);
   s.phase="complete";s.step="human_commit";
   saveState(s);
   // Success-only: free this mission's per-run scratch dirs. Never fails the mission.
@@ -347,6 +395,10 @@ const MISSION_SCOPED_STATE_KEYS=Object.freeze([
   // Backlog #18: mission-wide models already found RATE_LIMITED by any role,
   // so no other role spends a run rediscovering the same exhaustion.
   "exhaustedModels",
+  // Backlog #6(b): primary models that vanished after mission start and the
+  // fallback each role moved to. THIS mission's operator-visible record; the
+  // WATCH-REPORT reads it, a new mission must not inherit it.
+  "primaryModelFallbacks",
   // Mission 063 task 1.1: operator-acknowledged phase-delta edits recorded by
   // `ap rebase`. They describe THIS mission's own drift acceptance, so a new
   // mission or cancel must drop them with the checkpoint they annotate.
@@ -1450,7 +1502,7 @@ function resetTargetKey(s,scopeArg){
 }
 // Backlog #11: the GLOBAL form of `ap reset` (bare, no --scope). Clears every
 // spent failure budget, every continuation allowance (+ no-progress counters),
-// rollover dead-ends and the planning revision COUNTER only. reviewFeedback,
+// rollover dead-ends and the planning revision COUNTER and the SpecKit/GSD planReviewRevisions only. reviewFeedback,
 // stage position, checkpoints, hand-off notes and everything else are kept.
 // Returns the list of cleared entries as display strings.
 const GLOBAL_RESET_KEY="__global__";
@@ -1468,6 +1520,10 @@ function clearAllSpentCounters(s){
     if(Number(rev.revision)>0) cleared.push(`standalonePlanReview.revision=${rev.revision}`);
     delete rev.revision;
   }
+  for(const [key,value] of Object.entries(s.planReviewRevisions||{})){
+    if(Number(value)>0){ cleared.push(`planReviewRevisions:${key}=${value}`); }
+  }
+  clearPlanReviewRevisions(s);
   delete s.lastContinuation;
   // Backlog #17: sticky role fallbacks are cleared too (roles return to their primary).
   for(const r of Object.keys(s.activeRoleModels||{})) cleared.push(`activeRoleModels:${r}`);
@@ -1505,7 +1561,7 @@ function resetGlobalCommand(s){
   try{ removeAllResetRequests(pendingResetPath()); }catch{ /* none */ }
   const cleared=clearAllSpentCounters(s);
   if(!cleared.length&&!stale.length){
-    console.error("ap reset: nothing is spent anywhere (failureBudgets, continuationBudgets, rolloverDeadEnds, standalonePlanReview.revision). Nothing to clear. To target one key explicitly pass `--scope <key>`.");
+    console.error("ap reset: nothing is spent anywhere (failureBudgets, continuationBudgets, rolloverDeadEnds, standalonePlanReview.revision, planReviewRevisions). Nothing to clear. To target one key explicitly pass `--scope <key>`.");
     return 1;
   }
   s.lastReset={at:now(),scope:"global",clearedUsed:cleared.length,clearedLimit:null,failure:null,role:null,adapter:null,appliedLive:false};
@@ -2649,6 +2705,23 @@ async function preflightConfiguredRoles(c){
     if(!agents[role.adapter]) throw new Error(`Unknown adapter '${role.adapter}' for role '${roleName}'.`);
   }
   for(const w of openCodeSandboxModelWarnings(c.roles)) console.warn(`Warning: ${w}`);
+  // Backlog #12(c): warn (never stop) when an OpenCode role is left on the CLI
+  // default and the operator's auth.json lists a non-OpenCode (possibly paid)
+  // provider, so the sandbox's default model cannot silently spend their money.
+  const cliDefaultWarning = opencodeCliDefaultWarningMessage(opencodeCliDefaultWarnings({config:c}));
+  if(cliDefaultWarning) console.warn(cliDefaultWarning);
+  // Backlog #6(a): stop before any role runs when a configured PRIMARY model
+  // is absent from the adapter's ACTUAL live model list. A list that could
+  // not be obtained (timeout/unsupported/error) or an adapter whose models
+  // come from documentation (claude) never blocks — today's warning stands.
+  const primaryModels=await preflightPrimaryModels({config:c,agents});
+  if(!primaryModels.ok) throw new Error(primaryModelPreflightMessage(primaryModels,agents));
+  // Backlog #14: an OpenCode 2 role on a paid provider needs a credential the
+  // sandbox can receive, so the host's own `opencode auth list` must name that
+  // provider before any role launches. The sandbox's fresh HOME only sees the
+  // built-in `opencode` provider otherwise.
+  const sandboxCredentials=await preflightOpenCodeSandboxCredentials({config:c,agents});
+  if(!sandboxCredentials.ok) throw new Error(openCodeSandboxCredentialsPreflightMessage(sandboxCredentials,agents));
   const {ok,results}=preflightConfig({repo,config:c,agents});
   const seen=new Set();
   for(const role of Object.values(c.roles||{})){
@@ -2786,7 +2859,12 @@ function makeRelayResult({roleName,role,a,p,args,invocationVerification,output,s
   const policyEvidence=(commitDetected&&gitStateChangedFields.length)?[...observations,{type:"git_state_changed",fields:gitStateChangedFields}]:observations;
   // #107: opencode --print-logs INFO/DEBUG chatter (paths, "loading ...") must not feed the nonzero-exit stderr text fallback.
   const classifyStderr=role.adapter==="opencode"?String(p.stderr||"").split(/\r?\n/).filter(l=>!/^timestamp=\S+ level=(?:INFO|DEBUG)\b/.test(l)).join("\n"):p.stderr;
-  const observedFailure=reclassifySilentOpenCodeFailure(classifyObservedFailure({exitCode:p.status,stdout:p.stdout,stderr:classifyStderr,startError:p.error,timedOut:p.timedOut,policyViolation,evidence:policyEvidence,driverless:!adapterDriver(role.adapter)}),{adapter:role.adapter,output,stderr:classifyStderr});
+  // Backlog #6(b): the CLI's own model-not-found diagnostic (1.x
+  // ProviderModelNotFoundError, 2.x ModelUnavailableError) is recorded on the
+  // run so the fallback choke point can tell a vanished model apart from an
+  // ordinary rate limit. stderr / structured observations only, never prose.
+  const modelNotFound=detectModelNotFoundFailure({stderr:classifyStderr,observations});
+  const observedFailure=reclassifySilentOpenCodeFailure(classifyObservedFailure({exitCode:p.status,stdout:p.stdout,stderr:classifyStderr,startError:p.error,timedOut:p.timedOut,policyViolation,evidence:policyEvidence,driverless:!adapterDriver(role.adapter),adapter:role.adapter}),{adapter:role.adapter,output,stderr:classifyStderr});
   const contract=reviewContract?.contract||{status:"not_required",error:null};
   const verdict=reviewContract?.verdict||{status:"not_applicable",decision:null,findings:[]};
   const relayFailure=observedFailure||reviewContract?.failure||verdictFailure(roleName,verdict);
@@ -2801,6 +2879,9 @@ function makeRelayResult({roleName,role,a,p,args,invocationVerification,output,s
     model:role.model||null,
     reasoning:role.reasoning||null,
     variant:role.variant||null,
+    // Backlog #6(b): true only when the CLI's own diagnostic named a missing
+    // model. Additive; false/absent on every ordinary run.
+    ...(modelNotFound?{modelNotFound:true}:{}),
     // Mission 093 Part 1 task 2.2: configured vs stream-resolved model.
     // configuredModel is the effective model at launch (null when the CLI
     // chose its default); resolvedModel/modelMismatch come from the decoded
@@ -3160,6 +3241,14 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // been substituted with a symlink/junction).
   let workspaceCleaned=false;
   let workspaceCleanupError=null;
+  // Backlog #14: launch-scoped OpenCode 2 credential data dir, cleaned on
+  // every pre-launch failure and in the spawn finally below.
+  let opencodeCredentialProvision=null;
+  const cleanupCredentialProvision=()=>{
+    if(!opencodeCredentialProvision) return;
+    try{ opencodeCredentialProvision.cleanup(); }catch{}
+    opencodeCredentialProvision=null;
+  };
   const cleanupDisposableWorkspace=()=>{
     if(!disposableWorkspace||workspaceCleaned||workspaceCleanupError) return;
     try{ disposableWorkspace.cleanup(); workspaceCleaned=true; }
@@ -3173,6 +3262,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // failure message rather than dropped — both the primary failure and the
   // cleanup failure are preserved when both exist.
   const failClosingWorkspace=(m)=>{
+    cleanupCredentialProvision();
     cleanupDisposableWorkspace();
     if(workspaceCleanupError){
       return fail(`${m} (additionally, the disposable reviewer workspace could not be cleaned up: ${workspaceCleanupError?.message||workspaceCleanupError})`);
@@ -3231,6 +3321,10 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     const hostDir=sessionStoreHostDir(mission,taskRef);
     if(subpath && hostDir) sessionStoreMounts=[{host:hostDir,sandbox:`${SANDBOX_HOME}/${subpath}`}];
   }
+  // Backlog #14: private adapter data dir carrying OpenCode 2 provider
+  // credentials for THIS launch. opencodeCredentialProvision itself is
+  // declared above failClosingWorkspace so every pre-launch exit removes it.
+  let credentialDataMounts=[];
 
   const promptRepository=attemptEnvelope?mapPathIntoEnvelope(effectiveCwd, {available: true, sandbox: {repository: "/workspace/repository"}}, effectiveCwd, effectiveScratchDir) : effectiveCwd;
   const promptScratch=effectiveScratchDir? (attemptEnvelope?"/workspace/scratch":effectiveScratchDir) : effectiveScratchDir;
@@ -3441,6 +3535,32 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
         sharedCacheExtraEnv={};
       }
     }
+    // Backlog #14: OpenCode 2 keeps provider keys in its own data store, not
+    // auth.json, so the sandbox's fresh HOME cannot see a paid provider. For
+    // an enveloped v2 launch on a non-`opencode` provider, export that one
+    // integration on the host and import it into a private 0700 XDG data
+    // root (piped stdout -> stdin; no argv/log/file). The implementer reuses
+    // its per-task session store instead of a second data dir. 1.x and the
+    // built-in provider never enter this branch.
+    if(role.adapter==="opencode" && openCodeSandboxCredentialsRequired({adapterId:role.adapter,adapter:a,model:role.model||""})){
+      const sandboxDataPath=`${SANDBOX_HOME}/${OPENCODE_SANDBOX_DATA_SUBPATH}`;
+      const existingDataRoot=openCodeCredentialDataRoot({sessionStoreMounts,sandboxDataPath});
+      try{
+        opencodeCredentialProvision=await prepareOpenCodeSandboxCredentials({
+          adapter:a,
+          adapterId:role.adapter,
+          model:role.model||"",
+          sandboxDataPath,
+          existingDataRoot
+        });
+        if(opencodeCredentialProvision){
+          if(existingDataRoot) sessionStoreMounts=[opencodeCredentialProvision.mount];
+          else credentialDataMounts=[opencodeCredentialProvision.mount];
+        }
+      }catch(error){
+        return failClosingWorkspace(`${roleName}: ${error?.message||error}`);
+      }
+    }
     const permissionFiles=resolvePermissionFiles(effectiveCwd,a.permission_files);
     const runtimeFiles=resolveRuntimeFiles(missionTransportGate.invocation.binary,a.runtime_siblings);
     // Task 15.4C3B: forward the already-discovered, unmutated
@@ -3462,7 +3582,9 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       sharedCacheMount,sharedCacheCompanionMount,extraEnv:sharedCacheExtraEnv,
       // Backlog #26 Step B: implementer session-store bind (read-only roles
       // pass none — unchanged). Only the adapter's data dir, never HOME.
-      sessionStoreMounts: roleName==="implementer" ? sessionStoreMounts : []
+      sessionStoreMounts: roleName==="implementer" ? sessionStoreMounts : [],
+      // Backlog #14: the private OpenCode 2 provider-credential data dir.
+      credentialDataMounts
     });
     if(!missionLaunchPlan.available){
       // Task 15.4B1: on Native Windows for a SpecKit project, ALL three
@@ -3755,7 +3877,11 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   const {base: opencodeLogBase, priv: opencodeLogPrivate} = (()=>{
     if(role.adapter!=="opencode") return {base: null, priv: false};
     if(roleName==="implementer" && mission && taskRef){
-      try{ const hostDir=sessionStoreHostDir(mission,taskRef); if(hostDir) return {base: hostDir, priv: true}; }catch{}
+      try{
+        if(opencodeCredentialProvision?.dataDir) return {base: opencodeCredentialProvision.dataDir, priv: true};
+        const hostDir=sessionStoreHostDir(mission,taskRef);
+        if(hostDir) return {base: hostDir, priv: true};
+      }catch{}
     }
     try{
       const home=process.env.HOME||process.env.USERPROFILE||null;
@@ -4028,6 +4154,10 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       try{ releaseOpenCodeCachePin(opencodePinHandle); }catch{}
       opencodePinHandle=null;
     }
+    // Backlog #14: the private credential data dir is launch-scoped. Remove
+    // it after success, failure or a watchdog kill (the implementer's
+    // session store is never removed here).
+    cleanupCredentialProvision();
   }
   const finished=now();
   const out=((p.stdout||"")+"\n"+(p.stderr||"")).trim();
@@ -4122,11 +4252,15 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       result.failure=failure("IDLE_HANG","infrastructure",true,[{source:"relay",message:idleMessage,role:roleName,adapter:role.adapter,model:role.model||null,idleMs:idleBreach.idleMs}]);
       try{ observe(dir,{stream:"stdout",bytes:0,minIntervalMs:0,last:`IDLE_HANG | ROLE=${roleName} | ADAPTER=${role.adapter} | IDLE_MS=${idleBreach.idleMs}`}); }catch{}
     }else{
+      // Backlog #15: a paid balance never refills by waiting, so it gets its
+      // own operator label (BALANCE_EXHAUSTED) on the unchanged RATE_LIMITED
+      // class/flow.
+      const balanceExhausted=idleBreach.reason===PROVIDER_BALANCE_REASON;
       const freeQuota=idleBreach.reason===FREE_QUOTA_REASON;
-      const rateMessage=formatRateLimitedMessage({role:roleName,adapter:role.adapter,model:role.model||null,provider:idleBreach.provider,freeQuota});
+      const rateMessage=formatRateLimitedMessage({role:roleName,adapter:role.adapter,model:role.model||null,provider:idleBreach.provider,freeQuota,balanceExhausted});
       result.idleHang={kind:"rate_limited",provider:idleBreach.provider||null,model:idleBreach.model||null,reason:idleBreach.reason||null,message:rateMessage};
       result.failure=failure("RATE_LIMITED","infrastructure",false,[{source:"relay",message:rateMessage,role:roleName,adapter:role.adapter,model:idleBreach.model||role.model||null,provider:idleBreach.provider||null,reason:idleBreach.reason||null}]);
-      try{ observe(dir,{stream:"stdout",bytes:0,minIntervalMs:0,last:`RATE_LIMITED | ROLE=${roleName} | ADAPTER=${role.adapter} | PROVIDER=${idleBreach.provider||role.adapter}${freeQuota?" | FREE_QUOTA=true":""}`}); }catch{}
+      try{ observe(dir,{stream:"stdout",bytes:0,minIntervalMs:0,last:`RATE_LIMITED | ROLE=${roleName} | ADAPTER=${role.adapter} | PROVIDER=${idleBreach.provider||role.adapter}${balanceExhausted?" | BALANCE_EXHAUSTED=true":freeQuota?" | FREE_QUOTA=true":""}`}); }catch{}
     }
   }
   // Mission 087 task 2.1: single per-role fallback choke point. runRelay is
@@ -4159,8 +4293,11 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       // the operator-facing line must say so explicitly instead of looking
       // like a transient 429. Purely a label: switching/recording below is
       // the unchanged rate-limit path.
-      const freeQuotaExhausted=(Array.isArray(result.failure.evidence)?result.failure.evidence:[]).some(entry=>entry?.reason===FREE_QUOTA_REASON);
-      const quotaLabel=freeQuotaExhausted?", free quota used up":"";
+      const evidence=Array.isArray(result.failure.evidence)?result.failure.evidence:[];
+      const balanceExhausted=evidence.some(entry=>entry?.reason===PROVIDER_BALANCE_REASON);
+      const freeQuotaExhausted=evidence.some(entry=>entry?.reason===FREE_QUOTA_REASON);
+      // Backlog #15: never call a paid balance "free quota used up".
+      const quotaLabel=balanceExhausted?", provider balance exhausted":freeQuotaExhausted?", free quota used up":"";
       // Backlog #18: record the RATE_LIMITED model mission-wide (same place
       // as the per-role tried list) so every other role skips it too.
       if(result.failure.class==="RATE_LIMITED") s.exhaustedModels=markExhausted(s.exhaustedModels,from,roleName,now());
@@ -4169,6 +4306,17 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       decision=await extendFallbackWithFree({decision,role:roleName,roleConfig:c.roles?.[roleName]??null,activeModel:s.activeRoleModels?.[roleName]??null,failureClass:result.failure.class,noOutput:result?.idleHang?.noOutput===true,tried:s.triedFreeModels?.[roleName]??[],enabled:c.freeModelAutoFallback!==false,adapters:agents,discover:(a)=>agents[a]?discoverModelCatalog(agents[a]):[],exhausted:s.exhaustedModels,policy:c.policy,nowMs:Date.now()});
       if(decision?.action==="switch"&&decision.next){
         s.activeRoleModels={...(s.activeRoleModels||{}),[roleName]:stampStickyFallback(decision.next,c.roles?.[roleName]??null,now())};
+        // Backlog #6(b): a PRIMARY model that vanished after mission start is
+        // still switched away from exactly as before, but the operator gets a
+        // loud, lasting record the WATCH-REPORT/final report prints. A missing
+        // fallback model is not mislabelled as the primary.
+        const fromPrimary=from.adapter===rawRole.adapter&&from.model===rawRole.model;
+        if(result.modelNotFound===true&&fromPrimary){
+          const record={role:roleName,primary:{adapter:from.adapter,model:from.model},fallback:{adapter:decision.next.adapter,model:decision.next.model},at:now()};
+          s.primaryModelFallbacks={...(s.primaryModelFallbacks||{}),[roleName]:record};
+          result.primaryModelMissing=record;
+          console.warn(formatPrimaryModelFallbackLine(record));
+        }
         console.log(formatRoleFallbackLog({role:roleName,from,to:decision.next,reason:decision.autoDiscovered?`${result.failure.class}${quotaLabel}, auto-discovered free model`:`${result.failure.class}${quotaLabel}`}));
         result.fallbackSwitch={from,to:decision.next,reason:decision.reason};
         if(persistState){ try{ saveState(s); }catch{} }
@@ -4316,7 +4464,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // continuation allowance is touched). Never overwrites a fresh note.
   let failureHandoffText="", failureHandoffQuotes="";
   try{
-    if(roleName==="implementer" && !isWrapUp && !result.capped && result.status!=="completed" && mission && taskRef
+    if((roleName==="implementer"||roleName==="planner") && !isWrapUp && !result.capped && result.status!=="completed" && mission && taskRef
        && failedRunDidWork({adapterId:role.adapter,touchedFiles:result.touchedFiles,events})){
       if(!handoffNoteFreshnessForWrapUp(mission,taskRef)?.fresh){
         // Backlog #15 part 3b: this session's own changes only.
@@ -4513,12 +4661,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
 // mutable flag would be a race hazard even though today every caller in
 // practice derives it from the same config value.
 function guardedShell(cwd,networkIsolationEnabled=true,envAllowlist=[]){
-  const dir=path.join(repo,".autopilot","runs",`shell-${randomUUID()}`);
-  fs.mkdirSync(dir,{recursive:true});
-  const guard=createGitMutationGuard(dir,cwd);
-  const shellGuard=createShellGuard(dir);
-  shellGuard.networkIsolationEnabled=networkIsolationEnabled;
-  return {guard,shellGuard,env:guardedCommandEnv(guard,{},envAllowlist)};
+  return createGateShell(repo,cwd,networkIsolationEnabled,envAllowlist);
 }
 // Runs `command` under both guard layers. `label` identifies the source
 // (e.g. "gates.commands", "task.verify", "gsd.<verify>") purely for logging
@@ -5120,6 +5263,7 @@ async function ensurePlanningReady(c,s,request){
     delete s.reviewFeedback;
     delete s.planReviewHistory;
     delete s.planReviewNotes;
+    delete s.planPassNotes;
     delete s.codeReviewHistory;
     delete s.verifierHistory;
     delete s.escalationSwitches;
@@ -5964,7 +6108,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
     // Backlog #13: small tasks (like SpecKit). The limit counts work, not
     // tasks, so a phase may hold up to MAX_PHASE_TASKS small one-action
     // tasks; "task size wins over phase count" is the explicit top rule.
-    const phaseTaskLimitLine=`Keep each phase to at most ${MAX_PHASE_TASKS} tasks; the limit counts work, not tasks — small tasks are cheap. Task size wins over phase count: when a task would break the size rule, add tasks or an extra phase rather than enlarging the task.`;
+    const phaseTaskLimitLine=`Keep each phase to at most ${resolveMaxPhaseTasks(c.policy)} tasks; the limit counts work, not tasks — small tasks are cheap. Task size wins over phase count: when a task would break the size rule, add tasks or an extra phase rather than enlarging the task. A phase with fewer than ${resolveMinPhaseTasks(c.policy)} tasks should be merged into a neighbouring related phase when the merged phase stays within ${resolveMaxPhaseTasks(c.policy)} tasks and the task order stays correct.`;
     // Merging stays ONLY for truly trivial same-file edits that still fit the
     // concrete size rule; never merge to shrink the task count.
     const mergeTasksLine="Do not create a task that only runs tests or \"regression-checks\" without changing files — verification belongs in each task's verify and in the orchestrator gate. Merge only truly trivial edits to the same file into one task when the merged task still fits the size rule; never merge tasks to reduce the task count or the number of phases.";
@@ -6182,7 +6326,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       "FAIL a single task that combines building a new design/helper AND wiring it into a large file — such build-then-wire work must be two tasks (build, then wire); cite the oversized task by its numeric ID exactly as written in the file (e.g. 'TASKS.md 2.3').",
       taskSizeReviewText(resolveTaskSizeTargetTurns(c.policy))+"; cite the oversized task by its numeric ID exactly as written in the file (e.g. 'TASKS.md 2.3').",
       PLAN_REVIEW_TESTING_RULE,
-      `FAIL any phase with more than ${MAX_PHASE_TASKS} tasks, citing the phase (e.g. 'TASKS.md Phase 2'); it must be split into additional phases.`,
+      `FAIL any phase with more than ${resolveMaxPhaseTasks(c.policy)} tasks, citing the phase (e.g. 'TASKS.md Phase 2'); it must be split into additional phases. A phase with fewer than ${resolveMinPhaseTasks(c.policy)} tasks that could join a neighbouring related phase (staying within ${resolveMaxPhaseTasks(c.policy)} tasks, order unchanged) goes in "notes", never in "findings".`,
       "FAIL a task that changes no files (only runs tests / regression-checks), citing the task ID (e.g. 'TASKS.md 2.3'). Do NOT FAIL small tasks for being small or for not being merged — small one-action tasks are deliberate. Do not FAIL a phase merely for having few tasks: phases are cut by deliverable, and task size wins over phase count.",
       ...planReviewerRoundLines(s,STANDALONE_PLAN_FEEDBACK_KEY,c.workflow?.plan_review_convergence!==false),
       "Do not modify either file. End with the required AUTOPILOT_REVIEW sentinel.",
@@ -6204,7 +6348,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
     // verifyDenylistFindings; GSD is covered in runGsdPlanning.
     const standaloneVerifyEntries=standaloneTaskVerifyEntries(tasksFile);
     const standaloneTasksText=fs.existsSync(tasksFile)?fs.readFileSync(tasksFile,"utf8"):"";
-    const denied=[...verifyDenylistFindings(standaloneVerifyEntries,effectiveVerifyDenylist(c)),...verifyLengthFindings(standaloneVerifyEntries),...verifyShardFindings(standaloneVerifyEntries),...phaseTaskCountFindings(standaloneTasksText),...unrecognizedAnnotationFindings(standaloneTasksText)];
+    const denied=[...verifyDenylistFindings(standaloneVerifyEntries,effectiveVerifyDenylist(c)),...verifyLengthFindings(standaloneVerifyEntries),...verifyShardFindings(standaloneVerifyEntries),...phaseTaskCountFindings(standaloneTasksText, resolveMaxPhaseTasks(c.policy)),...unrecognizedAnnotationFindings(standaloneTasksText)];
     if(denied.length){
       if(confirming) clearPlanReviewConfirmation(s,STANDALONE_PLAN_FEEDBACK_KEY);
       revision++;
@@ -6390,6 +6534,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       // A PASS must not leave the previous FAIL's findings readable by a
       // later resume, which would re-feed stale corrections into a plan
       // that has since been accepted.
+      recordPlanPassNotes(s,STANDALONE_PLAN_FEEDBACK_KEY,reviewResult.review?.notes);
       clearPlanReviewConfirmation(s,STANDALONE_PLAN_FEEDBACK_KEY);
       clearReviewFeedback(s,STANDALONE_PLAN_FEEDBACK_KEY);
       clearPlanReviewHistory(s,STANDALONE_PLAN_FEEDBACK_KEY);
@@ -6476,6 +6621,12 @@ function roleStepLine(c,roleName){
   if(role.model) parts.push(`  Model: ${role.model}`);
   return parts.join("\n");
 }
+function speckitAnalyzeGateText(file){
+  const target = file
+    ? `exactly as defined in ${file} (read that file and follow its analysis steps on spec.md, plan.md and tasks.md; it is read-only; skip its extension-hook and next-command sections)`
+    : "(SpecKit /speckit.analyze: a read-only cross-check of spec.md, plan.md and tasks.md)";
+  return ` Also run SpecKit's analyze check ${target}. Spec and plan are already approved: focus on whether tasks.md covers every spec requirement and plan item, task order/dependencies, file paths, contradictions and duplicates. Start every finding and every note with its label: [CRITICAL], [HIGH], [MEDIUM] or [LOW] for an analyze issue, or [RULE: <short rule name>] for any other FAIL rule in this review. Put CRITICAL, HIGH and RULE items in "findings" (FAIL); put MEDIUM and LOW issues in "notes".`;
+}
 async function runSpecKitPlanning(c,s,request,opts={}){
   const gateResume=opts.gateReviewResume||null;
   const info=speckit.inspect(repo);
@@ -6543,7 +6694,7 @@ async function runSpecKitPlanning(c,s,request,opts={}){
       // are what actually stop an invalid tasks.md from reaching
       // implementation). Other gates and frameworks are untouched.
       const tasksGateNote = String(step.id||"").includes("tasks")
-        ? "\nAdditionally, enforce the phase-observability contract on the tasks artifact: every '## Phase N' section must be implementable into at least one Git-observable file addition, modification, or deletion. FAIL the gate if any phase can produce no Git-observable file change — for example a phase whose only task is creating an empty directory (Git cannot represent empty directories, so such a phase could never be code-reviewed or verified), or a phase of only reads, checks, or planning notes with no persistent file output. Setup phases that modify observable files (package.json, configuration, source files, documentation) satisfy this contract and must not fail it. FAIL a single task that combines building a new design/helper AND wiring it into a large file — such build-then-wire work must be two tasks (build, then wire); cite the oversized task by its ID exactly as written in the file (e.g. 'T001'). "+taskSizeReviewText(resolveTaskSizeTargetTurns(c.policy))+`; cite the oversized task by its ID exactly as written in the file (e.g. 'T001'). FAIL any phase with more than ${MAX_PHASE_TASKS} tasks, citing the phase; it must be split into additional phases. ${PLAN_REVIEW_TESTING_RULE}`
+        ? "\nAdditionally, enforce the phase-observability contract on the tasks artifact: every '## Phase N' section must be implementable into at least one Git-observable file addition, modification, or deletion. FAIL the gate if any phase can produce no Git-observable file change — for example a phase whose only task is creating an empty directory (Git cannot represent empty directories, so such a phase could never be code-reviewed or verified), or a phase of only reads, checks, or planning notes with no persistent file output. Setup phases that modify observable files (package.json, configuration, source files, documentation) satisfy this contract and must not fail it. FAIL a single task that combines building a new design/helper AND wiring it into a large file — such build-then-wire work must be two tasks (build, then wire); cite the oversized task by its ID exactly as written in the file (e.g. 'T001'). "+taskSizeReviewText(resolveTaskSizeTargetTurns(c.policy))+`; cite the oversized task by its ID exactly as written in the file (e.g. 'T001'). FAIL any phase with more than ${resolveMaxPhaseTasks(c.policy)} tasks, citing the phase; it must be split into additional phases. A phase with fewer than ${resolveMinPhaseTasks(c.policy)} tasks that could join a neighbouring related phase (staying within ${resolveMaxPhaseTasks(c.policy)} tasks, order unchanged) goes in "notes", never in "findings". ${PLAN_REVIEW_TESTING_RULE}${speckitAnalyzeGateText(speckit.analyzeCommandFile(repo))}`
         : "";
       const planReviewerTaskRef=planningScopeParts("speckit","plan_reviewer").taskRef;
       const planReviewerContScope=planningScopeParts("speckit","plan_reviewer").contScope;
@@ -6568,6 +6719,11 @@ async function runSpecKitPlanning(c,s,request,opts={}){
           // Item 6: this uncapped run produced a verdict, so the reviewer's
           // continuation allowance starts fresh on the next gate review.
           if(result.review) clearPlanningContinuationScope(s,planReviewerContScope);
+          if(String(step.id||"").includes("tasks") && result.review){
+            const {review: demoted, moved}=demoteLowSeverityFindings(result.review);
+            result.review=demoted;
+            if(moved>0) console.log(`  [autopilot] ${moved} MEDIUM/LOW finding(s) moved to notes`);
+          }
           return result;
         }
       };
@@ -6813,6 +6969,7 @@ Return PASS or FAIL with findings.`;
         clearHandoffNote(s.mission,planReviewerTaskRef);
         return retry;
       }
+      recordPlanPassNotes(s,speckitStageFeedbackKey(gateStage),rr.review?.notes);
       clearPlanReviewConfirmation(s,gateKey);
       clearPlanReviewRevisions(s,gateKey);
       // Reached only when this gate passed — on the first attempt or after a
@@ -7046,6 +7203,7 @@ async function runGsdPlanning(c,s,request){
       if(rr.review?.decision==="PASS"){
         if(!s.planningCheckpoints)s.planningCheckpoints={};
         s.planningCheckpoints[checkpointKey]={status:"passed",stage,phase,at:now()};
+        recordPlanPassNotes(s,notesKey,rr.review?.notes);
         clearPlanReviewHistory(s,notesKey);
         saveState(s);
         break;
@@ -7119,6 +7277,7 @@ async function runGsdPlanning(c,s,request){
         // Mission 031 Phase 3 task 3.5: INCOMPLETE-as-FAIL (no continuation): gsd-plan-final-review has no continuation allowance — an INCOMPLETE decision is treated as FAIL with explicit reason and never consumes a continuation.
         if(finalReview.review?.decision==="INCOMPLETE") console.log(`GSD phase ${phase} plan final review INCOMPLETE treated as FAIL (no continuation).`);
         if(finalReview.review?.decision==="PASS"){
+          recordPlanPassNotes(s,finalNotesKey,finalReview.review?.notes);
           clearPlanReviewHistory(s,finalNotesKey);
           saveState(s);
           break;
@@ -7545,7 +7704,7 @@ function recordGsdUnitFailure(c,localState,unitLabel,results,gate,failureRecords
   failureRecords.push(deriveGsdUnitResetRecord({budgetsBefore,resetBefore,localState,recorded}));
   return recorded;
 }
-async function runGsdPlanUnit(c,s,phase,u,waveBaseSha,snapshot){
+async function runGsdPlanUnit(c,s,phase,u,waveBaseSha,snapshot,isFirstOfPhase=false){
   const wt=createWorktree(`phase-${phase}-wave-${u.wave}-${path.basename(u.planId,".md")}`,waveBaseSha);
   const localState=JSON.parse(JSON.stringify(s));
   localState.currentTask={phase,plan:u.planId,name:u.planId,wave:u.wave};
@@ -7561,10 +7720,11 @@ async function runGsdPlanUnit(c,s,phase,u,waveBaseSha,snapshot){
       localState.phase="implementing";localState.step="implement";
       localState.gsdPhase=phase;localState.feedback=feedback;localState.attempt=attempt;
 
+      const passNotes=firstGsdUnitPassNotes(localState,phase,{isFirstOfPhase,attempt});
       const taskRequirements=u.tasks.flatMap(task=>task.requiredCapabilities||[]);
       const taskFacts=mergeTaskFacts(u.tasks);
       const impl=await relayAsync("implementer",
-        buildPlanPrompt(phase,u)+(feedback?`\n\nPREVIOUS FAILURE:\n${feedback}`:""),
+        buildPlanPrompt(phase,u)+(passNotes?`\n\n${passNotes}`:"")+(feedback?`\n\nPREVIOUS FAILURE:\n${feedback}`:""),
         c,localState,{cwd:wt,resume:attempt>1 || !!roleSession(localState,"implementer"),persistState:false,requirements:taskRequirements,taskFacts,capEnabled:true});
 
       // Code Review gates everything else: no gate command, task.verify
@@ -7681,7 +7841,7 @@ function applyPatchCheckInCwd(cwd,patch){
 function applyPatchInCwd(cwd,patch){
   return spawnSync("git",["apply","--whitespace=nowarn","-"],{cwd,encoding:"utf8",input:patch,shell:false});
 }
-async function executeWave(c,s,phase,waveUnits,waveNumber){
+async function executeWave(c,s,phase,waveUnits,waveNumber,isFirstWave=false){
   // Re-snapshot at the start of every wave so later waves include all prior
   // successful work. The commit SHA usually stays unchanged because Autopilot
   // never commits, but keeping a per-wave baseline avoids stale assumptions.
@@ -7693,9 +7853,11 @@ async function executeWave(c,s,phase,waveUnits,waveNumber){
   for(let i=0;i<waveUnits.length;i+=pc.maxConcurrent)chunks.push(waveUnits.slice(i,i+pc.maxConcurrent));
 
   const results=[];
+  let chunkIdx=0;
   for(const chunk of chunks){
-    const batch=canParallel ? await Promise.all(chunk.map(u=>runGsdPlanUnit(c,s,phase,u,waveBaseSha,snapshot)))
-                            : [await runGsdPlanUnit(c,s,phase,chunk[0],waveBaseSha,snapshot)];
+    const batch=canParallel ? await Promise.all(chunk.map((u,idx)=>runGsdPlanUnit(c,s,phase,u,waveBaseSha,snapshot,isFirstWave&&chunkIdx===0&&idx===0)))
+                            : [await runGsdPlanUnit(c,s,phase,chunk[0],waveBaseSha,snapshot,isFirstWave&&chunkIdx===0)];
+    chunkIdx++;
     results.push(...batch);
 
     for(const record of batch.flatMap(result=>result.failureRecords||[])){
@@ -7761,16 +7923,18 @@ async function runGsdPhase(c,s,phase){
   const units=planUnits(tasks);
   const waves=waveGroups(units);
 
+  let waveIdx=0;
   for(const [waveNumber,waveUnits] of waves){
     const checkpoint=s.checkpoint;
     const alreadyCompleted=checkpoint?.type==="gsd-wave" &&
       checkpoint.phase===phase && Number(checkpoint.wave)>=Number(waveNumber);
-    if(alreadyCompleted)continue;
+    if(alreadyCompleted){waveIdx++;continue;}
     s.phase="wave";s.step=`wave-${waveNumber}`;s.gsdPhase=phase;
     s.currentWave={phase,wave:waveNumber,plans:waveUnits.map(u=>u.planId)};
     saveState(s);
 
-    const result=await executeWave(c,s,phase,waveUnits,waveNumber);
+    const result=await executeWave(c,s,phase,waveUnits,waveNumber,waveIdx===0);
+    waveIdx++;
     if(!result.ok){
       s.phase="escalated";s.step="human_merge";
       s.conflict=result.conflict||null;saveState(s);
@@ -8531,7 +8695,8 @@ async function runStandaloneImplementation(c,s){
            // Mission 093 Part 1 task 2.3: the run scope owning this attempt's
            // session number (continuation-budget used at launch + 1).
 const operatorNote=operatorPhaseNoteLine(s);
-const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings}${resumeNote}${autoRejectNote}${anchoredTestsNote?`\n\n${anchoredTestsNote}`:""}${operatorNote?`\n\n${operatorNote}`:""}`,c,s,{resume:false,requirements:phaseRequirements,timeoutMs:perTaskLimits.perTaskTimeoutMs,taskRef:taskDisplayRef(phaseTasks[taskIndex],taskIndex),capEnabled:true,contScope:`task:standalone:phase-${s.phaseIndex}:${taskId}`,carriedForwardTasks:[...carriedTasks]});
+const passNotes=firstTaskPassNotes(s,{taskIndex,attempts:checkpoint?.attempts?.implementer??0,completedTaskIds:checkpoint?.roleProgress?.implementer?.completedTaskIds});
+const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings}${resumeNote}${autoRejectNote}${anchoredTestsNote?`\n\n${anchoredTestsNote}`:""}${operatorNote?`\n\n${operatorNote}`:""}${passNotes?`\n\n${passNotes}`:""}`,c,s,{resume:false,requirements:phaseRequirements,timeoutMs:perTaskLimits.perTaskTimeoutMs,taskRef:taskDisplayRef(phaseTasks[taskIndex],taskIndex),capEnabled:true,contScope:`task:standalone:phase-${s.phaseIndex}:${taskId}`,carriedForwardTasks:[...carriedTasks]});
             impl=taskImpl;
             // Mission 093 Part 1 task 3.4: capture git diff --stat after implementer attempt
             if (missionDir) {
@@ -9317,6 +9482,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           }
           if(!gateLogText.trim()&&typeof g.tail==="string"&&g.tail) gateLogText=g.tail;
           const parsed=parseGateFailures(gateLogText);
+          const gateFailures=parsed.failures.map(f=>({...f,file:resolveGateTestFile({repo,file:f.file})}));
           let phaseDeltaFiles=[];
           try{
             phaseDeltaFiles=scopedDeltaChunks(repo,phaseBaselineKey,{mission,declaredPaths}).map(c=>c.path);
@@ -9330,17 +9496,17 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           // that reads/greps a delta file as source text, or whose failure
           // output names one, is phase-related (implementer fix round).
           const gateTestSources={};
-          for(const f of parsed.failures){
+          for(const f of gateFailures){
             try{ gateTestSources[f.file]=fs.readFileSync(path.resolve(repo,f.file),"utf8"); }catch{}
           }
-          const locality=classifyGateFailures({failingFiles:parsed.failures.map(f=>f.file),phaseDeltaFiles,truncated:parsed.truncated,testSources:gateTestSources,failureText:gateLogText});
+          const locality=classifyGateFailures({failingFiles:gateFailures.map(f=>f.file),phaseDeltaFiles,truncated:parsed.truncated,testSources:gateTestSources,failureText:gateLogText});
           // Import locality (#20): a failing test that imports a phase-changed
           // file — directly or through one local module — is phase-related even
           // when the test file itself is outside the delta. Read only the
           // failing files, bounded to two import levels.
           let importLocality=null;
           if(locality.allOutsideDelta){
-            for(const f of parsed.failures){
+            for(const f of gateFailures){
               const found=importsDeltaFile({
                 testPath:f.file,
                 deltaPaths:phaseDeltaChangedFiles,
@@ -9367,7 +9533,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
               baselineCheck=await checkGateBaseline({
                 repo,
                 baselineKey:phaseBaselineKey,
-                failures:parsed.failures,
+                failures:gateFailures,
               });
             }catch(error){
               baselineCheck={outcome:"error",error:String(error?.message??error)};
@@ -10285,7 +10451,8 @@ async function runImplementation(c){
         // Mission 093 Part 1 task 2.3: the run scope owning this attempt's
         // session number (continuation-budget used at launch + 1).
 const operatorNote=operatorPhaseNoteLine(s);
-const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings}${resumeNote}${autoRejectNote}${operatorNote?`\n\n${operatorNote}`:""}`,c,s,{resume:false,requirements:phaseRequirements,timeoutMs:perTaskLimits.perTaskTimeoutMs,taskRef:taskDisplayRef(phaseTasks[taskIndex],taskIndex),capEnabled:true,contScope:`task:speckit:phase-${s.phaseIndex}:${taskId}`,carriedForwardTasks:[...carriedTasks]});
+const passNotes=firstTaskPassNotes(s,{taskIndex,attempts:checkpoint?.attempts?.implementer??0,completedTaskIds:checkpoint?.roleProgress?.implementer?.completedTaskIds});
+const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings}${resumeNote}${autoRejectNote}${operatorNote?`\n\n${operatorNote}`:""}${passNotes?`\n\n${passNotes}`:""}`,c,s,{resume:false,requirements:phaseRequirements,timeoutMs:perTaskLimits.perTaskTimeoutMs,taskRef:taskDisplayRef(phaseTasks[taskIndex],taskIndex),capEnabled:true,contScope:`task:speckit:phase-${s.phaseIndex}:${taskId}`,carriedForwardTasks:[...carriedTasks]});
           impl=taskImpl;
           // Mission 093 Part 1 task 3.4: capture git diff --stat after implementer attempt
           if (missionDir) {
@@ -11362,7 +11529,9 @@ async function main(){
           const verdict=guardStage(parsed.stage,{state:s,checkpoint:s[CHECKPOINT_STATE_KEY]??null,request:parsed.request});
           if(!verdict.allowed) die(verdict.reason.startsWith("Usage error")?verdict.reason:`Usage error: ${verdict.reason}`);
         }
-        activeStage=parsed.stage??null;
+        const resumeStage=resumeStageFor(s,{request:parsed.request,stage:parsed.stage});
+        if(resumeStage) console.log("Resuming as `ap plan` (this mission was started with ap plan; it stops after planning). To implement, run `ap run` again once planning is done.");
+        activeStage=parsed.stage??resumeStage??null;
         return await runImplementation(c);
       }
       if(command==="full"){

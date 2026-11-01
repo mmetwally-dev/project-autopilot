@@ -36,15 +36,29 @@ export function decideEscalationName({failureClass, retryable, used, limit, budg
     if (failureClass === "RATE_LIMITED") {
       let provider = null;
       let model = null;
+      let balanceExhausted = false;
       if (Array.isArray(evidence)) {
         for (const entry of evidence) {
           if (!entry || typeof entry !== "object") continue;
           if (provider == null && typeof entry.provider === "string" && entry.provider !== "") provider = entry.provider;
           if (model == null && typeof entry.model === "string" && entry.model !== "") model = entry.model;
-          if (provider != null && model != null) break;
+          // Backlog #15: kept as a literal because this module is deliberately
+          // import-free; the value is PROVIDER_BALANCE_REASON in
+          // idle-hang-watchdog.mjs.
+          if (entry.reason === "provider_balance_exhausted") balanceExhausted = true;
         }
       }
       const where = [provider, model].filter(Boolean).join("/");
+      // A paid balance never refills by waiting, so the resume instruction
+      // must be top-up/switch-model, never "after the limit lifts".
+      if (balanceExhausted) {
+        const providerName = provider || "provider";
+        const named = where !== "" ? ` (${where})` : "";
+        return {
+          step: "rate_limited_escalation",
+          detail: `RATE_LIMITED is not retryable${named} — the provider's paid balance is exhausted; top up the ${providerName} balance, or switch the role to another model (\`ap config\`), then \`ap run\``,
+        };
+      }
       const detail = where !== ""
         ? `RATE_LIMITED is not retryable (${where}); resume with \`ap run\` after the limit lifts`
         : "RATE_LIMITED is not retryable; resume with `ap run` after the limit lifts";
@@ -67,6 +81,14 @@ export function decideEscalationName({failureClass, retryable, used, limit, budg
       }
       const cli = adapter || "the CLI";
       const why = reason ? ` (${reason})` : "";
+      // Backlog #12(b): a provider-key rejection in OpenCode is not a generic
+      // logout — name the bad/expired key and OpenCode's own re-auth commands.
+      if (adapter === "opencode") {
+        return {step: "auth_required_escalation", detail: `opencode is not authenticated${why} — the provider key in the OpenCode CLI is invalid or expired; run \`opencode auth logout\` then \`opencode auth login\`, then \`ap run\``};
+      }
+      if (reason === "provider_key_invalid") {
+        return {step: "auth_required_escalation", detail: `the provider key in ${cli} is invalid or expired${why} — re-authenticate the CLI (for OpenCode: \`opencode auth logout\` then \`opencode auth login\`) and then \`ap run\``};
+      }
       return {step: "auth_required_escalation", detail: `${cli} is logged out${why} — run \`${cli}\` and log in, then \`ap run\``};
     }
     return {step: "non_retryable_failure", detail: `${failureClass} is not retryable`};

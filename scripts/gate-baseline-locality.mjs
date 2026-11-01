@@ -30,6 +30,29 @@ import {runBoundedInheritedProcess} from "./bounded-process-tree.mjs";
 export const GATE_BASELINE_MAX_FILES = 5;
 export const GATE_BASELINE_TIMEOUT_MS = 10 * 60 * 1000;
 
+// Resolve bare test file names to their unique tracked repository path.
+export function resolveGateTestFile({
+  repo,
+  file,
+  exists = (p) => fs.existsSync(p),
+  listTracked = () => {
+    try {
+      const res = spawnSync("git", ["ls-files"], {cwd: repo, encoding: "utf8", shell: false});
+      if (res.status !== 0 || !res.stdout) return [];
+      return res.stdout.split(/\r?\n/).filter(Boolean);
+    } catch {
+      return [];
+    }
+  },
+}) {
+  if (typeof file !== "string" || !file) return file;
+  if (exists(path.resolve(repo, file))) return file;
+  if (file.includes("/") || file.includes("\\")) return file;
+  const matches = (listTracked() || []).filter((p) => path.posix.basename(p) === file);
+  if (matches.length === 1) return matches[0];
+  return file;
+}
+
 function isInside(root, target) {
   const rel = path.relative(path.resolve(root), path.resolve(target));
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
@@ -112,8 +135,11 @@ export function materializePhaseBaseline({repo, baselineKey, dest}) {
 }
 
 // Run one test file in the baseline copy. Injection point for tests.
-export function runBaselineTest({cwd, file, timeoutMs, spawnFn = spawn, runFn = runBoundedInheritedProcess}) {
-  return runFn(
+export async function runBaselineTest({cwd, file, timeoutMs, spawnFn = spawn, runFn = runBoundedInheritedProcess}) {
+  if (!fs.existsSync(path.resolve(cwd, file))) {
+    return {passed: false, missing: true, timedOut: false, status: null, error: null};
+  }
+  const result = await runFn(
     spawnFn,
     process.execPath,
     [file],
@@ -123,12 +149,13 @@ export function runBaselineTest({cwd, file, timeoutMs, spawnFn = spawn, runFn = 
       deadlineMs: timeoutMs,
       stdio: "ignore",
     },
-  ).then((result) => ({
+  );
+  return {
     passed: result?.status === 0 && !result?.timedOut && !result?.terminationFailed && !result?.error,
     timedOut: result?.timedOut === true,
     status: result?.status ?? null,
     error: result?.error ?? null,
-  }));
+  };
 }
 
 function positiveTimeout(value, fallback) {
@@ -194,6 +221,9 @@ export async function checkGateBaseline({
       const result = await runTest({cwd: dest, file, timeoutMs});
       const passed = result === true || result?.passed === true;
       attempts.push({file, passed, timeoutMs});
+      if (result?.missing === true) {
+        return {outcome: "error", error: `test file not found in the baseline copy: ${file}`, attempts};
+      }
       if (passed) return {outcome: "pass", passingFile: file, attempts};
     } catch (error) {
       attempts.push({file, passed: null, error: String(error?.message ?? error)});

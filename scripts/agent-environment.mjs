@@ -47,6 +47,38 @@ import {SAFE_ENV_NAMES} from "./relay-guards.mjs";
 export const AGENT_ENVIRONMENT_SCHEMA = "autopilot-agent-environment.v2";
 export const AGENT_ENVIRONMENT_AUTHORITY_SCHEMA = "autopilot-agent-environment-authority.v2";
 
+// Backlog #14 follow-up: XDG base-directory variables are LOCATIONS, not
+// secrets. A native (unenveloped) adapter launch must observe the operator's
+// configured XDG roots: OpenCode 2 installed under XDG_DATA_HOME=~/.opencode2/
+// xdg/data keeps its credential database there, so stripping these variables
+// makes a native v2 process look in ~/.local/share/opencode and fail with
+// PROVIDER_ERROR provider.no-route "Model unavailable".
+//
+// This list is deliberately NOT added to relay-guards.mjs SAFE_ENV_NAMES: that
+// allowlist feeds the gate/test-command environment (createGateShell ->
+// guardedCommandEnv), which must stay byte-for-byte unchanged. It is applied
+// only by assembleAgentEnvironment for the native branch below; enveloped
+// launches drop every host XDG_* path (execution-envelope.mjs) because the
+// sandbox has its own HOME/view and a host path would make v2 write there
+// (EROFS) or read a location that is not mounted.
+export const NATIVE_AGENT_LOCATION_ENV_NAMES = Object.freeze([
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME"
+]);
+
+// Extract only the operator's set XDG location values. Pure: reads the
+// supplied environment (process.env by default) and never mutates it.
+export function nativeAgentLocationEnvironment(environment = process.env) {
+  const out = {};
+  for (const name of NATIVE_AGENT_LOCATION_ENV_NAMES) {
+    const value = environment?.[name];
+    if (typeof value === "string" && value) out[name] = value;
+  }
+  return out;
+}
+
 // Canonical authority literals. Any change here is a deliberate
 // B2 authority/fingerprint revision.
 const PROVIDER_PROXY_URL = `http://127.0.0.1:${PROVIDER_PROXY_PORT}`;
@@ -200,6 +232,10 @@ function projectSafeVariables(effectiveEnv) {
 //       false => controlled egress is inactive; the eight bridge proxy
 //                variables MUST NOT appear in effectiveEnv, even if
 //                they exist in the parent ambient environment.
+//   - hostEnv: the operator's ambient environment (process.env by default),
+//       read ONLY on the native (no envelope) branch to preserve the XDG
+//       base-directory locations OpenCode 2 needs. Enveloped launches never
+//       receive host XDG_* values; mapEnvironmentIntoEnvelope drops them.
 //
 // This function is intentionally side-effect-free: it must NOT create run
 // dirs, scratch dirs, Git guards, envelopes, gateway instances, or any
@@ -210,7 +246,8 @@ export function assembleAgentEnvironment({
   repo = null,
   scratchDir = null,
   adapterRoleScratchExists = false,
-  gatewayActive = false
+  gatewayActive = false,
+  hostEnv = process.env
 } = {}) {
   if (guardedEnv == null || typeof guardedEnv !== "object") {
     throw new Error("assembleAgentEnvironment: guardedEnv is required");
@@ -228,10 +265,13 @@ export function assembleAgentEnvironment({
   // PATH guard prefix, etc.) and must be rewritten to sandbox equivalents.
   // The envelope is honored if available; otherwise the bare guardedEnv is
   // returned (this preserves the long-standing production behavior in
-  // environments where an envelope is unavailable).
+  // environments where an envelope is unavailable), plus the operator's XDG
+  // base-directory locations. guardedEnv's filteredProcessEnv deliberately
+  // excludes XDG_*, and the native process must still find an OpenCode 2
+  // install/credential store kept under a non-default XDG_DATA_HOME.
   const spawnEnv = envelope?.available
     ? mapEnvironmentIntoEnvelope(guardedEnv, envelope, repo, scratchDir)
-    : {...guardedEnv};
+    : {...guardedEnv, ...nativeAgentLocationEnvironment(hostEnv)};
   // bridgeEnv: spawnEnv plus the bwrap --setenv overlay.
   const setenvOverlay = envelope?.available ? parseSetenvOverlay(envelope.args) : {};
   const bridgeEnv = applyOverlay(spawnEnv, setenvOverlay);

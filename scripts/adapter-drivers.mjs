@@ -9,7 +9,7 @@ import {equivalentEventPath, eventReferencesPath} from "./event-paths.mjs";
 import {decodeAgyEvents, observeAgyEvents, accumulateAgyUsage, agyRunModelPatch, writeAgyAllowRule} from "./agy-events.mjs";
 import {resolveRunModel} from "./model-extract.mjs";
 import {updateRunModel} from "./run-observability.mjs";
-import {FREE_QUOTA_REASON, OPENCODE_TITLE_MODEL_LINE_RE} from "./idle-hang-watchdog.mjs";
+import {FREE_QUOTA_REASON, PROVIDER_BALANCE_REASON, OPENCODE_TITLE_MODEL_LINE_RE} from "./idle-hang-watchdog.mjs";
 import {detectOpenCodeGeneration, splitOpenCodeModelSuffix} from "./opencode-generation.mjs";
 
 const DRIVERS = Object.freeze({
@@ -283,7 +283,14 @@ function observeOpenCodeEvents(events, probe = {}) {
 // line must come from stderr, so model prose or tool output containing the
 // same words never matches.
 const OPENCODE_FREE_QUOTA_MESSAGE = /free usage limit reached|usage limit reached|insufficient[_\s-]?quota|quota[_\s-]?(?:exceeded|exhausted)|subscribe to [^\n]{0,80}to keep going/i;
-const OPENCODE_RATE_LIMIT_MESSAGE = new RegExp(`rate[_\\s]limit[_\\s]exceeded|endpoint is unavailable|insufficient account funds|${OPENCODE_FREE_QUOTA_MESSAGE.source}`, "i");
+// Backlog #15: paid-balance/credit exhaustion is the same RATE_LIMITED class
+// but a different operator action (top up; waiting never refills it). Checked
+// BEFORE the free-quota pattern: the real 2.2.0 line ends in
+// `AI.Error.QuotaExceeded: Insufficient Balance`, whose "QuotaExceeded" would
+// otherwise match the free-quota regex. HTTP 402 / "Payment Required" are the
+// provider's own insufficient-credit signals.
+const OPENCODE_PROVIDER_BALANCE_MESSAGE = /insufficient[\s_-]?balance|insufficient[_\s-]?account funds|insufficient[_\s-]?credits?|credit balance is too low|payment required|(?:status(?:_?code)?|http(?:\/[0-9.]+)?)[=:"'\s-]*402\b/i;
+const OPENCODE_RATE_LIMIT_MESSAGE = new RegExp(`rate[_\\s]limit[_\\s]exceeded|endpoint is unavailable|${OPENCODE_PROVIDER_BALANCE_MESSAGE.source}|${OPENCODE_FREE_QUOTA_MESSAGE.source}`, "i");
 const OPENCODE_PROVIDER_ERROR_SOURCE = /AI_APICallError|AI_RetryError/;
 // 2.x's own logfmt ERROR lines are engine-level diagnostics too, but they do
 // not spell the 1.x AI SDK error class. The structural marker (server role or
@@ -304,8 +311,11 @@ function detectOpenCodeRateLimited(events) {
       // completed run must never be reclassified RATE_LIMITED from one.
       if (OPENCODE_TITLE_MODEL_LINE_RE.test(text)) continue;
       if (!openCodeEngineErrorLine(text) || !OPENCODE_RATE_LIMIT_MESSAGE.test(text)) continue;
+      const balance = OPENCODE_PROVIDER_BALANCE_MESSAGE.test(text);
       observations.push(observation("rate_limited", event, {
-        reason: OPENCODE_FREE_QUOTA_MESSAGE.test(text) ? FREE_QUOTA_REASON : "opencode_stderr_rate_limit",
+        reason: balance
+          ? PROVIDER_BALANCE_REASON
+          : OPENCODE_FREE_QUOTA_MESSAGE.test(text) ? FREE_QUOTA_REASON : "opencode_stderr_rate_limit",
         message: text.slice(0, 200),
       }));
       continue;
@@ -313,12 +323,18 @@ function detectOpenCodeRateLimited(events) {
     if (event.type !== "error") continue;
     const err = event.error && typeof event.error === "object" ? event.error : {};
     const data = err.data && typeof err.data === "object" ? err.data : {};
-    const status = Number(data.statusCode ?? err.statusCode);
+    // 2.x puts the HTTP status on error.status (real 2.2.0 balance event),
+    // 1.x on error.data.statusCode; accept every observed spelling.
+    const status = Number(data.statusCode ?? err.statusCode ?? err.status);
     const message = String(data.message ?? err.message ?? "");
-    if (status === 429 || OPENCODE_RATE_LIMIT_MESSAGE.test(message)) {
+    if (status === 402 || status === 429 || OPENCODE_RATE_LIMIT_MESSAGE.test(message)) {
+      // Balance first: a 402, or the provider's own balance/credit wording.
+      const balance = status === 402 || OPENCODE_PROVIDER_BALANCE_MESSAGE.test(message);
       const freeQuota = OPENCODE_FREE_QUOTA_MESSAGE.test(message);
       observations.push(observation("rate_limited", event, {
-        reason: freeQuota ? FREE_QUOTA_REASON : status === 429 ? "api_error_status_429" : "opencode_error_message",
+        reason: balance
+          ? PROVIDER_BALANCE_REASON
+          : freeQuota ? FREE_QUOTA_REASON : status === 429 ? "api_error_status_429" : "opencode_error_message",
       }));
     }
   }

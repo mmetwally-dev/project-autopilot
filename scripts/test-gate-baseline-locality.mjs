@@ -9,6 +9,8 @@ import {fileURLToPath} from "node:url";
 import {
   GATE_BASELINE_MAX_FILES,
   checkGateBaseline,
+  resolveGateTestFile,
+  runBaselineTest,
 } from "./gate-baseline-locality.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -103,6 +105,103 @@ async function main() {
     const result = await checkGateBaseline({repo, baselineKey: "", failures: failures(1), scratchRoot: scratch});
     assert.equal(result.outcome, "error");
     assert.equal(result.attempts.length, 0);
+  }
+
+  // Backlog #5: resolveGateTestFile resolutions.
+  {
+    let listCalled = false;
+    const r1 = resolveGateTestFile({
+      repo: "/fake/repo",
+      file: "scripts/test-a.mjs",
+      exists: (p) => p === path.resolve("/fake/repo", "scripts/test-a.mjs"),
+      listTracked: () => { listCalled = true; return []; },
+    });
+    assert.equal(r1, "scripts/test-a.mjs");
+    assert.equal(listCalled, false, "listTracked is not called when file exists");
+
+    const r2 = resolveGateTestFile({
+      repo: "/fake/repo",
+      file: "test-config-schema.mjs",
+      exists: () => false,
+      listTracked: () => ["package.json", "scripts/test-config-schema.mjs", "src/index.js"],
+    });
+    assert.equal(r2, "scripts/test-config-schema.mjs");
+
+    const r3 = resolveGateTestFile({
+      repo: "/fake/repo",
+      file: "test-duplicate.mjs",
+      exists: () => false,
+      listTracked: () => ["scripts/test-duplicate.mjs", "tests/test-duplicate.mjs"],
+    });
+    assert.equal(r3, "test-duplicate.mjs");
+
+    const r4 = resolveGateTestFile({
+      repo: "/fake/repo",
+      file: "test-missing.mjs",
+      exists: () => false,
+      listTracked: () => ["scripts/test-config-schema.mjs"],
+    });
+    assert.equal(r4, "test-missing.mjs");
+
+    let searched = false;
+    const r5 = resolveGateTestFile({
+      repo: "/fake/repo",
+      file: "nonexistent/test-a.mjs",
+      exists: () => false,
+      listTracked: () => { searched = true; return ["scripts/test-a.mjs"]; },
+    });
+    assert.equal(r5, "nonexistent/test-a.mjs");
+    assert.equal(searched, false, "name containing '/' is never searched");
+  }
+
+  // Backlog #5: runBaselineTest with missing file returns missing:true without spawning.
+  {
+    const spawned = [];
+    const result = await runBaselineTest({
+      cwd: scratch,
+      file: "nonexistent-test.mjs",
+      timeoutMs: 1000,
+      spawnFn: (...args) => { spawned.push(args); },
+    });
+    assert.equal(result.missing, true);
+    assert.equal(result.passed, false);
+    assert.equal(spawned.length, 0, "spawnFn was never called");
+  }
+
+  // Backlog #5: checkGateBaseline with missing file returns error, not all-fail.
+  {
+    const result = await checkGateBaseline({
+      repo,
+      baselineKey: "key",
+      failures: [{file: "scripts/test-missing.mjs"}],
+      scratchRoot: scratch,
+      makeId: () => "missing-test",
+      materialize: async ({dest}) => fs.mkdirSync(dest, {recursive: true}),
+      runTest: async () => ({passed: false, missing: true}),
+    });
+    assert.equal(result.outcome, "error");
+    assert.match(result.error, /test file not found in the baseline copy: scripts\/test-missing\.mjs/);
+    assert.equal(result.attempts.length, 1);
+    assert.equal(result.attempts[0].file, "scripts/test-missing.mjs");
+    assert.equal(result.attempts[0].passed, false);
+  }
+
+  // Backlog #5: mission 102 end-to-end regression.
+  {
+    const tempDir = path.join(scratch, "e2e-mission-102");
+    fs.mkdirSync(path.join(tempDir, "scripts"), {recursive: true});
+    const testScript = path.join(tempDir, "scripts", "test-x.mjs");
+    fs.writeFileSync(testScript, "process.exit(0);\n");
+
+    const passRes = await runBaselineTest({cwd: tempDir, file: "scripts/test-x.mjs", timeoutMs: 5000});
+    assert.equal(passRes.passed, true);
+    assert.equal(passRes.missing, undefined);
+
+    const missingRes = await runBaselineTest({cwd: tempDir, file: "test-x.mjs", timeoutMs: 5000});
+    assert.equal(missingRes.missing, true);
+    assert.equal(missingRes.passed, false);
+
+    fs.rmSync(tempDir, {recursive: true, force: true});
   }
 
   cleanup();

@@ -133,7 +133,9 @@ try {
     ].join("\n"));
     const okBin = makeBin("ok-opencode", okScript);
 
-    const result = await discoverModelCatalog({binary: okBin, model_discovery: "opencode_models"});
+    // Success case: generous explicit budget so machine load cannot turn it into an empty catalog
+    // (the short AP_MODEL_DISCOVERY_TIMEOUT_MS above is only for the timeout/hang cases).
+    const result = await discoverModelCatalog({binary: okBin, model_discovery: "opencode_models"}, {timeoutMs: 30000});
     assert.ok(Array.isArray(result), "successful discovery must return an array");
     assert.ok(result.length >= 1, "successful discovery must return models");
     assert.equal(result[0].id, "provider/good-model");
@@ -167,7 +169,7 @@ try {
     ].join("\n"));
     const codexBin = makeBin("codex-objects", codexScript);
 
-    const result = await discoverModelCatalog({binary: codexBin, model_discovery: "codex_app_server"});
+    const result = await discoverModelCatalog({binary: codexBin, model_discovery: "codex_app_server"}, {timeoutMs: 30000});
     assert.equal(result.length, 3, "must discover all 3 models");
 
     for (const model of result) {
@@ -253,7 +255,7 @@ try {
     ].join("\n"));
     const codexBin = makeBin("codex-persist", codexScript);
 
-    const catalog = await discoverModelCatalog({binary: codexBin, model_discovery: "codex_app_server"});
+    const catalog = await discoverModelCatalog({binary: codexBin, model_discovery: "codex_app_server"}, {timeoutMs: 30000});
     const model = catalog[0];
     const selectedReasoning = model.reasoning[1];
 

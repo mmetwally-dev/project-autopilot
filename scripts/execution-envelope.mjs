@@ -149,7 +149,7 @@ export function buildNetworkIsolationInvocation({binary, args = [], cwd}) {
   return {available: true, reason: null, binary: prefix[0], args: [...prefix.slice(1), binary, ...args.map(String)], cwd};
 }
 
-export function buildExecutionEnvelope({repo, scratchDir = null, readOnly = false, config = {}, binary, args = [], permissionFiles = [], runtimeFiles = [], providerEgressPolicy = null, browserCacheDir = null, extraLibraryDirs = [], playwrightModuleDir = null, playwrightBrowserRoot = null, sharedCacheMount = null, sharedCacheCompanionMount = null, extraEnv = {}, sessionStoreMounts = []}) {
+export function buildExecutionEnvelope({repo, scratchDir = null, readOnly = false, config = {}, binary, args = [], permissionFiles = [], runtimeFiles = [], providerEgressPolicy = null, browserCacheDir = null, extraLibraryDirs = [], playwrightModuleDir = null, playwrightBrowserRoot = null, sharedCacheMount = null, sharedCacheCompanionMount = null, extraEnv = {}, sessionStoreMounts = [], credentialDataMounts = []}) {
   const context = executionEnvelopeContext({repo, config, binaryPath: binary, permissionFiles, runtimeFiles, providerEgressPolicy});
   if (!context.mechanism.available) {
     return {available: false, reason: context.mechanism.reason, context, binary: null, args: [], cwd: repo, sandbox: null};
@@ -337,6 +337,26 @@ export function buildExecutionEnvelope({repo, scratchDir = null, readOnly = fals
   }
   for (const directory of parentDirectories(sessionStores.map(m => m.sandbox))) bwrapArgs.push("--dir", directory);
   for (const mount of sessionStores) bwrapArgs.push("--bind", mount.host, mount.sandbox);
+  // Backlog #14: a private, per-launch adapter data dir carrying only the
+  // provider credentials exported from the host (OpenCode 2 paid models).
+  // Same writable --bind shape as the session store above: the adapter must
+  // be able to use its own database, and the source is a fresh 0700 dir
+  // removed after the relay (or the implementer's persistent session store).
+  let credentialData = [];
+  for (const mount of (credentialDataMounts || [])) {
+    if (mount == null || typeof mount !== "object" || typeof mount.host !== "string" || typeof mount.sandbox !== "string") {
+      return {available: false, reason: "credential_data_mount_invalid", detail: "malformed credentialDataMounts entry", context, binary: null, args: [], cwd: repo, sandbox: null};
+    }
+    const check = validateAbsoluteRealDirectory(mount.host);
+    if (!check.ok) {
+      return {available: false, reason: "credential_data_mount_invalid", detail: `credentialDataMounts.host:${check.reason}`, context, binary: null, args: [], cwd: repo, sandbox: null};
+    }
+    if (check.canonical && fs.existsSync(check.canonical)) {
+      credentialData.push({host: check.canonical, sandbox: mount.sandbox});
+    }
+  }
+  for (const directory of parentDirectories(credentialData.map(m => m.sandbox))) bwrapArgs.push("--dir", directory);
+  for (const mount of credentialData) bwrapArgs.push("--bind", mount.host, mount.sandbox);
   // Mission 001 task 12 (generalized, per-file companion to the directory
   // mount above): an optional extra read-only FILE mount. Fully generic —
   // this function does not know what the file is or why the caller wants
@@ -393,7 +413,7 @@ export function buildExecutionEnvelope({repo, scratchDir = null, readOnly = fals
     binary: context.mechanism.binary,
     args: bwrapArgs,
     cwd: repository,
-    sandbox: {repository: "/workspace/repository", scratch: "/workspace/scratch", binary: sandboxBinary, providerEgress: null, browserCache: browserMounts, libraryMounts, playwrightModule, sharedCache, sharedCacheRg, sessionStores, extraEnv: extraEnv && typeof extraEnv === "object" ? {...extraEnv} : {}}
+    sandbox: {repository: "/workspace/repository", scratch: "/workspace/scratch", binary: sandboxBinary, providerEgress: null, browserCache: browserMounts, libraryMounts, playwrightModule, sharedCache, sharedCacheRg, sessionStores, credentialData, extraEnv: extraEnv && typeof extraEnv === "object" ? {...extraEnv} : {}}
   };
 }
 
@@ -420,6 +440,15 @@ export function mapEnvironmentIntoEnvelope(environment, envelope, repo, scratchD
   const mapped = {};
   for (const [name, raw] of Object.entries(environment || {})) {
     if (raw == null) continue;
+    // Backlog #14 follow-up: XDG base-directory variables are host LOCATIONS.
+    // The sandbox has a fresh HOME and a read-only host view, so forwarding a
+    // host XDG_* value would make OpenCode 2 write to an unmapped/read-only
+    // host path (EROFS) or read a credential store that is not mounted.
+    // Dropping all of them lets the adapter fall back to SANDBOX_HOME (set
+    // below), which is where session stores and the adapter's credential
+    // data dir are mounted. The native branch of
+    // assembleAgentEnvironment keeps them; only the enveloped branch drops.
+    if (name.toUpperCase().startsWith("XDG_")) continue;
     if (name.toLowerCase() === "path") {
       mapped[name] = String(raw).split(path.delimiter).map(entry => mapPathIntoEnvelope(entry, envelope, repo, scratchDir)).join(path.delimiter);
       continue;

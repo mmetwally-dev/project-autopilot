@@ -37,7 +37,7 @@ const wf=`- id: specify\n  type: command\n  command: specify\n- id: review-spec\
   write(path.join(r,"specs/01/tasks.md"),"- [ ] Task A\n");
   const state=specKitState(r,speckit.inspect(r),["specs/*/tasks.md"]);
   assert(state.status==="complete","SpecKit complete state failed");
-  assert(state.entryIndex===5,"SpecKit complete should enter execution");
+  assert(state.entryIndex===6,"SpecKit complete should enter execution");
 }
 // GSD: brand-new roadmap phase -> start planning from discuss.
 {
