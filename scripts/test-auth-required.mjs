@@ -222,7 +222,7 @@ function makeConfig() {
     roles: {planner: claudeRole, plan_reviewer: claudeRole, implementer: claudeRole, code_reviewer: claudeRole, verifier: claudeRole},
     workflow: {
       specReview: true, planReview: true, analysisAfterTasks: true, implementationReview: true, finalReview: true,
-      autoApproveSpec: false, autoApprovePlan: false, parallelIndependentTasks: false, gsdPlanningReview: false,
+      autoApproveSpec: false, autoApprovePlan: false, parallelIndependentTasks: false, gsdPlanningReview: false, standaloneSpec: false,
       relaySafety: {block_git_commit_push: true, verify_read_only_by_snapshot: true, capture_touched_files: true, persist_role_sessions: true}
     },
     gates: {commands: [], env_allowlist: [], require_reviewer: true, network_isolation: true},

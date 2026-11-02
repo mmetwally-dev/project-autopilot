@@ -23,6 +23,7 @@ const expectedMinimums = {
   "caps.min_phase_tasks": 1,
   "caps.mission_token_backstop": 1,
   "retries.plan_revisions": 0,
+  "retries.spec_revisions": 0,
   "retries.implementation": 0,
   "retries.verification": 0,
   "retries.final_review_fix_rounds": 1,

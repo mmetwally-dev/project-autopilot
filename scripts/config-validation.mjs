@@ -537,6 +537,7 @@ const LEGACY_KEY_TARGETS = {
     min_phase_tasks: "caps.min_phase_tasks",
     backstop_raw_tokens: "caps.mission_token_backstop",
     max_plan_revisions: "retries.plan_revisions",
+    max_spec_revisions: "retries.spec_revisions",
     no_progress_generations: "retries.no_progress_sessions",
     final_review_fix_rounds: "retries.final_review_fix_rounds",
     free_model_turns_cap: "roles.free_models.max_turns",
@@ -609,6 +610,7 @@ const CAPS_TOP_KEYS = new Set(["task_size_target_turns", "max_phase_tasks", "min
 
 const RETRIES_KEYS = new Set([
   "plan_revisions",
+  "spec_revisions",
   "implementation",
   "verification",
   "final_review_fix_rounds",
@@ -634,6 +636,7 @@ const TIME_LIMITS_KEYS = new Set([
 const WORKFLOW_KEYS = new Set([
   "plan_review",
   "plan_review_rounds_converge",
+  "standalone_spec",
   "gsd_planning_review",
   "spec_review",
   "code_review_per_phase",
@@ -913,6 +916,7 @@ function validateCapsConfig(caps, path, errors, warnings) {
 // values are not.
 const RETRY_MINIMUMS = {
   plan_revisions: 0,
+  spec_revisions: 0,
   implementation: 0,
   verification: 0,
   final_review_fix_rounds: 1,

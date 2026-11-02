@@ -703,6 +703,16 @@ case "$ROLE" in
           # NEW with valid per-stage artifacts (see plan_new_feature).
           plan_new_feature
         else
+          SPEC_FILE=$(printf '%s\n' "$PROMPT" | sed -n 's/^Write the feature specification for this request to exactly: //p' | head -n 1)
+          if [ -n "$SPEC_FILE" ]; then
+            mkdir -p "$(dirname "$SPEC_FILE")"
+            printf '# Spec\n\n## Requirements\n\n- **FR-001**: System MUST do the fixture task.\n' > "$SPEC_FILE"
+            CONTEXT_FILE=$(printf '%s\n' "$PROMPT" | sed -n 's/^Write the codebase context to exactly: \(.*\) — .*$/\1/p' | head -n 1)
+            if [ -n "$CONTEXT_FILE" ]; then
+              mkdir -p "$(dirname "$CONTEXT_FILE")"
+              printf '# Context\n\nfixture.\n' > "$CONTEXT_FILE"
+            fi
+          fi
           PLAN_FILE=$(printf '%s\n' "$PROMPT" | sed -n 's/^Write the narrative plan to exactly: //p' | head -n 1)
           if [ -z "$PLAN_FILE" ]; then PLAN_FILE=$(printf '%s\n' "$PROMPT" | sed -n 's/^Write the plan to exactly: //p' | head -n 1); fi
           TASKS_FILE=$(printf '%s\n' "$PROMPT" | sed -n 's/^Write the phased checklist to exactly: //p' | head -n 1)
@@ -751,6 +761,9 @@ case "$ROLE" in
                 printf '## Phase 1: General\n\n- [ ] Do the first sentinel task — accept: done ; verify: none\n- [ ] Do the second sentinel task — accept: done ; verify: none\n' > "$TASKS_FILE"
               else
                 printf '## Phase 1: General\n\n- [ ] Do the fixture task — accept: done ; verify: none\n' > "$TASKS_FILE"
+              fi
+              if printf '%s\n' "$PROMPT" | grep -q 'Every TASKS.md task cites'; then
+                sed 's/ — accept:/ (FR-001) — accept:/' "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
               fi
             else
               printf '# Plan\n\nObjective: fixture task.\n\n- [ ] Do the fixture task\n\nVerification notes: none required.\n' > "$PLAN_FILE"

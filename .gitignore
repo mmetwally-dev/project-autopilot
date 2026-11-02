@@ -2,3 +2,4 @@ node_modules/
 .autopilot/
 .agent/
 .commandcode/
+.npmrc

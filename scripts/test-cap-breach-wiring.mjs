@@ -171,7 +171,7 @@ check("wrapup: breach records wrapUp:true + trigger on the capped marker",
   /if\(capBreach\.wrapUp\) result\.capped\.wrapUp=true;/.test(src)
   && /if\(capBreach\.trigger\) result\.capped\.trigger=capBreach\.trigger;/.test(src));
 check("wrapup: cap/wrap-up figures worded via the capUnitLabel helper (turns names turns, tokens keep raw context tokens)",
-  /capUnitLabel,/.test(src) && /from "\.\/per-task-budget\.mjs"/.test(src) && count(/capUnitLabel\(\w+\.capped\.type\)/g) === 10 && capUnitLabel("turns") === "turns" && capUnitLabel("tokens") === "raw context tokens" && /CAP_BREACH \| TYPE=/.test(src));
+  /capUnitLabel,/.test(src) && /from "\.\/per-task-budget\.mjs"/.test(src) && count(/capUnitLabel\(\w+\.capped\.type\)/g) === 13 && capUnitLabel("turns") === "turns" && capUnitLabel("tokens") === "raw context tokens" && /CAP_BREACH \| TYPE=/.test(src));
 check("wrapup: fallback note is built from this session's changes plus the session work digest",
   /changedFilesStat\(cwd,\{paths:sessionPaths\}\)/.test(src)
   && /buildOrchestratorFallbackNote\(taskRef,events,role\.adapter,repo,diffStat,capBreach,sessionPaths\)/.test(src)
@@ -271,7 +271,7 @@ check("reset: queued continuation reset applies at all four continuation decisio
 check("reset: escalation records the continuation for bare `ap reset` (all four sites)",
   count(/recordLastContinuation\(s,\{contScope,taskId,missionName:(mission|missionIdentity),taskRef:taskDisplayRef\(phaseTasks\[taskIndex\],taskIndex\)\}\)/g) === 4);
 check("reset: every not-converging message ends with the exact resume command",
-  count(/Resume: ap reset --scope /g) === 21); // 4 not-converging sites + standalone code_reviewer capped (031 P4.1) + standalone verifier capped (031 P4.2) + 2 voluntary P4.3 + speckit code_reviewer capped (031 P5.1) + speckit verifier capped (031 P5.2) + 2 speckit voluntary P5.3 + standalone planner capped (031 P6.2) + standalone planner voluntary (031 P6b.1) + 2 standalone plan_reviewer capped (031 P7.1) + standalone plan_reviewer voluntary (031 P7b.1) + the shared no-progress stop (#32) + planner no-progress stop (031 P6b.2)
+  count(/Resume: ap reset --scope /g) === 26); // 4 not-converging sites + standalone code_reviewer capped (031 P4.1) + standalone verifier capped (031 P4.2) + 2 voluntary P4.3 + speckit code_reviewer capped (031 P5.1) + speckit verifier capped (031 P5.2) + 2 speckit voluntary P5.3 + standalone planner capped (031 P6.2) + standalone planner voluntary (031 P6b.1) + 2 standalone plan_reviewer capped (031 P7.1) + standalone plan_reviewer voluntary (031 P7b.1) + the shared no-progress stop (#32) + planner no-progress stop (031 P6b.2) + 5 standalone spec-stage sites (spec planner capped + incomplete, spec reviewer capped x2 + incomplete) (#7)
 
 // ── Backlog #32: no-progress stop + note-cited code in the brief ──
 check("no-progress: checked at all four continuation decisions, after the allowance check (both loops)",
@@ -824,8 +824,9 @@ check("031 P4.5: wrap-up note path stays the shared mission handoff path",
 // ── Mission 031 phase 10 task 10.3: final consistency check ──
 // 12 consumeContinuation call sites in autopilot.mjs (4 implementer +
 // 4 code_reviewer + 4 verifier across standalone + speckit loops) plus
-// 5 handlePlanningContinuation call sites (planner capped + incomplete,
-// plan_reviewer capped x2 pre/post-retry + incomplete). The task text
+// 12 handlePlanningContinuation call sites (planner capped + incomplete,
+// plan_reviewer capped x2 pre/post-retry + incomplete, 2 shared helpers,
+// plus 5 standalone spec-stage sites (#7)). The task text
 // says "4 planning sites (capped + incomplete per role)"; the 5th is the
 // plan_reviewer pre-retry capped site already pinned in P7.1.
 check("031 P10.3: 12 consumeContinuation call sites total (4 implementer + 4 code_reviewer + 4 verifier)",
@@ -836,8 +837,8 @@ check("031 P10.3: 4 code_reviewer sites pass explicit continuationAllowance",
   count(/consumeContinuation\(s,c\.policy,contScope,resolvePerRoleLimits\('code_reviewer',c\.policy\)\.continuationAllowance\)/g) === 4);
 check("031 P10.3: 4 verifier sites pass explicit continuationAllowance",
   count(/consumeContinuation\(s,c\.policy,contScope,resolvePerRoleLimits\('verifier',c\.policy\)\.continuationAllowance\)/g) === 4);
-check("031 P10.3: 7 handlePlanningContinuation call sites total (planner 2 + plan_reviewer 3 + 2 shared helpers)",
-  count(/handlePlanningContinuation\(s,/g) === 7);
+check("031 P10.3: 12 handlePlanningContinuation call sites total (planner 2 + plan_reviewer 3 + 2 shared helpers + 5 standalone spec-stage sites (#7))",
+  count(/handlePlanningContinuation\(s,/g) === 12);
 check("031 P10.3: planner capped + incomplete planning sites (1 each)",
   count(/handlePlanningContinuation\(s,'planner',planner,'task:standalone:planning:planner',c\.policy,'capped'\)/g) === 1
   && count(/handlePlanningContinuation\(s,'planner',planner,'task:standalone:planning:planner',c\.policy,'incomplete'\)/g) === 1);

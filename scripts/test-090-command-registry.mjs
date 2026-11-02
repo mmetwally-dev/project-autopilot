@@ -157,7 +157,7 @@ for (const [file, invocation] of invocationExpectations) {
 // as before mission 091 added the adhoc entries.
 {
   const snapshot = {
-    "ap.plan.md": "---\ndescription: \"Step 1 only: give a request → write a reviewed plan + task list, then stop\"\n---\n\nap run --stage planning $ARGUMENTS\n",
+    "ap.plan.md": "---\ndescription: \"Step 1 only: give a request → write a reviewed spec, plan + task list, then stop\"\n---\n\nap run --stage planning $ARGUMENTS\n",
     "ap.implement.md": "---\ndescription: \"Step 2 only: code the next part of the plan, then stop (no review)\"\n---\n\nap run --stage implement $ARGUMENTS\n",
     "ap.review.md": "---\ndescription: \"Step 3 only: review the code just written, then stop\"\n---\n\nap run --stage review $ARGUMENTS\n",
     "ap.verify.md": "---\ndescription: \"Step 4 only: test the code just reviewed and tick its tasks done\"\n---\n\nap run --stage verify $ARGUMENTS\n",

@@ -223,14 +223,14 @@ check("length: bound is 500", ROLE_PROGRESS_COMMAND_MAX_CHARS === 500);
   check("wiring: autopilot imports both length helpers",
     src.includes("verifyLengthFindings") && src.includes("speckitTaskVerifyLengthFindings")
     && src.includes("verifyShardFindings") && src.includes("speckitTaskVerifyShardFindings")
-    && src.includes('import {verifyDenylistFindings, effectiveVerifyDenylist, speckitTaskDenylistFindings, verifyLengthFindings, speckitTaskVerifyLengthFindings, verifyShardFindings, speckitTaskVerifyShardFindings, phaseTaskCountFindings, unrecognizedAnnotationFindings} from "./verify-denylist.mjs"'));
+    && src.includes('import {verifyDenylistFindings, effectiveVerifyDenylist, speckitTaskDenylistFindings, verifyLengthFindings, speckitTaskVerifyLengthFindings, verifyShardFindings, speckitTaskVerifyShardFindings, phaseTaskCountFindings, unrecognizedAnnotationFindings, specContentFindings, specCoverageFindings} from "./verify-denylist.mjs"'));
   // Site 1: standalone denylist gate hoists the shared entries const.
   check("wiring site 1 (standalone): shared entries hoisted into one const",
     src.includes("const standaloneVerifyEntries=standaloneTaskVerifyEntries(tasksFile)"));
   check("wiring site 1 (standalone): denylist and length findings merged",
     src.includes("verifyLengthFindings(standaloneVerifyEntries)")
     && src.includes("verifyShardFindings(standaloneVerifyEntries)")
-    && src.includes("[...verifyDenylistFindings(standaloneVerifyEntries,effectiveVerifyDenylist(c)),...verifyLengthFindings(standaloneVerifyEntries),...verifyShardFindings(standaloneVerifyEntries),...phaseTaskCountFindings(standaloneTasksText, resolveMaxPhaseTasks(c.policy)),...unrecognizedAnnotationFindings(standaloneTasksText)]"));
+    && src.includes('[...verifyDenylistFindings(standaloneVerifyEntries,effectiveVerifyDenylist(c)),...verifyLengthFindings(standaloneVerifyEntries),...verifyShardFindings(standaloneVerifyEntries),...phaseTaskCountFindings(standaloneTasksText, resolveMaxPhaseTasks(c.policy)),...unrecognizedAnnotationFindings(standaloneTasksText),...(specOn?specCoverageFindings(fs.existsSync(specFile)?fs.readFileSync(specFile,"utf8"):"",standaloneTasksText):[])]'));
   // Site 2: SpecKit initial tasks gate merges on tasksMdText.
   check("wiring site 2 (speckit initial): length findings merged on tasksMdText",
     src.includes("[...speckitTaskDenylistFindings(tasksMdText,effectiveVerifyDenylist(c)),...speckitTaskVerifyLengthFindings(tasksMdText),...speckitTaskVerifyShardFindings(tasksMdText)]"));

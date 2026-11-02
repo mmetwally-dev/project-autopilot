@@ -31,7 +31,7 @@ export const COMMAND_FILES = Object.freeze([
   Object.freeze({
     name: "plan",
     file: "plan.md",
-    description: "Step 1 only: give a request → write a reviewed plan + task list, then stop",
+    description: "Step 1 only: give a request → write a reviewed spec, plan + task list, then stop",
     stage: "planning",
   }),
   Object.freeze({

@@ -6,6 +6,7 @@
 // plan-review FAIL escalates without running a planner revision. Only an
 // absent, invalid, or negative value falls back to the built-in default.
 export const PLAN_REVISION_DEFAULT = 8;
+export const SPEC_REVISION_DEFAULT = 3;
 
 export function resolvePlanRevisionBudget(policy) {
   const raw = policy?.max_plan_revisions;
@@ -14,4 +15,13 @@ export function resolvePlanRevisionBudget(policy) {
   if (typeof raw === "string" && raw.trim() === "") return PLAN_REVISION_DEFAULT;
   const value = Number(raw);
   return Number.isInteger(value) && value >= 0 ? value : PLAN_REVISION_DEFAULT;
+}
+
+export function resolveSpecRevisionBudget(policy) {
+  const raw = policy?.max_spec_revisions;
+  if (raw === undefined || raw === null) return SPEC_REVISION_DEFAULT;
+  if (typeof raw === "boolean") return SPEC_REVISION_DEFAULT;
+  if (typeof raw === "string" && raw.trim() === "") return SPEC_REVISION_DEFAULT;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 0 ? value : SPEC_REVISION_DEFAULT;
 }

@@ -19,11 +19,11 @@ import { appendNotRunInMissionsToReport, formatNotRunInMissions } from "./comman
 import {loadAndMigrateConfig} from "./config-migration.mjs";
 import {planApprovalRequired, beginPlanApprovalPause, resumePlanApproval, isPlanApprovalPaused, planApprovalPauseLines} from "./plan-approval.mjs";
 import {validateNewConfig} from "./config-validation.mjs";
-import {verifyDenylistFindings, effectiveVerifyDenylist, speckitTaskDenylistFindings, verifyLengthFindings, speckitTaskVerifyLengthFindings, verifyShardFindings, speckitTaskVerifyShardFindings, phaseTaskCountFindings, unrecognizedAnnotationFindings} from "./verify-denylist.mjs";
+import {verifyDenylistFindings, effectiveVerifyDenylist, speckitTaskDenylistFindings, verifyLengthFindings, speckitTaskVerifyLengthFindings, verifyShardFindings, speckitTaskVerifyShardFindings, phaseTaskCountFindings, unrecognizedAnnotationFindings, specContentFindings, specCoverageFindings} from "./verify-denylist.mjs";
 import {atomicWriteFileSync} from "./atomic-state-write.mjs";
 import {readResetRequests,enqueueResetRequest,removeResetRequest,removeAllResetRequests} from "./reset-request-queue.mjs";
 import {PLAN_REVISION_RESET_SCOPE,PLAN_REVISION_RESET_KEY,clearPlanRevisionCounter,planRevisionResetRequest,applyPendingPlanRevisionReset} from "./reset-plan-revision.mjs";
-import {resolvePlanRevisionBudget} from "./plan-revision-budget.mjs";
+import {resolvePlanRevisionBudget, resolveSpecRevisionBudget} from "./plan-revision-budget.mjs";
 import {ownerPidPath, writeOwnerPid, readOwnerPid, verifyOwnerPid, removeOwnerPid, findRepoLiveRuns} from "./owner-pid.mjs";
 export {ownerPidPath, writeOwnerPid, readOwnerPid, verifyOwnerPid, removeOwnerPid};
 // Exported for offline tests that must build the production manifest argv with
@@ -83,7 +83,7 @@ import { updateSummary, updateSummaryForRunDir, scopeForRunDir } from "./watch-s
 import { recoverStaleRuns, markInterrupted } from "./run-recovery.mjs";
 import { recordCodeReviewRound, clearCodeReviewHistory, codeReviewerRoundLines, implementerEarlierRoundsText, codeReviewScopeKey } from "./code-review-rounds.mjs";
 import { scheduleEscalation, pendingEscalationModel, consumeEscalationFor, formatEscalationLog, recordVerifierRound, clearVerifierHistory, verifierRoundLines } from "./escalation-model.mjs";
-import { recordPlanReviewRound, seedPlanReviewHistory, clearPlanReviewHistory, planReviewPassNeedsConfirmation, planReviewConfirmationPending, markPlanReviewConfirmationPending, clearPlanReviewConfirmation, planReviewRevisionCount, recordPlanReviewRevision, clearPlanReviewRevisions, planReviewerRoundLines, planReviewerConfirmationLines, plannerEarlierRoundsText, recordPlanReviewNotes, planReviewNotesText, recordPlanPassNotes, planPassNotesText, allPlanPassNotes, firstTaskPassNotes, firstGsdUnitPassNotes, PLAN_REVIEW_SEVERITY_LINE, demoteLowSeverityFindings } from "./plan-review-rounds.mjs";
+import { recordPlanReviewRound, seedPlanReviewHistory, clearPlanReviewHistory, planReviewPassNeedsConfirmation, planReviewConfirmationPending, markPlanReviewConfirmationPending, clearPlanReviewConfirmation, planReviewRevisionCount, recordPlanReviewRevision, clearPlanReviewRevisions, planReviewerRoundLines, planReviewerConfirmationLines, plannerEarlierRoundsText, recordPlanReviewNotes, planReviewNotesText, recordPlanPassNotes, planPassNotesText, allPlanPassNotes, firstTaskPassNotes, firstGsdUnitPassNotes, PLAN_REVIEW_FULL_LINE, PLAN_REVIEW_SEVERITY_LINE, demoteLowSeverityFindings, STANDALONE_SPEC_ANALYZE_LINE, isFullPlanReviewRound } from "./plan-review-rounds.mjs";
 import { saveReviewFeedback, loadReviewFeedback, clearReviewFeedback, clearReviewFeedbackByPrefix, feedbackText } from "./review-feedback.mjs";
 import { taskLabel, recordFindingTasks, loadFindingTasks, carryDecision, findingsForTask, renderHandledFindings, fixPassBriefExcerpts, clearFindingTasks, clearFindingTasksByPrefix, FINDING_TASKS_STATE_KEY } from "./finding-task-locality.mjs";
 import { runFinalReviewFixRounds, parseGateGreenFiles, isNoWorkPerformed, isReviewerFeedbackFixPass, buildNoWorkAnswerSection } from "./final-review-fix-rounds.mjs";
@@ -94,7 +94,7 @@ import { findUnexpectedScratchFiles, unexpectedNewFilesNote } from "./scratch-fi
 import {mapPathIntoEnvelope, SANDBOX_HOME} from "./execution-envelope.mjs";
 import {resolveAdapterTransport} from "./adapter-transport.mjs";
 import {ensureBaseline, hasBaseline, removeBaseline, scopedDelta, scopedDeltaChunks, sanitizeKeySegment, scopedDeltaBeginMarker, SCOPED_DELTA_END_MARKER, listWorktreeEntries, rebaseBaselineOntoHead, headMovedSinceBaseline} from "./implementation-baseline.mjs";
-import {buildStandaloneHandoff, boundedDeltaBody, MISSION_FINAL_SECURITY_LINE, formatOperatorPhaseEdits, parseIncompleteSignal, parsePlanningIncompleteSignal, parseFoundEntries, sanitizeSummary, truncationWarning, reviewTruncationResult, formatGateResult, resolveGateDurations} from "./standalone-handoff.mjs";
+import {buildStandaloneHandoff, boundedDeltaBody, MISSION_FINAL_SECURITY_LINE, specFrCheckLine, formatOperatorPhaseEdits, parseIncompleteSignal, parsePlanningIncompleteSignal, parseFoundEntries, sanitizeSummary, truncationWarning, reviewTruncationResult, formatGateResult, resolveGateDurations} from "./standalone-handoff.mjs";
 import {applyRedGateOverride, persistRedGateOverride} from "./verifier-red-gate-override.mjs";
 import {handlePlanningContinuation, planningNoProgressTouchedFiles, clearPlanningContinuations, clearPlanningContinuationScope, hasSpentPlanningContinuations, PLANNING_CONTINUATION_SCOPES} from "./planning-continuation.mjs";
 import {ensurePhaseBriefForCheckpoint, phaseBriefRelativePath} from "./role-progress-brief.mjs";
@@ -4863,6 +4863,7 @@ function acceptCappedFinalVerdict(subject,result){
   result.status="completed";
   result.cappedVerdictAccepted=true;
   delete result.capped;
+  if(result.review.decision==="FAIL") result.failure=verdictFailure(result.role,{status:"available",decision:"FAIL",findings:result.review.findings||[]});
   return true;
 }
 function handleCappedPlanningResult({c,s,framework,role,result,subject,touchedFiles}){
@@ -5260,6 +5261,7 @@ async function ensurePlanningReady(c,s,request){
     // next Planner with "the plan reviewer REJECTED the previous attempt"
     // quoting a superseded mission's corrections.
     delete s.standalonePlanReview;
+    delete s.standaloneSpecReview;
     delete s.reviewFeedback;
     delete s.planReviewHistory;
     delete s.planReviewNotes;
@@ -5446,6 +5448,7 @@ async function ensurePlanningReady(c,s,request){
 // plan revision and an implementation retry never read each other's
 // corrections; per-task/per-phase where the loop itself is per-task.
 const STANDALONE_PLAN_FEEDBACK_KEY="standalone-plan";
+const STANDALONE_SPEC_FEEDBACK_KEY="standalone-spec";
 const standaloneTaskFeedbackKey=(file,line)=>`standalone-task:${path.basename(file)}:${line}`;
 const speckitPhaseFeedbackKey=index=>`speckit-phase:${index}`;
 const speckitStageFeedbackKey=stage=>`speckit-stage:${stage}`;
@@ -5555,6 +5558,12 @@ const REVIEWER_ALL_FINDINGS_LINE="Report everything you can see in ONE pass — 
 // Planner read-range rule: keep large sources out of context by reading only the
 // cited ranges, starting from the file and line references given in the request.
 const PLANNER_READ_RANGE_LINE="Read large source files only by line range or grep starting from the file:line references cited in the request — never read a whole large file into context.";
+
+function specReadCodeFirstLine(fileName){
+  const noun=fileName==="SPEC.md"?"FR":"requirement";
+  const suffix=fileName==="spec.md"?" spec.md still describes behaviour, not implementation.":"";
+  return `Before writing ${fileName}, read the parts of the codebase the request touches (the existing screens/pages, models, APIs/services and their tests), so every ${noun} states what must change or stay true against what already exists, and no existing behaviour the request depends on is missed.${suffix}`;
+}
 async function runPlanningPhase(c, step, request, s, planRevision=null){
   s.phase="planning"; s.step=step; saveState(s);
   const boundaryActive=Array.isArray(s.planningPreexistingFeatureDirs) && SPECKIT_PLANNING_STAGES.has(step);
@@ -5710,7 +5719,8 @@ Artifact contract for this stage (validated on disk before it is accepted):
 - Write ${absFeature}/spec.md as a non-empty file — whitespace-only content is rejected.
 - Write .specify/feature.json as EXACTLY this one-field JSON object, no other keys:
     {"feature_directory": "${feature}"}
-  feature_directory must be a string equal to "${feature}" exactly (the same feature directory as spec.md). Do not add branch, feature_name, feature_number, created_at, author, status, or any other field — the real schema has exactly one key.`;
+  feature_directory must be a string equal to "${feature}" exactly (the same feature directory as spec.md). Do not add branch, feature_name, feature_number, created_at, author, status, or any other field — the real schema has exactly one key.
+- ${specReadCodeFirstLine("spec.md")}`;
   if(step==="plan") return `
 
 Artifact contract for this stage (validated on disk before it is accepted):
@@ -6025,12 +6035,241 @@ function standaloneTaskVerifyEntries(tasksFile){
   return out;
 }
 
+async function runStandaloneSpecStage(c, s, request, mission, specFile, contextFile) {
+  const specTemplateText = fs.readFileSync(path.join(skillRoot, "references", "spec-template.md"), "utf8").replace(/<!--[\s\S]*?-->\s*/g, "");
+  fs.mkdirSync(path.dirname(specFile), { recursive: true });
+  const maxRevisions = resolveSpecRevisionBudget(c.policy);
+  let revision = Number(s.standaloneSpecReview?.revision) || 0;
+  let position = s.standaloneSpecReview?.position === "reviewer" ? "reviewer" : "planner";
+  let feedback = feedbackText(loadReviewFeedback(s, STANDALONE_SPEC_FEEDBACK_KEY));
+  while (true) {
+    // Resume rule: position === "reviewer" with an existing SPEC.md skips the planner
+    // so an interrupted spec review resumes directly at the reviewer.
+    if (!(position === "reviewer" && fs.existsSync(specFile))) {
+      const plannerDeadEnds = readRolloverDeadEnds(s, 'task:standalone:spec:planner');
+      const plannerHandoffNote = readHandoffNote(mission, 'standalone-spec-planner');
+      const plannerDeadEndsText = plannerDeadEnds.length ? `Prior dead ends (continuation context — do not retry blindly):\n${plannerDeadEnds.map((d) => `- Generation ${d.generation} (${d.reason} ${d.used}/${d.limit}): ${d.tail}`).join("\n")}` : "";
+      const plannerHandoffNoteText = plannerHandoffNote ? `Prior planner handoff note (continuation context — continue from where it stopped):\n${plannerHandoffNote}` : "";
+      const _plannerEff = effectiveRoleModelFor(s, c, 'planner');
+      const _plannerPat = _plannerEff ? (agents[_plannerEff.adapter]?.free_model_pattern ?? null) : null;
+      const plannerBudgetReminder = handoffBudgetReminder(resolvePerRoleLimits('planner', c.policy, _plannerEff ? { adapter: _plannerEff.adapter, model: _plannerEff.model, free_model_pattern: _plannerPat } : {}).perTaskMaxTurns);
+      const prompt = [
+        "Write the feature specification for this request — do not write PLAN.md or TASKS.md in this stage.",
+        `Write the feature specification for this request to exactly: ${specFile}`,
+        `Write the codebase context to exactly: ${contextFile} — the files, functions and tests this feature touches, how the code works there today (exact file:line), patterns and helpers to reuse, and constraints. The plan stage reads CONTEXT.md instead of exploring the code again, so make it complete.`,
+        feedback ? "This is a REVISION round. Before changing anything, read the current SPEC.md and CONTEXT.md in full. The findings below are the ONLY things to change: locate each one's exact FR or section and edit only that; keep FR IDs stable (never renumber an existing FR)." : "",
+        `Use the structure of this spec template: prioritised user stories (P1, P2, ...) each with Given/When/Then acceptance scenarios, Edge Cases, Functional Requirements as numbered "- **FR-001**: System MUST ..." lines, Key Entities when data is involved, measurable Success Criteria (SC-###), and Assumptions. Replace all placeholder text; leave out the Feature Branch line.\n\n--- spec template ---\n${specTemplateText}\n--- end of spec template ---`,
+        "Write SPEC.md about WHAT and WHY (user-visible behaviour and rules), not HOW. Every rule in the request — and in any source document the request names (e.g. a design/tasks file it says to follow) — must become an FR; go through such a document section by section so no rule is dropped. Do not leave [NEEDS CLARIFICATION] markers: nobody answers questions during a mission — pick a reasonable default and record it under Assumptions.",
+        specReadCodeFirstLine("SPEC.md"),
+        PLANNER_PATHS_LINE,
+        PLANNER_READ_RANGE_LINE,
+        "Do not implement production code and do not commit/push.",
+        plannerDeadEndsText,
+        plannerHandoffNoteText,
+        `Project request/context: ${request}`,
+        `Keep a hand-off note at ${handoffNoteRelPath(mission, 'standalone-spec-planner')}. OVERWRITE it (never append) at each milestone — after every important finding, before writing SPEC.md/CONTEXT.md — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${plannerBudgetReminder ? ` ${plannerBudgetReminder}` : ""}`,
+        feedback ? `Spec reviewer feedback that MUST be addressed:\n${feedback}` : ""
+      ].filter(Boolean).join("\n\n");
+      const planner = await relayAsync("planner", prompt, c, s, { resume: false, capEnabled: true, taskRef: 'standalone-spec-planner', planRevision: revision });
+      // Mirrors the plan loop's planner cap/incomplete handling with the spec planner scope.
+      if (planner.capped) {
+        const contScope = 'task:standalone:spec:planner';
+        if (planner.capped.backstop === true || planner.capped.type === "backstop") {
+          const backstop = handleRoleBackstopFiring(s, contScope, planner);
+          if (backstop.escalate) {
+            const last = backstop.last;
+            s.phase = "escalated"; s.step = "runaway_session_escalation";
+            s.phaseCheckpointError = { code: "BACKSTOP_CONSECUTIVE_FIRINGS", evidence: { role: "planner", totalRawTokens: last.totalRawTokens ?? planner.capped.used, turns: last.turns ?? null, maxSingleTurnContext: last.maxSingleTurnContext ?? null, firings: [...backstop.firings] } };
+            saveState(s);
+            die(`Standalone spec planner fired the cumulative backstop twice in a row (${last.totalRawTokens ?? planner.capped.used}/${planner.capped.limit} cumulative raw tokens, ${last.turns ?? "?"} turns, largest single-turn context ${last.maxSingleTurnContext ?? "?"}). STOP — human intervention required.`);
+          }
+          saveState(s);
+          console.log(`Standalone spec planner crossed the cumulative backstop (${planner.capped.used}/${planner.capped.limit} cumulative raw tokens); continuing as backstop session ${backstop.firings.length + 1}.`);
+          continue;
+        }
+        clearBackstopFirings(s, contScope);
+        maybeApplyPendingContinuationReset(s, contScope);
+        const cont = handlePlanningContinuation(s, 'planner', planner, 'task:standalone:spec:planner', c.policy, 'capped');
+        if (!cont.allowed) {
+          recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner' });
+          die(`Standalone spec planner did not converge after ${cont.used} capped generations (${planner.capped.type} cap ${planner.capped.used}/${planner.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+        }
+        stopOnNoProgress(s, c, { framework: "standalone", contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner', touchedFiles: planningNoProgressTouchedFiles(specFile, contextFile, contScope, s), checkpoint: s[CHECKPOINT_STATE_KEY], step: "standalone_planning_no_progress" });
+        console.log(`Standalone spec planner hit the ${planner.capped.type} cap (${planner.capped.used}/${planner.capped.limit} ${capUnitLabel(planner.capped.type)}); continuing as session ${cont.used + 1} of ${cont.limit + 1}.`);
+        continue;
+      }
+      clearBackstopFirings(s, 'task:standalone:spec:planner');
+      if (parsePlanningIncompleteSignal(planner.finalMessage ?? planner)) {
+        const contScope = 'task:standalone:spec:planner';
+        maybeApplyPendingContinuationReset(s, contScope);
+        const cont = handlePlanningContinuation(s, 'planner', planner, 'task:standalone:spec:planner', c.policy, 'incomplete');
+        if (!cont.allowed) {
+          recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner' });
+          die(`Standalone spec planner did not converge after ${cont.used} generations (last generation stopped voluntarily as incomplete). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+        }
+        stopOnNoProgress(s, c, { framework: "standalone", contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner', touchedFiles: planningNoProgressTouchedFiles(specFile, contextFile, contScope, s), checkpoint: s[CHECKPOINT_STATE_KEY], step: "standalone_planning_no_progress" });
+        console.log(`Standalone spec planner stopped voluntarily as incomplete; continuing as session ${cont.used + 1} of ${cont.limit + 1}.`);
+        continue;
+      }
+      escalateIfRateLimited(c, s, "standalone-spec-review", planner, { fatal: die, saveState, escalatePrefix: "Standalone spec planner" });
+      if (planner.status !== "completed" || planner.policyViolation) die("Standalone spec planner failed or violated relay policy.");
+      if (!fs.existsSync(specFile)) die(`Standalone spec planner did not create ${specFile}.`);
+      if (!fs.existsSync(contextFile)) die(`Standalone spec planner did not create ${contextFile}.`);
+      clearPlanningContinuationScope(s, 'task:standalone:spec:planner');
+      clearHandoffNote(mission, 'standalone-spec-planner');
+      position = "reviewer";
+      s.standaloneSpecReview = { revision, position };
+      saveState(s);
+    }
+    // Deterministic gate: check SPEC.md content and non-empty CONTEXT.md before calling the reviewer.
+    const specText = fs.existsSync(specFile) ? fs.readFileSync(specFile, "utf8") : "";
+    const contextText = fs.existsSync(contextFile) ? fs.readFileSync(contextFile, "utf8") : "";
+    const gateFindings = [
+      ...specContentFindings(specText),
+      ...(contextText.trim() ? [] : [{ location: "CONTEXT.md", problem: "CONTEXT.md is missing or empty", correction: "write the codebase context file" }])
+    ];
+    let rawFindings = null;
+    if (gateFindings.length) {
+      rawFindings = gateFindings;
+    } else {
+      const reviewerHandoffNote = readHandoffNote(mission, 'standalone-spec-plan_reviewer');
+      const _prEff = effectiveRoleModelFor(s, c, 'plan_reviewer');
+      const _prPat = _prEff ? (agents[_prEff.adapter]?.free_model_pattern ?? null) : null;
+      const planReviewerBudgetReminder = handoffBudgetReminder(resolvePerRoleLimits('plan_reviewer', c.policy, _prEff ? { adapter: _prEff.adapter, model: _prEff.model, free_model_pattern: _prPat } : {}).perTaskMaxTurns);
+      let reviewPrompt = [
+        "Review the feature specification before planning starts.",
+        `Spec file: ${specFile}`,
+        `Context file: ${contextFile}`,
+        "Check SPEC.md: every rule in the request and in any source document it names is an FR (go through such a document section by section); FRs are testable MUST statements; user stories have Given/When/Then scenarios; edge cases are listed; success criteria are measurable; it says WHAT and WHY, not HOW. Check CONTEXT.md: the files, functions and line numbers it names exist and are the ones the feature needs.",
+        "Cite locations as 'SPEC.md FR-003', 'SPEC.md <section heading>' or 'CONTEXT.md'.",
+        REVIEWER_ALL_FINDINGS_LINE,
+        PLAN_REVIEW_FULL_LINE,
+        "Do not modify either file. End with the required AUTOPILOT_REVIEW sentinel.",
+        `Keep a hand-off note at ${scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, 'standalone-spec-plan_reviewer')}. OVERWRITE it (never append) at each milestone — after every important finding and before the review verdict — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${planReviewerBudgetReminder ? ` ${planReviewerBudgetReminder}` : ""}`,
+        feedback ? `Prior findings to re-check:\n${feedback}` : "",
+        reviewerHandoffNote ? `Prior reviewer handoff note (continuation context — continue from where it stopped):\n${reviewerHandoffNote}` : ""
+      ].filter(Boolean).join("\n\n");
+      let reviewResult = await relayAsync("plan_reviewer", reviewPrompt, c, s, { readOnly: true, review: true, resume: false, capEnabled: true, taskRef: 'standalone-spec-plan_reviewer', planRevision: revision });
+      if (reviewResult.policyViolation) die("Standalone spec review violated relay policy.");
+      // Mirrors the plan loop's reviewer cap/incomplete handling with the spec reviewer scope.
+      if (reviewResult.capped && acceptCappedFinalVerdict("Standalone spec review", reviewResult)) { /* verdict already complete */ }
+      if (reviewResult.capped) {
+        const contScope = 'task:standalone:spec:plan_reviewer';
+        if (reviewResult.capped.backstop === true || reviewResult.capped.type === "backstop") {
+          const backstop = handleRoleBackstopFiring(s, contScope, reviewResult);
+          if (backstop.escalate) {
+            const last = backstop.last;
+            s.phase = "escalated"; s.step = "runaway_session_escalation";
+            s.phaseCheckpointError = { code: "BACKSTOP_CONSECUTIVE_FIRINGS", evidence: { role: "plan_reviewer", totalRawTokens: last.totalRawTokens ?? reviewResult.capped.used, turns: last.turns ?? null, maxSingleTurnContext: last.maxSingleTurnContext ?? null, firings: [...backstop.firings] } };
+            saveState(s);
+            die(`Standalone spec review fired the cumulative backstop twice in a row (${last.totalRawTokens ?? reviewResult.capped.used}/${reviewResult.capped.limit} cumulative raw tokens, ${last.turns ?? "?"} turns, largest single-turn context ${last.maxSingleTurnContext ?? "?"}). STOP — human intervention required.`);
+          }
+          saveState(s);
+          console.log(`Standalone spec review crossed the cumulative backstop (${reviewResult.capped.used}/${reviewResult.capped.limit} cumulative raw tokens); continuing as backstop session ${backstop.firings.length + 1}.`);
+          continue;
+        }
+        clearBackstopFirings(s, contScope);
+        maybeApplyPendingContinuationReset(s, contScope);
+        const cont = handlePlanningContinuation(s, 'plan_reviewer', reviewResult, 'task:standalone:spec:plan_reviewer', c.policy, 'capped');
+        if (!cont.allowed) {
+          recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-plan_reviewer' });
+          die(`Standalone spec review did not converge after ${cont.used} capped generations (${reviewResult.capped.type} cap ${reviewResult.capped.used}/${reviewResult.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+        }
+        console.log(`Standalone spec review hit the ${reviewResult.capped.type} cap (${reviewResult.capped.used}/${reviewResult.capped.limit} ${capUnitLabel(reviewResult.capped.type)}); continuing as session ${cont.used + 1} of ${cont.limit + 1}.`);
+        position = "reviewer";
+        continue;
+      }
+      clearBackstopFirings(s, 'task:standalone:spec:plan_reviewer');
+      if (parseIncompleteSignal(reviewResult.review ?? reviewResult)) {
+        const contScope = 'task:standalone:spec:plan_reviewer';
+        maybeApplyPendingContinuationReset(s, contScope);
+        const cont = handlePlanningContinuation(s, 'plan_reviewer', reviewResult, 'task:standalone:spec:plan_reviewer', c.policy, 'incomplete');
+        if (!cont.allowed) {
+          recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-plan_reviewer' });
+          die(`Standalone spec review did not converge after ${cont.used} incomplete generations. STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+        }
+        console.log(`Standalone spec review stopped early (incomplete); continuing as session ${cont.used + 1} of ${cont.limit + 1}.`);
+        position = "reviewer";
+        continue;
+      }
+      escalateIfRateLimited(c, s, "standalone-spec-review", reviewResult, { fatal: die, saveState, escalatePrefix: "Standalone spec review" });
+      reviewResult = await resolvePlanningReviewAttempt(c, s, "standalone-spec-review", reviewResult,
+        () => relayAsync("plan_reviewer", reviewPrompt, c, s, { readOnly: true, review: true, resume: false, capEnabled: true, taskRef: 'standalone-spec-plan_reviewer', planRevision: revision }),
+        { policyMessage: "Standalone spec review violated relay policy.", escalatePrefix: "Standalone spec review" });
+      if (reviewResult.capped && acceptCappedFinalVerdict("Standalone spec review", reviewResult)) { /* verdict already complete */ }
+      if (reviewResult.capped) {
+        const contScope = 'task:standalone:spec:plan_reviewer';
+        if (reviewResult.capped.backstop === true || reviewResult.capped.type === "backstop") {
+          const backstop = handleRoleBackstopFiring(s, contScope, reviewResult);
+          if (backstop.escalate) {
+            const last = backstop.last;
+            s.phase = "escalated"; s.step = "runaway_session_escalation";
+            s.phaseCheckpointError = { code: "BACKSTOP_CONSECUTIVE_FIRINGS", evidence: { role: "plan_reviewer", totalRawTokens: last.totalRawTokens ?? reviewResult.capped.used, turns: last.turns ?? null, maxSingleTurnContext: last.maxSingleTurnContext ?? null, firings: [...backstop.firings] } };
+            saveState(s);
+            die(`Standalone spec review fired the cumulative backstop twice in a row (${last.totalRawTokens ?? reviewResult.capped.used}/${reviewResult.capped.limit} cumulative raw tokens, ${last.turns ?? "?"} turns, largest single-turn context ${last.maxSingleTurnContext ?? "?"}). STOP — human intervention required.`);
+          }
+          saveState(s);
+          console.log(`Standalone spec review crossed the cumulative backstop (${reviewResult.capped.used}/${reviewResult.capped.limit} cumulative raw tokens); continuing as backstop session ${backstop.firings.length + 1}.`);
+          continue;
+        }
+        clearBackstopFirings(s, contScope);
+        maybeApplyPendingContinuationReset(s, contScope);
+        const cont = handlePlanningContinuation(s, 'plan_reviewer', reviewResult, 'task:standalone:spec:plan_reviewer', c.policy, 'capped');
+        if (!cont.allowed) {
+          recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-plan_reviewer' });
+          die(`Standalone spec review did not converge after ${cont.used} capped generations (${reviewResult.capped.type} cap ${reviewResult.capped.used}/${reviewResult.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+        }
+        console.log(`Standalone spec review hit the ${reviewResult.capped.type} cap (${reviewResult.capped.used}/${reviewResult.capped.limit} ${capUnitLabel(reviewResult.capped.type)}); continuing as session ${cont.used + 1} of ${cont.limit + 1}.`);
+        position = "reviewer";
+        continue;
+      }
+      clearBackstopFirings(s, 'task:standalone:spec:plan_reviewer');
+      if (reviewResult.review) clearPlanningContinuationScope(s, 'task:standalone:spec:plan_reviewer');
+      clearHandoffNote(mission, 'standalone-spec-plan_reviewer');
+      if (reviewResult.status === "completed" && reviewResult.review?.decision === "PASS") {
+        s.standaloneSpecReview = { approved: true, notes: Array.isArray(reviewResult.review?.notes) ? reviewResult.review.notes : [] };
+        clearReviewFeedback(s, STANDALONE_SPEC_FEEDBACK_KEY);
+        saveState(s);
+        return;
+      }
+      rawFindings = reviewResult.review?.findings || [];
+    }
+    revision++;
+    const specFindings = saveReviewFeedback(s, STANDALONE_SPEC_FEEDBACK_KEY, rawFindings);
+    feedback = feedbackText(specFindings) || "Spec reviewer returned FAIL without findings.";
+    position = "planner";
+    s.standaloneSpecReview = { revision, position };
+    saveState(s);
+    // Revision-limit hand-off: open findings go to the plan stage instead of stopping the mission.
+    if (revision > maxRevisions) {
+      console.log(`[autopilot] spec review: revision limit reached — ${specFindings.length} open finding(s) handed to the plan stage.`);
+      s.standaloneSpecReview = { approved: true, notes: [], openFindings: specFindings };
+      clearReviewFeedback(s, STANDALONE_SPEC_FEEDBACK_KEY);
+      saveState(s);
+      return;
+    }
+  }
+}
+
+// Backlog #9: the spec the mission-final review checks FRs against; "" when
+// standalone_spec is off or the mission has no SPEC.md.
+function standaloneFinalSpecPath(c,mission){
+  if(c.workflow?.standaloneSpec===false) return "";
+  const p=standalone.specPath(repo,mission);
+  return fs.existsSync(p)?p:"";
+}
+
 async function runStandalonePlanning(c,s,request,opts={}){
   ensureStandaloneMigrated(repo,s);
   { const r=ensureStandaloneSplit(repo,s); if(r.migrated){ clearReviewFeedbackByPrefix(s,"standalone-task:"); clearFindingTasksByPrefix(s,"standalone-task:"); clearStaleStandaloneBudgets(s); } }
   const mission=resolveStandaloneMission(repo,s,request);
   const file=standalone.planPath(repo,mission);
   const tasksFile=standalone.tasksPath(repo,mission);
+  // Backlog #6: optional SPEC.md stage (workflow.standalone_spec).
+  const specOn=c.workflow?.standaloneSpec!==false;
+  const specFile=standalone.specPath(repo,mission);
+  const contextFile=standalone.contextPath(repo,mission);
+  if(specOn&&!s.standaloneSpecReview?.approved&&!fs.existsSync(file)) await runStandaloneSpecStage(c,s,request,mission,specFile,contextFile);
   fs.mkdirSync(path.dirname(file),{recursive:true});
   s.phase="planning";s.step="standalone-plan";s.standalonePlanFile=file;saveState(s);
   // Plan Review gates Implementation: a FAIL returns to Planning (with the
@@ -6113,6 +6352,21 @@ async function runStandalonePlanning(c,s,request,opts={}){
     // concrete size rule; never merge to shrink the task count.
     const mergeTasksLine="Do not create a task that only runs tests or \"regression-checks\" without changing files — verification belongs in each task's verify and in the orchestrator gate. Merge only truly trivial edits to the same file into one task when the merged task still fits the size rule; never merge tasks to reduce the task count or the number of phases.";
     const phaseBoundaryLine="Phases are cut by deliverable: a new phase is for a separate deliverable, not a separate file. Every phase costs a full test-suite gate and reviews, so put a build task and the task that wires it in the SAME phase, and write the reason for each phase boundary in PLAN.md under 'Phase boundaries'. Never trade a smaller task for fewer phases — task size wins over phase count.";
+    // Backlog #6: the FR citation rule is shared; the fresh round also gets
+    // the template and the read-the-code-first + WHAT/WHY rules.
+    const specCitationLine="Every TASKS.md task cites, in its text, the FR IDs it implements (e.g. \"... (FR-003, FR-007)\"); every FR in SPEC.md must be cited by at least one task. A task that implements no FR (setup, wiring, docs) needs no citation.";
+    const openFindings=s.standaloneSpecReview?.openFindings;
+    const specNotes=s.standaloneSpecReview?.notes;
+    const specLines=!specOn?[]:[
+      `The approved feature specification is at ${specFile} and the codebase context at ${contextFile}. Read both in full first. Use CONTEXT.md instead of exploring the code again; read more code only for something the plan needs that CONTEXT.md does not cover.`,
+      specCitationLine,
+      ...(openFindings?.length?[`The spec review ran out of revisions with these SPEC.md findings still open — fix them in SPEC.md as part of this round (keep FR IDs stable):\n${feedbackText(openFindings)}`]:[]),
+      ...(specNotes?.length?[`Spec reviewer notes (minor; fix in SPEC.md only if cheap):\n- ${specNotes.join("\n- ")}`]:[])
+    ];
+    const specRevisionLines=!specOn?[]:[
+      `The feature specification is at exactly: ${specFile} — edit it only where a finding cites SPEC.md; keep its FR IDs stable (never renumber an existing FR).`,
+      specCitationLine
+    ];
     // A mission whose TASKS.md predates this ID convention (created by an
     // older round-1 authoring pass) enters the revision loop already
     // un-numbered — "edit only what's flagged" then correctly refuses to
@@ -6140,11 +6394,14 @@ async function runStandalonePlanning(c,s,request,opts={}){
       "Create or continue an implementation plan for this project without relying on SpecKit or GSD.",
       `Write the narrative plan to exactly: ${file}`,
       `Write the phased checklist to exactly: ${tasksFile}`,
+      ...specRevisionLines,
       PLANNER_PATHS_LINE,
       PLANNER_READ_RANGE_LINE,
-      `This is a REVISION round, not a fresh authoring round. Before changing anything, read the current PLAN.md and TASKS.md in full — ${file} and ${tasksFile} — this is required, not optional.`,
+      specOn
+        ? `This is a REVISION round, not a fresh authoring round. Before changing anything, read the current SPEC.md, PLAN.md and TASKS.md in full — ${specFile}, ${file} and ${tasksFile} — this is required, not optional.`
+        : `This is a REVISION round, not a fresh authoring round. Before changing anything, read the current PLAN.md and TASKS.md in full — ${file} and ${tasksFile} — this is required, not optional.`,
       findingCount>0
-        ? `${findingCount} findings below are the ONLY things to change. Locate each one's exact section (PLAN.md) or numbered task (TASKS.md) and edit only that location. Do not rewrite or restate unrelated content, do not regenerate the whole file.`
+        ? `${findingCount} findings below are the ONLY things to change. ${specOn?"Locate each one's exact FR or section (SPEC.md), section (PLAN.md) or numbered task (TASKS.md) and edit only that location.":"Locate each one's exact section (PLAN.md) or numbered task (TASKS.md) and edit only that location."} Do not rewrite or restate unrelated content, do not regenerate the whole file.`
         : "Edit the existing PLAN.md and TASKS.md in place: change only what the feedback below requires. Do not rewrite or restate unrelated content, do not regenerate the whole file.",
       tasksLine,
       tasksFileHasIds?"":"TASKS.md currently has no numeric task IDs yet. As part of this edit, add an ID to every existing task (not only the ones the findings below flag), using the format above, in appearance order within each phase. This is a one-time structural backfill — do not change any task's wording while doing it.",
@@ -6165,6 +6422,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
     ].filter(Boolean).join("\n\n"):[
       "Create or continue an implementation plan for this project without relying on SpecKit or GSD.",
       `Write the narrative plan to exactly: ${file}`,
+      ...(specOn?specLines:[specReadCodeFirstLine("PLAN.md")]),
       "Content for PLAN.md: objective, scope, constraints, risks, verification strategy. Do NOT put the checklist here.",
       `Write the phased checklist to exactly: ${tasksFile}`,
       PLANNER_PATHS_LINE,
@@ -6316,10 +6574,17 @@ async function runStandalonePlanning(c,s,request,opts={}){
     const _prEff=effectiveRoleModelFor(s,c,'plan_reviewer');
     const _prPat=_prEff? (agents[_prEff.adapter]?.free_model_pattern ?? null) : null;
     const planReviewerBudgetReminder=handoffBudgetReminder(resolvePerRoleLimits('plan_reviewer',c.policy,_prEff?{adapter:_prEff.adapter,model:_prEff.model,free_model_pattern:_prPat}:{}).perTaskMaxTurns);
+    // ...planReviewerRoundLines(s,STANDALONE_PLAN_FEEDBACK_KEY,c.workflow?.plan_review_convergence!==false)
+    const reviewRoundLines=planReviewerRoundLines(s,STANDALONE_PLAN_FEEDBACK_KEY,c.workflow?.plan_review_convergence!==false);
     const reviewPrompt=[
       "Review the standalone Autopilot plan before implementation.",
       `Plan file: ${file}` ,
       `Tasks file: ${tasksFile}`,
+      ...(specOn?[
+        `Spec file: ${specFile}`,
+        `Context file: ${contextFile}`,
+        "SPEC.md was reviewed and approved in its own stage — do not re-review its content. Check only that each task really implements the FRs it cites: FAIL a task that cites an FR it does not implement (cite the task ID). FR coverage by citation is already checked by the orchestrator — do not re-list uncited FRs."
+      ]:[]),
       "Check PLAN.md (objective/scope/risks/strategy) and TASKS.md (phased checklist, each task's accept/verify inline on the same - [ ] line, ordering/dependencies). Validate cross-file consistency.",
       REVIEWER_ALL_FINDINGS_LINE,
       "When a finding concerns a TASKS.md item, `location` MUST cite its numeric ID exactly as written in the file (e.g. 'TASKS.md 2.3'), not a description or recount of position. When a finding concerns PLAN.md, cite its existing numbered list item (e.g. 'PLAN.md Scope 4', 'PLAN.md Risks 2') or, for unnumbered sections (Objective, Constraints), the section heading.",
@@ -6328,7 +6593,8 @@ async function runStandalonePlanning(c,s,request,opts={}){
       PLAN_REVIEW_TESTING_RULE,
       `FAIL any phase with more than ${resolveMaxPhaseTasks(c.policy)} tasks, citing the phase (e.g. 'TASKS.md Phase 2'); it must be split into additional phases. A phase with fewer than ${resolveMinPhaseTasks(c.policy)} tasks that could join a neighbouring related phase (staying within ${resolveMaxPhaseTasks(c.policy)} tasks, order unchanged) goes in "notes", never in "findings".`,
       "FAIL a task that changes no files (only runs tests / regression-checks), citing the task ID (e.g. 'TASKS.md 2.3'). Do NOT FAIL small tasks for being small or for not being merged — small one-action tasks are deliberate. Do not FAIL a phase merely for having few tasks: phases are cut by deliverable, and task size wins over phase count.",
-      ...planReviewerRoundLines(s,STANDALONE_PLAN_FEEDBACK_KEY,c.workflow?.plan_review_convergence!==false),
+      ...reviewRoundLines,
+      ...(specOn&&isFullPlanReviewRound(reviewRoundLines)?[STANDALONE_SPEC_ANALYZE_LINE]:[]),
       "Do not modify either file. End with the required AUTOPILOT_REVIEW sentinel.",
       `Keep a hand-off note at ${scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, 'standalone-planning-plan_reviewer')}. OVERWRITE it (never append) at each milestone — after every important finding and before the review verdict — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${planReviewerBudgetReminder ? ` ${planReviewerBudgetReminder}` : ""}`,
       !confirming&&feedback?`Prior findings to re-check:\n${feedback}`:"",
@@ -6348,7 +6614,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
     // verifyDenylistFindings; GSD is covered in runGsdPlanning.
     const standaloneVerifyEntries=standaloneTaskVerifyEntries(tasksFile);
     const standaloneTasksText=fs.existsSync(tasksFile)?fs.readFileSync(tasksFile,"utf8"):"";
-    const denied=[...verifyDenylistFindings(standaloneVerifyEntries,effectiveVerifyDenylist(c)),...verifyLengthFindings(standaloneVerifyEntries),...verifyShardFindings(standaloneVerifyEntries),...phaseTaskCountFindings(standaloneTasksText, resolveMaxPhaseTasks(c.policy)),...unrecognizedAnnotationFindings(standaloneTasksText)];
+    const denied=[...verifyDenylistFindings(standaloneVerifyEntries,effectiveVerifyDenylist(c)),...verifyLengthFindings(standaloneVerifyEntries),...verifyShardFindings(standaloneVerifyEntries),...phaseTaskCountFindings(standaloneTasksText, resolveMaxPhaseTasks(c.policy)),...unrecognizedAnnotationFindings(standaloneTasksText),...(specOn?specCoverageFindings(fs.existsSync(specFile)?fs.readFileSync(specFile,"utf8"):"",standaloneTasksText):[])];
     if(denied.length){
       if(confirming) clearPlanReviewConfirmation(s,STANDALONE_PLAN_FEEDBACK_KEY);
       revision++;
@@ -8129,6 +8395,7 @@ async function runStandaloneFinalReviewFixRounds({c,s,site,initialReview,mission
       deltaChunks:scopedDeltaChunks(repo,missionBaselineKey,{mission,declaredPaths}),
       baselineKey:missionBaselineKey,declaredPaths,
       planPath:standalone.planPath(repo,mission),tasksPath:standalone.tasksPath(repo,mission),
+      specPath:standaloneFinalSpecPath(c,mission),
       repoRoot:repo,
       implementationSummary:typeof summary==="string"?summary:""});
     if(handoff.meta.truncated) console.warn(truncationWarning(handoff.meta));
@@ -8283,6 +8550,7 @@ async function runStandaloneImplementation(c,s){
       deltaChunks:scopedDeltaChunks(repo,missionBaselineKey,{mission,declaredPaths}),
       baselineKey:missionBaselineKey,declaredPaths,
       planPath:standalone.planPath(repo,mission),tasksPath:standalone.tasksPath(repo,mission),
+      specPath:standaloneFinalSpecPath(c,mission),
       repoRoot:repo,
       implementationSummary:""});
     if(finalHandoff.meta.truncated) console.warn(truncationWarning(finalHandoff.meta));
@@ -9646,6 +9914,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
     deltaChunks:scopedDeltaChunks(repo,missionBaselineKey,{mission,declaredPaths}),
     baselineKey:missionBaselineKey,declaredPaths,
     planPath:standalone.planPath(repo,mission),tasksPath:standalone.tasksPath(repo,mission),
+    specPath:standaloneFinalSpecPath(c,mission),
     repoRoot:repo,
     implementationSummary:""});
   if(finalHandoff.meta.truncated) console.warn(truncationWarning(finalHandoff.meta));
@@ -11279,12 +11548,14 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
   // TASK-26: the mission-final review gets a measured deadline too.
   const speckitFinalBudget=roleDeadline(c,s,"code_reviewer");
   const speckitFinalNoParallel=formatHeavySuiteNoParallelNote();
+  const speckitFinalSpecFile=s.speckitFeatureDir?path.join(repo,"specs",s.speckitFeatureDir,"spec.md"):"";
+  const speckitFinalSpecParagraph=(speckitFinalSpecFile&&fs.existsSync(speckitFinalSpecFile))?`\n\n${specFrCheckLine(speckitFinalSpecFile)}`:"";
   // Mission 067 task 1.2: security checklist rides the SpecKit
   // mission-final review prompt verbatim plus the shared
   // whole-mission-diff reviewer line (imported, never duplicated).
   // Explicit repo root — absent/unreadable yields the generic section.
   let final=await review("code_reviewer",
-    `${`Perform final repository review against the planning artifacts.\n\nScoped implementation delta for THIS ENTIRE MISSION (pre-existing repository changes made before this mission started are excluded — do not evaluate or flag anything outside this delta; an empty delta means this mission made no repository changes):\n${scopedDeltaBeginMarker("MISSION")}\n${speckitBoundedDelta(repo,missionBaselineKey,"MISSION_FINAL")}\n${SCOPED_DELTA_END_MARKER}`}${speckitFinalNoParallel?`\n\n${speckitFinalNoParallel}`:""}\n\n${buildSecurityChecklistSection(repo)}\n${MISSION_FINAL_SECURITY_LINE}\n\n${speckitFinalBudget.note}`,
+    `${`Perform final repository review against the planning artifacts.${speckitFinalSpecParagraph}\n\nScoped implementation delta for THIS ENTIRE MISSION (pre-existing repository changes made before this mission started are excluded — do not evaluate or flag anything outside this delta; an empty delta means this mission made no repository changes):\n${scopedDeltaBeginMarker("MISSION")}\n${speckitBoundedDelta(repo,missionBaselineKey,"MISSION_FINAL")}\n${SCOPED_DELTA_END_MARKER}`}${speckitFinalNoParallel?`\n\n${speckitFinalNoParallel}`:""}\n\n${buildSecurityChecklistSection(repo)}\n${MISSION_FINAL_SECURITY_LINE}\n\n${speckitFinalBudget.note}`,
     c,s,"",[],null,speckitFinalBudget.timeoutMs,false,codeReviewScopeKey("final","speckit"));
   noteRoleDeadlineOutcome(s,"code_reviewer",final,speckitFinalBudget.derived);
   if(final.status==="completed"&&!final.policyViolation&&final.review?.decision==="PASS"){
@@ -11348,7 +11619,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           // 067 security section above; 071 no-work summary as answer/rebuttal.
           const answerSection=(typeof summary==="string"&&summary!=="")?`\n\nImplementer's answer/rebuttal (no files changed):\n${summary}`:"";
           const rereview=await review("code_reviewer",
-            `${`Perform final repository review against the planning artifacts.\n\nScoped implementation delta for THIS ENTIRE MISSION (pre-existing repository changes made before this mission started are excluded — do not evaluate or flag anything outside this delta; an empty delta means this mission made no repository changes):\n${scopedDeltaBeginMarker("MISSION")}\n${speckitBoundedDelta(repo,missionBaselineKey,"MISSION_FINAL")}\n${SCOPED_DELTA_END_MARKER}`}${speckitFinalNoParallel?`\n\n${speckitFinalNoParallel}`:""}\n\n${buildSecurityChecklistSection(repo)}\n${MISSION_FINAL_SECURITY_LINE}${answerSection}\n\n${budget.note}`,
+            `${`Perform final repository review against the planning artifacts.${speckitFinalSpecParagraph}\n\nScoped implementation delta for THIS ENTIRE MISSION (pre-existing repository changes made before this mission started are excluded — do not evaluate or flag anything outside this delta; an empty delta means this mission made no repository changes):\n${scopedDeltaBeginMarker("MISSION")}\n${speckitBoundedDelta(repo,missionBaselineKey,"MISSION_FINAL")}\n${SCOPED_DELTA_END_MARKER}`}${speckitFinalNoParallel?`\n\n${speckitFinalNoParallel}`:""}\n\n${buildSecurityChecklistSection(repo)}\n${MISSION_FINAL_SECURITY_LINE}${answerSection}\n\n${budget.note}`,
             c,s,"",[],null,budget.timeoutMs,false,codeReviewScopeKey("final","speckit"));
           noteRoleDeadlineOutcome(s,"code_reviewer",rereview,budget.derived);
           lastFinalReview=rereview;

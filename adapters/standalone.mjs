@@ -21,6 +21,18 @@ export function planPath(repo, mission){
   return path.join(repo,".autopilot","missions",mission,"PLAN.md");
 }
 
+export function specPath(repo, mission){
+  if(!mission) return path.join(repo,".autopilot","missions","SPEC.md");
+  assertSafeMissionName(repo, mission, "standalone mission");
+  return path.join(repo,".autopilot","missions",mission,"SPEC.md");
+}
+
+export function contextPath(repo, mission){
+  if(!mission) return path.join(repo,".autopilot","missions","CONTEXT.md");
+  assertSafeMissionName(repo, mission, "standalone mission");
+  return path.join(repo,".autopilot","missions",mission,"CONTEXT.md");
+}
+
 export function tasksPath(repo, mission){
   if(!mission) return path.join(repo,".autopilot","missions","TASKS.md");
   assertSafeMissionName(repo, mission, "standalone mission");

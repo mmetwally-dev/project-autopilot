@@ -110,6 +110,7 @@ layout.caps.task_size_target_turns = 33;
 layout.caps.mission_token_backstop = 7000000;
 layout.retries = {
   plan_revisions: 9,
+  spec_revisions: 3,
   implementation: 3,
   verification: 5,
   final_review_fix_rounds: 4,

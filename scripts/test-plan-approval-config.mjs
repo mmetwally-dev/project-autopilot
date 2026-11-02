@@ -40,6 +40,7 @@ deep(DEFAULTS.workflow, {
   plan_review_rounds_converge: true,
   gsd_planning_review: false,
   spec_review: true,
+  standalone_spec: true,
   code_review_per_phase: true,
   final_review: true,
   analysis_after_tasks: true,

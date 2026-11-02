@@ -1045,6 +1045,7 @@
       "description": "How many times each stage may retry or revise before it stops and asks you.",
       "default": {
         "plan_revisions": 8,
+        "spec_revisions": 3,
         "implementation": 4,
         "verification": 4,
         "final_review_fix_rounds": 2,
@@ -1059,6 +1060,12 @@
           "type": "number",
           "description": "Plan-review escalation point, not a revision count. In standalone, 0 escalates at the first plan-review FAIL without a Planner revision and it runs one fewer revision than the number (the number is one higher than the revisions run), so 1 behaves like 0; SpecKit runs at most one revision per gate for any value above 0; GSD planning still treats 0 or an absent value as 8; an absent value uses the built-in default of 8.",
           "default": 8,
+          "minimum": 0
+        },
+        "spec_revisions": {
+          "type": "number",
+          "description": "Standalone with workflow.standalone_spec on: the most spec-stage planner revisions after a SPEC.md review FAIL. When they run out, the open findings are handed to the plan stage instead of stopping the mission. 0 = review once, never revise.",
+          "default": 3,
           "minimum": 0
         },
         "implementation": {
@@ -1234,6 +1241,7 @@
       "default": {
         "plan_review": true,
         "plan_review_rounds_converge": true,
+        "standalone_spec": true,
         "gsd_planning_review": false,
         "spec_review": true,
         "code_review_per_phase": true,
@@ -1254,6 +1262,11 @@
         "plan_review_rounds_converge": {
           "type": "boolean",
           "description": "Make the first plan-review round review the whole plan and later rounds check only the requested fixes (true), or re-review the whole plan every round (false); default true. Applies to standalone and SpecKit planning; GSD uses its own plan-review settings. The legacy name plan_review_convergence is still read and migrated.",
+          "default": true
+        },
+        "standalone_spec": {
+          "type": "boolean",
+          "description": "Standalone only: the planner first reads the related code and writes SPEC.md (user stories, numbered FR-### requirements, success criteria) and CONTEXT.md (code map), reviewed until they pass; then PLAN.md and TASKS.md, where every task cites the FRs it covers and the plan fails review while any FR has no task; the mission-final code review checks every FR. Costs more planning tokens; set false for small requests to keep the cheaper plan-only path. Default true.",
           "default": true
         },
         "gsd_planning_review": {

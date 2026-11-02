@@ -75,8 +75,8 @@ check("loops: backstop evidence carries total, turns, and largest single-turn co
   check("loops: backstop branch continues the cursor loop",
     branches.length === 2 && branches.every((b) => b.slice(0, 3000).includes("continue;")), branches.length);
 }
-check("loops: backstop rollover log words the cumulative figure (both loops + 7 review-role sites + planning backstop handler)",
-  count(/crossed the cumulative backstop/g) === 10);
+check("loops: backstop rollover log words the cumulative figure (both loops + 7 review-role sites + planning backstop handler + 3 spec-stage sites)",
+  count(/crossed the cumulative backstop/g) === 13);
 // The shared SpecKit/GSD planning handler covers every capped field on the
 // planning relays: it logs the cumulative figure, records on the firing
 // ledger and resets the consecutive count on a non-backstop generation.

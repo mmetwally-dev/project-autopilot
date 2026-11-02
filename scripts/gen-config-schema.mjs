@@ -93,6 +93,7 @@ const DESCRIPTIONS = {
 
   retries: "How many times each stage may retry or revise before it stops and asks you.",
   "retries.plan_revisions": "Plan-review escalation point, not a revision count. In standalone, 0 escalates at the first plan-review FAIL without a Planner revision and it runs one fewer revision than the number (the number is one higher than the revisions run), so 1 behaves like 0; SpecKit runs at most one revision per gate for any value above 0; GSD planning still treats 0 or an absent value as 8; an absent value uses the built-in default of 8.",
+  "retries.spec_revisions": "Standalone with workflow.standalone_spec on: the most spec-stage planner revisions after a SPEC.md review FAIL. When they run out, the open findings are handed to the plan stage instead of stopping the mission. 0 = review once, never revise.",
   "retries.implementation": "Implementer fix rounds per phase before the phase stops; 0 stops the phase on the first fix-requiring review with no fix round, at the limit the mission stops and asks you, and an absent value uses the built-in default of 4.",
   "retries.verification": "Verifier FAIL rounds per phase before the phase stops; 0 stops the phase on the first verifier FAIL with no retry, at the limit the mission stops and asks you, and an absent value uses the built-in default of 4.",
   "retries.final_review_fix_rounds": "Final-review fix rounds per mission before it stops; 1 allows one round, and at the limit the mission stops.",
@@ -116,6 +117,7 @@ const DESCRIPTIONS = {
   workflow: "Which review and approval stages run, and how work is committed.",
   "workflow.plan_review": "Run the GSD plan-review stage before implementation (true) or skip it (false); only GSD reads this setting. (GSD is not yet reviewed in this version).",
   "workflow.plan_review_rounds_converge": "Make the first plan-review round review the whole plan and later rounds check only the requested fixes (true), or re-review the whole plan every round (false); default true. Applies to standalone and SpecKit planning; GSD uses its own plan-review settings. The legacy name plan_review_convergence is still read and migrated.",
+  "workflow.standalone_spec": "Standalone only: the planner first reads the related code and writes SPEC.md (user stories, numbered FR-### requirements, success criteria) and CONTEXT.md (code map), reviewed until they pass; then PLAN.md and TASKS.md, where every task cites the FRs it covers and the plan fails review while any FR has no task; the mission-final code review checks every FR. Costs more planning tokens; set false for small requests to keep the cheaper plan-only path. Default true.",
   "workflow.gsd_planning_review": "Use the GSD planning-review stages (true) or skip them (false). (GSD is not yet reviewed in this version).",
   "workflow.spec_review": "Intended to run a spec review stage before planning. Controlled by your SpecKit workflow.yml — add or remove the step there; this setting has no effect.",
   "workflow.code_review_per_phase": "Run a code review after each implementation phase (true), or skip the per-phase review and rely on the end-of-mission review (false); default true. The legacy name implementationReview is still read and migrated.",
@@ -259,6 +261,7 @@ export const MINIMUMS = {
   "caps.*.wrap_up_at_tokens": 1,
   "caps.mission_token_backstop": 1,
   "retries.plan_revisions": 0,
+  "retries.spec_revisions": 0,
   "retries.implementation": 0,
   "retries.verification": 0,
   "retries.final_review_fix_rounds": 1,

@@ -27,13 +27,13 @@ different agent and checks every result before it moves on:
 Planning → Plan Review → Implementation → Code Review → Gate (your tests) → Verification → Final Review → you commit
 ```
 
-- A **planner** writes the plan and a task list.
-- A **plan reviewer** checks the plan. The planner fixes it until the reviewer approves.
+- A **planner** reads the related code and writes a spec (numbered requirements), then the plan and a task list.
+- A **plan reviewer** checks the spec, then the plan. The planner fixes them until the reviewer approves.
 - An **implementer** codes the tasks, one task per session.
 - A **code reviewer** checks each phase. The implementer fixes what it finds.
 - Your **test suite** (the gate) runs after each phase.
 - A **verifier** checks the phase against the plan and the test results.
-- A **final review** checks the whole change once at the end.
+- A **final review** checks the whole change once at the end, including every requirement in the spec.
 
 Each role can be a different CLI and model, for example Claude Code for
 planning and review and a free opencode model for coding. The reviewers run
@@ -45,7 +45,7 @@ the changes wait in your working tree for you to review and commit.
 - **[SpecKit](https://github.com/github/spec-kit)** — if your project uses
   SpecKit (`.specify/`, `specs/*/tasks.md`), Autopilot picks up its tasks and
   implements, reviews and tests them. Without SpecKit it writes its own plan
-  (`PLAN.md` + `TASKS.md`) — nothing else to install.
+  (`SPEC.md` + `PLAN.md` + `TASKS.md`) — nothing else to install.
 - **[Playwright](https://playwright.dev)** — built in: the verifier checks
   browser tasks in a real browser (install the browser once with
   `npm run playwright:install`).
@@ -99,7 +99,7 @@ versions were private development.)
 | What you need | Run | Outcome |
 | --- | --- | --- |
 | Build a feature or fix a bug from start to finish | `ap run "<request>"` | A reviewed plan, coded and tested phase by phase, waiting in your working tree |
-| Only a reviewed plan, to read before any code is written | `ap run --stage planning "<request>"` | `PLAN.md` + `TASKS.md` approved by the plan reviewer |
+| Only a reviewed plan, to read before any code is written | `ap run --stage planning "<request>"` | `SPEC.md` + `CONTEXT.md`, then `PLAN.md` + `TASKS.md`, each approved by the plan reviewer |
 | Run one step of an open mission yourself | `ap run --stage implement \| review \| verify` | That one step for the current phase, then it stops |
 | A second opinion on a plan you already have | `ap plan-review <plan-file>` | A verdict and findings; nothing is changed |
 | A review of a commit, a range, a diff or a folder | `ap code-review <target>` | A verdict and findings; nothing is changed |
@@ -194,8 +194,14 @@ the task list, the logs and the report after the mission ends.
 
 ### 1. Planning and plan review
 
-The planner reads the repository and writes `PLAN.md` (goal, scope, design)
-and `TASKS.md` (phases of small tasks). Every task is one concrete action on
+The planner first reads the related code and writes `SPEC.md` (user stories,
+numbered FR-### requirements, success criteria — every rule in the request
+becomes an FR) and `CONTEXT.md` (the files and functions the feature touches,
+with file:line). The plan reviewer reviews them until they pass. Then the
+planner writes `PLAN.md` (goal, scope, design) and `TASKS.md` (phases of small
+tasks); each task cites the FRs it implements, and the plan fails review while
+any FR has no task. Set `workflow.standalone_spec: false` to skip the spec and
+go straight to the plan (cheaper, for small requests). Every task is one concrete action on
 about one file, names the exact paths, and says how it is accepted and how to
 verify it, for example:
 
@@ -207,7 +213,12 @@ verify it, for example:
 
 The read-only plan reviewer then reads the plan against the request and the
 code. If it finds problems (verdict **DENIED**), the planner revises and the
-reviewer looks again, up to `retries.plan_revisions` rounds (default 8). An
+reviewer looks again, up to `retries.plan_revisions` rounds (default 8). The
+spec has its own review first, up to `retries.spec_revisions` revisions (default
+3); if they run out, the open findings go to the plan stage instead of stopping
+the mission. With the spec on, the full plan-review rounds also cross-check
+`SPEC.md`, `PLAN.md` and `TASKS.md` together (coverage, naming, vague wording,
+duplicates, conflicts with the request). An
 **APPROVED** plan moves on to coding. With `ap run --stage planning` the mission
 stops here so you can read the plan first.
 
@@ -238,7 +249,9 @@ kind of failure has its own budget (`retries.implementation`,
 ### 3. Final review
 
 When every phase has passed, the code reviewer reads the whole mission's
-change once more. Findings get up to `retries.final_review_fix_rounds` fix
+change once more. With a spec (standalone `SPEC.md` or SpecKit `spec.md`) it
+also checks every FR against the code and says where it is implemented; a
+missing or half-built FR is a finding. Findings get up to `retries.final_review_fix_rounds` fix
 rounds (default 2). When it approves, the mission is **COMPLETED** and prints
 `ALL WORK COMPLETE — HUMAN COMMIT REQUIRED`.
 
@@ -377,7 +390,7 @@ type after the command is passed on as its arguments.
 | Slash command | Does | Same as |
 | --- | --- | --- |
 | `/ap.run` | The whole job: plan, code, review, test until done. All phases, with fix rounds | `ap run` |
-| `/ap.plan` | Step 1 only: write a reviewed plan + task list, then stop (includes the plan review) | `ap run --stage planning` |
+| `/ap.plan` | Step 1 only: write a reviewed spec, plan + task list, then stop (includes the plan review) | `ap run --stage planning` |
 | `/ap.implement` | Step 2 only: code the current phase, then stop (no review) | `ap run --stage implement` |
 | `/ap.review` | Step 3 only: review the code just written, then stop | `ap run --stage review` |
 | `/ap.verify` | Step 4 only: test the code just reviewed and tick its tasks done | `ap run --stage verify` |
@@ -586,7 +599,7 @@ run's brief, output and result).
 
 | Role | Writes to the repo? | Job |
 | --- | --- | --- |
-| `planner` | Yes (the plan files) | Writes `PLAN.md` and `TASKS.md`, revises them after review |
+| `planner` | Yes (the plan files) | Writes `SPEC.md` + `CONTEXT.md`, then `PLAN.md` and `TASKS.md`; revises them after review |
 | `plan_reviewer` | No — read-only | Approves or denies the plan with findings |
 | `implementer` | Yes | Codes one task per session; fixes findings |
 | `code_reviewer` | No — read-only | Reviews each phase, and the whole change in the final review |
@@ -647,7 +660,7 @@ for all of them with their defaults.
   a fresh session continues. `caps.mission_token_backstop` (default 6M tokens)
   stops a runaway mission. `caps.task_size_target_turns` (default 30) tells the
   planner how big one task may be.
-- **Retries:** plan revisions (8), implementation failures (4), verification
+- **Retries:** plan revisions (8), spec revisions (3), implementation failures (4), verification
   failures (4), final-review fix rounds (2), CLI errors (3), infrastructure
   failures (3), no-progress sessions (2).
 - **Timeouts:** `time_limits.role_timeout_minutes` (60 per session, 180 for the
@@ -690,7 +703,8 @@ The planner and implementer write to the repository in every mode.
 (detect). `ap setup` detects what the project uses.
 
 **Standalone** (the default — nothing else to install). Each mission keeps its
-plan in `.autopilot/missions/<NNN>-<slug>/PLAN.md` and `TASKS.md`. All
+spec and plan in `.autopilot/missions/<NNN>-<slug>/` (`SPEC.md`, `CONTEXT.md`,
+`PLAN.md`, `TASKS.md`). All
 features, including `--stage`, work here.
 
 **SpecKit.** `.specify/workflows/speckit/workflow.yml` is the source of truth.
@@ -773,6 +787,7 @@ Everything lives in `.autopilot/` (git-ignored by setup):
   config.json                 your settings
   state.json                  mission state and checkpoints (do not edit by hand)
   missions/<NNN>-<slug>/      one folder per mission, kept after it ends
+    SPEC.md, CONTEXT.md       the feature spec (FR-### requirements) and the code map
     PLAN.md, TASKS.md         the plan and the task list (ticked as tasks pass)
     WATCH-REPORT.md           live status
     orchestrator.log          full log

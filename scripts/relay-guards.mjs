@@ -305,7 +305,7 @@ export function gitSnapshot(startCwd){
   const config={};
   for(const scope of ["--local","--worktree","--global","--system"]){
     const cfg=gitOutAllowing(cwd,["config",scope,"--list"],configAllowedStatuses[scope]);
-    config[scope]=`${cfg.status}:${cfg.stdout.toString("utf8")}`;
+    config[scope]=`${cfg.status}:${stripEditorOnlyGitConfigLines(cfg.stdout.toString("utf8"))}`;
   }
   const gitDir=gitOut(cwd,["rev-parse","--absolute-git-dir"]).toString().trim();
   // In-progress sequencer state (merge/cherry-pick/revert/rebase). Porcelain
@@ -630,6 +630,26 @@ const GIT_STATE_MAX_BYTES = 64 * 1024;
 // `user.signingkey`, `http.sslKey`): losing a harmless value costs less
 // than storing a secret. Only the value is masked; the key stays readable.
 const GIT_CONFIG_SECRET_KEY = /token|password|passwd|secret|credential|auth|key|extraheader|cookie/i;
+
+// Keys IDE git extensions write on their own mid-run (VS Code/Antigravity:
+// branch.<name>.vscode-merge-base). They are not a repository mutation by
+// the agent, so gitSnapshot() leaves them out of the config it compares.
+const EDITOR_ONLY_GIT_CONFIG_KEY = /^branch\..+\.vscode-merge-base$/i;
+
+function stripEditorOnlyGitConfigLines(text){
+  if(text==null||text==="") return "";
+  const hasTrailingNewline=String(text).endsWith("\n");
+  const raw=hasTrailingNewline?text.slice(0,-1):String(text);
+  if(raw==="") return "";
+  const lines=raw.split("\n");
+  const kept=lines.filter(line=>{
+    const eq=line.indexOf("=");
+    const key=eq===-1?line:line.slice(0,eq);
+    return !EDITOR_ONLY_GIT_CONFIG_KEY.test(key);
+  });
+  if(kept.length===0) return "";
+  return kept.join("\n")+(hasTrailingNewline?"\n":"");
+}
 
 function redactGitConfigValue(key,value){
   const text=String(value??"");

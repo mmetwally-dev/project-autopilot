@@ -3,10 +3,10 @@
 // standalone and GSD planning loops (SpecKit task-text scan lands in 1.3).
 // Pure module — no filesystem or config side effects, safe to import from
 // unit tests and from scripts/autopilot.mjs.
-import {ROLE_PROGRESS_COMMAND_MAX_CHARS} from "./phase-stage-checkpoint.mjs";
-import {shards} from "./suite-schedule.mjs";
-import {parseInlineRequirements} from "./role-requirements.mjs";
-import {normalizeRequirement, CapabilityRequirementError} from "./capability-contract.mjs";
+import { ROLE_PROGRESS_COMMAND_MAX_CHARS } from "./phase-stage-checkpoint.mjs";
+import { shards } from "./suite-schedule.mjs";
+import { parseInlineRequirements } from "./role-requirements.mjs";
+import { normalizeRequirement, CapabilityRequirementError } from "./capability-contract.mjs";
 
 export const FULL_SUITE_VERIFY_ENTRY = "test-all.mjs";
 
@@ -279,13 +279,96 @@ export function phaseTaskCountFindings(tasksText, max = MAX_PHASE_TASKS) {
     if (h && !/^#/.test(h[1])) {
       flush();
       const pm = h[1].match(/^Phase\s+(\d+)/i);
-      phase = {label: pm ? `Phase ${pm[1]}` : h[1].slice(0, 80), count: 0};
+      phase = { label: pm ? `Phase ${pm[1]}` : h[1].slice(0, 80), count: 0 };
       continue;
     }
     if (phase && /^\s*-\s*\[\s*([xX ]?)\s*\]\s+(.+)$/.test(line)) phase.count++;
   }
   flush();
   return findings;
+}
+
+export function specContentFindings(specText) {
+  let hasFr = false;
+  let inFence = false;
+  let hasClarification = false;
+  for (const line of String(specText || "").split(/\r?\n/)) {
+    if (/^\s*(```|~~~)/.test(line)) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    if (line.includes("[NEEDS CLARIFICATION")) {
+      hasClarification = true;
+    }
+    if (/\*\*(FR-\d{3,})\*\*/.test(line)) {
+      hasFr = true;
+    }
+  }
+
+  if (!hasFr) {
+    return [{
+      location: "SPEC.md",
+      problem: "SPEC.md is missing or defines no **FR-###** requirements",
+      correction: "write SPEC.md from the spec template with numbered **FR-###** MUST requirements, then cite them in TASKS.md tasks",
+    }];
+  }
+
+  const findings = [];
+  if (hasClarification) {
+    findings.push({
+      location: "SPEC.md",
+      problem: "SPEC.md still has [NEEDS CLARIFICATION] markers",
+      correction: "nobody answers questions during a mission: replace each marker with a reasonable default and record it under ## Assumptions",
+    });
+  }
+  return findings;
+}
+
+export function specCoverageFindings(specText, tasksText) {
+  const contentFindings = specContentFindings(specText);
+  const definedFrs = [];
+  const definedSet = new Set();
+  let inFence = false;
+  for (const line of String(specText || "").split(/\r?\n/)) {
+    if (/^\s*(```|~~~)/.test(line)) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    const matches = line.matchAll(/\*\*(FR-\d{3,})\*\*/g);
+    for (const m of matches) {
+      const id = m[1];
+      if (!definedSet.has(id)) {
+        definedSet.add(id);
+        definedFrs.push(id);
+      }
+    }
+  }
+
+  if (definedFrs.length === 0) {
+    return contentFindings;
+  }
+
+  const coveredSet = new Set();
+  inFence = false;
+  for (const line of String(tasksText || "").split(/\r?\n/)) {
+    if (/^\s*(```|~~~)/.test(line)) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    if (/^\s*-\s*\[\s*([xX ]?)\s*\]\s+(.+)$/.test(line)) {
+      const matches = line.matchAll(/\b(FR-\d{3,})\b/g);
+      for (const m of matches) {
+        coveredSet.add(m[1]);
+      }
+    }
+  }
+
+  const findings = [];
+  for (const fr of definedFrs) {
+    if (!coveredSet.has(fr)) {
+      findings.push({
+        location: `SPEC.md ${fr}`,
+        problem: `${fr} has no task in TASKS.md`,
+        correction: `add a task that implements ${fr} (cite "${fr}" in its text) or extend an existing related task to cover it`,
+      });
+    }
+  }
+
+  return [...findings, ...contentFindings];
 }
 
 // Backlog #85: the planner is told not to add `autopilot-requires` annotations;

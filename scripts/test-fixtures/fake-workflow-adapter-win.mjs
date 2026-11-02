@@ -603,6 +603,16 @@ async function main() {
       // Standalone planning: mirror fake-workflow-adapter.sh's `*` branch —
       // the narrative plan prompt ("Write the narrative plan to exactly:") is
       // the standalone form; the SpecKit/legacy form has no "narrative".
+      const specFile = firstLineMatch(prompt, /^Write the feature specification for this request to exactly: (.*)$/);
+      if (specFile) {
+        fs.mkdirSync(path.dirname(specFile), {recursive: true});
+        fs.writeFileSync(specFile, "# Spec\n\n## Requirements\n\n- **FR-001**: System MUST do the fixture task.\n");
+        const contextFile = firstLineMatch(prompt, /^Write the codebase context to exactly: (.*?) — /);
+        if (contextFile) {
+          fs.mkdirSync(path.dirname(contextFile), {recursive: true});
+          fs.writeFileSync(contextFile, "# Context\n\nfixture.\n");
+        }
+      }
       const planFile = firstLineMatch(prompt, /^Write the narrative plan to exactly: (.*)$/)
         || firstLineMatch(prompt, /^Write the plan to exactly: (.*)$/);
       const tasksFile = firstLineMatch(prompt, /^Write the phased checklist to exactly: (.*)$/);
@@ -625,6 +635,9 @@ async function main() {
             : null;
           fs.writeFileSync(tasksFile, carryTasksFile ?? sentinelTasksFile ??
             `## Phase 1: General\n\n- [ ] Do the fixture task — accept: done ; verify: none\n${secondTask}`);
+          if (prompt.includes("Every TASKS.md task cites")) {
+            fs.writeFileSync(tasksFile, fs.readFileSync(tasksFile, "utf8").replace(/ — accept:/g, " (FR-001) — accept:"));
+          }
         } else {
           fs.writeFileSync(planFile, "# Plan\n\nObjective: fixture task.\n\n- [ ] Do the fixture task\n\nVerification notes: none required.\n");
         }

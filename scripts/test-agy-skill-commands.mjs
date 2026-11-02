@@ -53,7 +53,7 @@ const skillsDir = (repo) => path.join(repo, ".agents", "skills");
     JSON.stringify(rendered.map((r) => r.relPath)));
   const plan = rendered.find((r) => r.relPath === ".agents/skills/ap.plan/SKILL.md");
   check("[render] frontmatter has name + description and marker",
-    plan.content.startsWith("---\nname: ap.plan\ndescription: \"Step 1 only: give a request → write a reviewed plan + task list, then stop\"\n---\n")
+    plan.content.startsWith("---\nname: ap.plan\ndescription: \"Step 1 only: give a request → write a reviewed spec, plan + task list, then stop\"\n---\n")
     && plan.content.includes(SKILL_GENERATED_MARKER), plan.content);
   check("[render] body carries the stage command with <arguments> placeholder",
     plan.content.includes("`ap run --stage planning <arguments>`") && !plan.content.includes("$ARGUMENTS"), plan.content);
@@ -67,7 +67,7 @@ const skillsDir = (repo) => path.join(repo, ".agents", "skills");
 {
   const cl = renderAgentCommands("claude").find((r) => r.relPath === ".claude/commands/ap.plan.md");
   check("[unchanged] claude ap.plan.md byte-identical",
-    cl.content === "---\ndescription: \"Step 1 only: give a request → write a reviewed plan + task list, then stop\"\n---\n\nap run --stage planning $ARGUMENTS\n", cl.content);
+    cl.content === "---\ndescription: \"Step 1 only: give a request → write a reviewed spec, plan + task list, then stop\"\n---\n\nap run --stage planning $ARGUMENTS\n", cl.content);
   const oc = renderAgentCommands("opencode").find((r) => r.relPath === ".opencode/command/ap.run.md");
   check("[unchanged] opencode ap.run.md byte-identical",
     oc.content === "---\ndescription: \"Do the whole job: give a request → plan, code, review, test until done\"\n---\n\nap run $ARGUMENTS\n", oc.content);

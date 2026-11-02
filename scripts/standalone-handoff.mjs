@@ -37,6 +37,13 @@ const EOL_DIFF_GUIDANCE = "If a git diff shows whole-file churn, re-run it EOL-n
 // mission-final prompts in autopilot.mjs (imported, never duplicated).
 export const MISSION_FINAL_SECURITY_LINE = "Apply the security checklist to the whole mission diff above.";
 
+// Backlog #9: the mission-final review checks the code against every FR
+// of the feature specification (standalone SPEC.md / SpecKit spec.md).
+export function specFrCheckLine(specPath) {
+  const name = path.basename(specPath);
+  return `Feature specification: ${specPath}\nAlso check the code against every FR in it: for each FR, confirm the mission delta (or code that already existed) implements it and say where (file:line). FAIL each FR that is not implemented or only partly implemented, with location '${name} FR-###'. An FR that needs no code (e.g. a documented assumption) goes in notes, not findings.`;
+}
+
 // Mission 031 phase 8 task 8.2: efficiency/evidence instruction block for
 // code_reviewer (PHASE_REVIEW) and verifier (PHASE_VERIFY) briefs. Kept as
 // one exported constant so the text stays verbatim in both handoffs and the
@@ -299,11 +306,12 @@ export function formatOperatorPhaseEdits(operatorPhaseEdits) {
   ].join("\n");
 }
 
-function assemble({kind, phaseName, phaseIndex, phaseTotal, phaseTasks, attempt, summary, declaredPaths, planPath, tasksPath, pathsSection, deltaBody, changedFiles, gateSection, durationsSection, noParallelSection, securitySection, operatorEditsSection}) {
+function assemble({kind, phaseName, phaseIndex, phaseTotal, phaseTasks, attempt, summary, declaredPaths, planPath, tasksPath, specPath, pathsSection, deltaBody, changedFiles, gateSection, durationsSection, noParallelSection, securitySection, operatorEditsSection}) {
   const parts = [];
   if (kind === "MISSION_FINAL") {
     parts.push(`Final repository review against standalone plan ${planPath} and tasks ${tasksPath}.`);
     parts.push("");
+    if (typeof specPath === "string" && specPath) parts.push(specFrCheckLine(specPath), "");
     if (pathsSection) parts.push(pathsSection, "");
     parts.push(declaredLine(declaredPaths));
     if (summary) parts.push(`\nImplementer report (untrusted — verify against the delta):\n${summary}`);
@@ -509,6 +517,7 @@ export function buildStandaloneHandoff(opts = {}) {
       declaredPaths: opts.declaredPaths,
       planPath: opts.planPath,
       tasksPath: opts.tasksPath,
+      specPath: opts.specPath,
       pathsSection,
       summary,
       deltaBody: body,

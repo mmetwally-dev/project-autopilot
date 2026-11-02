@@ -36,6 +36,15 @@ export const PLAN_REVIEW_FULL_LINE =
 export const PLAN_REVIEW_CONFIRMATION_LINE =
   `This is a confirmation full review after a scoped re-review PASS: no previous findings are listed, so review the whole plan again from scratch, across all categories you check, not one batch at a time. ${PLAN_REVIEW_SEVERITY_LINE}`;
 
+// Backlog #8: SpecKit-analyze-style cross-check for the standalone plan
+// review when SPEC.md is on; used only in full review rounds.
+export const STANDALONE_SPEC_ANALYZE_LINE =
+  "Cross-check SPEC.md, PLAN.md and TASKS.md together like SpecKit's analyze step: (1) coverage — every FR has a task that really implements it and every task maps to an FR or is clearly setup/wiring/docs; every user story's acceptance scenarios and every success criterion are reachable by some task's accept/verify; (2) consistency — the same entity, field, route, file or term is named the same way in all three files, and PLAN.md's scope, constraints and phase boundaries match TASKS.md; (3) ambiguity — vague words with no measurable criterion (fast, secure, robust, intuitive) or placeholders left in any file; (4) underspecification — a task whose accept/verify cannot tell done from not done, or an FR with no testable outcome; (5) duplication — FRs or tasks that say the same thing; (6) conflicts — anything that contradicts the request or a source document it names. Apply the severity rule above: a gap that leaves a requirement unbuilt, untestable or contradictory is BLOCKING (finding); terminology drift, wording and duplicates that don't change behaviour are MINOR (notes).";
+
+export function isFullPlanReviewRound(lines) {
+  return Array.isArray(lines) && lines[0] !== PLAN_REVIEW_VERIFY_LINE;
+}
+
 const CONFIRMATION_KEY = "planReviewConfirmation";
 const REVISIONS_KEY = "planReviewRevisions";
 const REVIEWER_ROUNDS_KEY = "planReviewReviewerRounds";

@@ -127,6 +127,7 @@ export const DEFAULTS = {
   },
   retries: {
     plan_revisions: 8,
+    spec_revisions: 3,
     implementation: 4,
     verification: 4,
     final_review_fix_rounds: FINAL_REVIEW_FIX_ROUNDS_DEFAULT,
@@ -150,6 +151,7 @@ export const DEFAULTS = {
   workflow: {
     plan_review: true,
     plan_review_rounds_converge: true,
+    standalone_spec: true,
     gsd_planning_review: false,
     spec_review: true,
     code_review_per_phase: true,
@@ -356,6 +358,7 @@ function layoutRole(runtimeRoleEntry = {}, role = "") {
 const WORKFLOW_MAP = [
   ["plan_review", "planReview"],
   ["plan_review_rounds_converge", "plan_review_convergence"],
+  ["standalone_spec", "standaloneSpec"],
   ["gsd_planning_review", "gsdPlanningReview"],
   ["spec_review", "specReview"],
   ["code_review_per_phase", "implementationReview"],
@@ -607,6 +610,8 @@ export function toRuntimeConfig(layout = {}) {
   if (Object.keys(failureBudgets).length) policy.failure_budgets = failureBudgets;
   if (has(retries, "plan_revisions")) policy.max_plan_revisions = retries.plan_revisions;
   else if (has(legacyPolicy, "max_plan_revisions")) policy.max_plan_revisions = legacyPolicy.max_plan_revisions;
+  if (has(retries, "spec_revisions")) policy.max_spec_revisions = retries.spec_revisions;
+  else if (has(legacyPolicy, "max_spec_revisions")) policy.max_spec_revisions = legacyPolicy.max_spec_revisions;
   if (has(retries, "no_progress_sessions")) policy.no_progress_generations = retries.no_progress_sessions;
   else if (has(legacyPolicy, "no_progress_generations")) policy.no_progress_generations = legacyPolicy.no_progress_generations;
   if (has(retries, "final_review_fix_rounds")) policy.final_review_fix_rounds = retries.final_review_fix_rounds;
@@ -679,7 +684,7 @@ export function toRuntimeConfig(layout = {}) {
         "backstop_raw_tokens", "relay_timeout_ms", "role_timeout_ms", "role_deadline_floor_ms",
         "idle_hang_ms", "first_output_ms", "max_silence_ms", "retry_delay_ms",
         "checkpoint_after_task", "checkpoint_after_phase", "fail_closed_on_relay_violation",
-        "max_plan_revisions", "no_progress_generations", "final_review_fix_rounds",
+        "max_plan_revisions", "max_spec_revisions", "no_progress_generations", "final_review_fix_rounds",
         "failure_budgets", "require_human_commit", "per_task_timeout_ms"
       ]);
       if (!knownKeys.has(key) && !has(policy, key)) policy[key] = value;
@@ -869,6 +874,7 @@ export function toNewLayoutConfig(runtimeConfig = {}, schemaRef = "./config.sche
 
   // retries
   if (has(policy, "max_plan_revisions")) layout.retries.plan_revisions = policy.max_plan_revisions;
+  if (has(policy, "max_spec_revisions")) layout.retries.spec_revisions = policy.max_spec_revisions;
   if (has(policy, "no_progress_generations")) layout.retries.no_progress_sessions = policy.no_progress_generations;
   if (has(policy, "final_review_fix_rounds")) layout.retries.final_review_fix_rounds = policy.final_review_fix_rounds;
   if (has(policy, "continuation_allowance")) layout.retries.extra_sessions_per_task = policy.continuation_allowance;

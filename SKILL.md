@@ -80,11 +80,16 @@ and `ap watch` do not exist; the WATCH-REPORT is the status view.
 
 ## How a mission runs
 
-- **Planning.** The planner writes `PLAN.md` and `TASKS.md` in
-  `.autopilot/missions/<NNN>-<slug>/`. Each task is one concrete action on about
+- **Planning.** The planner first writes `SPEC.md` (FR-### requirements) and
+  `CONTEXT.md` (code map), reviewed until they pass (skipped when
+  `workflow.standalone_spec` is false), then `PLAN.md` and `TASKS.md` in
+  `.autopilot/missions/<NNN>-<slug>/`; tasks cite the FRs they implement. Each task is one concrete action on about
   one file, with exact paths, an `accept:` line and a `verify:` command; more than
   3 changes or 2 files means split it. The read-only plan reviewer APPROVES or
-  DENIES with findings; the planner revises up to `retries.plan_revisions` times.
+  DENIES with findings; the planner revises up to `retries.plan_revisions` times
+  (the spec review: `retries.spec_revisions`, default 3, then open findings pass
+  to the plan stage). With the spec on, full plan-review rounds also cross-check
+  SPEC/PLAN/TASKS (coverage, naming, ambiguity, duplicates, conflicts).
   Plan Review FAIL returns to Planning.
 - **Implementation, per phase.** One implementer session per task. At a turn or
   token cap the implementer writes a hand-off note (`handoff/<task>.md`) and a
@@ -100,7 +105,8 @@ and `ap watch` do not exist; the WATCH-REPORT is the status view.
   runs before Code Review has passed; a FAIL returns to Implementation, then Code
   Review and Verification repeat. A multi-finding status enumerates each finding
   against its own evidence, never a group summary.
-- **Final review.** The code reviewer reads the whole mission change; up to
+- **Final review.** The code reviewer reads the whole mission change and, when a
+  spec exists (`SPEC.md` / SpecKit `spec.md`), checks every FR against the code; up to
   `retries.final_review_fix_rounds` fix rounds. Success prints
   `ALL WORK COMPLETE — HUMAN COMMIT REQUIRED`.
 - **Escalation.** When a budget is spent, a task stops progressing, or a guard
@@ -127,7 +133,7 @@ Antigravity `.agents/skills/ap.<cmd>/SKILL.md` (a marked, generated dir per
 command). Type them in the agent's chat; arguments are passed through.
 
 - `/ap.run` — Do the whole job: plan, code, review, test until done. All phases, with fix rounds. Terminal: `ap run`
-- `/ap.plan` — Step 1 only: write a reviewed plan + task list, then stop. Includes the plan review. Terminal: `ap run --stage planning`
+- `/ap.plan` — Step 1 only: write a reviewed spec, plan + task list, then stop. Includes the plan review. Terminal: `ap run --stage planning`
 - `/ap.implement` — Step 2 only: code the next part of the plan, then stop (no review). Current phase only; standalone missions only. Terminal: `ap run --stage implement`
 - `/ap.review` — Step 3 only: review the code just written, then stop. Current phase only; standalone missions only. Terminal: `ap run --stage review`
 - `/ap.verify` — Step 4 only: test the code just reviewed and tick its tasks done. Current phase only; standalone missions only. Terminal: `ap run --stage verify`
@@ -308,7 +314,7 @@ Every setting with its default is in [docs/configuration.md](docs/configuration.
 
 ## SpecKit, standalone and not-yet-reviewed integrations
 
-- **Standalone** (default): each mission keeps `PLAN.md` and `TASKS.md` in
+- **Standalone** (default): each mission keeps `SPEC.md`, `CONTEXT.md`, `PLAN.md` and `TASKS.md` in
   `.autopilot/missions/<NNN>-<slug>/`. All features, including `--stage`, work here.
 - **SpecKit**: `.specify/workflows/speckit/workflow.yml` is authoritative; command
   steps map to the planner, gate steps to the plan reviewer, and implementation is

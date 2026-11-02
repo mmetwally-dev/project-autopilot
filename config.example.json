@@ -89,6 +89,7 @@
   },
   "retries": {
     "plan_revisions": 8,
+    "spec_revisions": 3,
     "implementation": 4,
     "verification": 4,
     "final_review_fix_rounds": 2,
@@ -110,6 +111,7 @@
   "workflow": {
     "plan_review": true,
     "plan_review_rounds_converge": true,
+    "standalone_spec": true,
     "gsd_planning_review": false,
     "spec_review": true,
     "code_review_per_phase": true,

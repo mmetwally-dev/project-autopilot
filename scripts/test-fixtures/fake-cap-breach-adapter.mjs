@@ -210,6 +210,17 @@ if (sc === "cap_verdict") {
   // must accept it instead of spending a continuation to re-run the review.
   emit({type: "text", part: {type: "text", text: REVIEW_PASS}});
   await spinToCap(tiny);
+} else if (sc === "cap_verdict_fail" && prompt.includes("Create or continue an implementation plan")) {
+  writeStandalonePlanningArtifacts();
+  emit({type: "text", part: {type: "text", text: "planner ok"}});
+} else if (sc === "cap_verdict_fail") {
+  if (prompt.includes("confirmation full review after a scoped re-review PASS")
+    || prompt.includes("Prior findings to re-check")) {
+    emit({type: "text", part: {type: "text", text: REVIEW_PASS}});
+  } else {
+    emit({type: "text", part: {type: "text", text: REVIEW_FAIL}});
+    await spinToCap(tiny);
+  }
 } else if (sc === "plan_review_cap_rounds" && prompt.includes("Create or continue an implementation plan")) {
   // Item 6/planner: every Planner generation caps once, then the resumed
   // generation writes the artifacts. The second (revision) Planner run may

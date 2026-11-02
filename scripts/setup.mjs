@@ -1083,7 +1083,7 @@ function planningFrameworkOptions(
 // framework's files and still want Autopilot's own plan-per-mission flow.
 // Detected frameworks stay first, so the default pick is unchanged.
 function standaloneChoiceLabel() {
-  return "Standalone — Autopilot writes the plan itself: a PLAN.md (the plan) and\n   TASKS.md (the task list) for each mission";
+  return "Standalone — Autopilot writes the plan itself: a SPEC.md (the requirements), a PLAN.md (the plan)\n   and TASKS.md (the task list) for each mission";
 }
 
 function frameworkChoicesFor(currentFramework, detectedFrameworks) {
@@ -1113,14 +1113,14 @@ function frameworkChoicesFor(currentFramework, detectedFrameworks) {
 function frameworkPickedLine(frameworkId) {
   if (frameworkId === "speckit") return "✓ Planning: SpecKit";
   if (frameworkId === "gsd") return "✓ Planning: GSD (not yet reviewed)";
-  return "✓ Planning: Standalone — PLAN.md + TASKS.md per mission";
+  return "✓ Planning: Standalone — SPEC.md + PLAN.md + TASKS.md per mission";
 }
 
 function frameworkAvailabilityLines(detectedFrameworks) {
   const stateFor = id => detectedFrameworks.includes(id) ? "available" : "not detected";
   const symbolFor = id => detectedFrameworks.includes(id) ? "✓" : "·";
   return [
-    "✓ Standalone: built in — Autopilot writes the plan itself (PLAN.md + TASKS.md per mission)",
+    "✓ Standalone: built in — Autopilot writes the plan itself (SPEC.md + PLAN.md + TASKS.md per mission)",
     `${symbolFor("speckit")} SpecKit: ${stateFor("speckit")}`
   ];
 }
