@@ -707,10 +707,10 @@ case "$ROLE" in
           if [ -n "$SPEC_FILE" ]; then
             mkdir -p "$(dirname "$SPEC_FILE")"
             printf '# Spec\n\n## Requirements\n\n- **FR-001**: System MUST do the fixture task.\n' > "$SPEC_FILE"
-            CONTEXT_FILE=$(printf '%s\n' "$PROMPT" | sed -n 's/^Write the codebase context to exactly: \(.*\) — .*$/\1/p' | head -n 1)
+            CONTEXT_FILE=$(printf '%s\n' "$PROMPT" | sed -n 's/^Write the code map to exactly: \(.*\) — .*$/\1/p' | head -n 1)
             if [ -n "$CONTEXT_FILE" ]; then
               mkdir -p "$(dirname "$CONTEXT_FILE")"
-              printf '# Context\n\nfixture.\n' > "$CONTEXT_FILE"
+              printf '# Code map\n\nfixture.\n' > "$CONTEXT_FILE"
             fi
           fi
           PLAN_FILE=$(printf '%s\n' "$PROMPT" | sed -n 's/^Write the narrative plan to exactly: //p' | head -n 1)

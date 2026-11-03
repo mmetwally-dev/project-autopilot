@@ -202,7 +202,7 @@ export function buildExecutionEnvelope({repo, scratchDir = null, readOnly = fals
     return {available: false, reason: admission.reason, detail: admission.detail, context, binary: null, args: [], cwd: repo, sandbox: null};
   }
   const missingRuntimeFile = runtimeFiles.find(file => !fs.existsSync(file));
-  if (missingRuntimeFile) return {available: false, reason: "adapter_runtime_file_missing", missingRuntimeFile, context, binary: null, args: [], cwd: repository, sandbox: null};
+  if (missingRuntimeFile) return {available: false, reason: "adapter_runtime_file_missing", missingRuntimeFile, detail: `missing runtime file: ${missingRuntimeFile}; fix: reinstall the agent CLI or put ${path.basename(missingRuntimeFile)} next to ${path.dirname(missingRuntimeFile)}`, context, binary: null, args: [], cwd: repository, sandbox: null};
   const mounts = systemMounts();
   // Filesystem containment only: unshare everything bwrap supports, then
   // re-share the network namespace unconditionally. Normal CLI network

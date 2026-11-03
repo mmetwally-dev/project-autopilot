@@ -1913,25 +1913,42 @@ export function buildOrchestratorFallbackNote(taskRef, events, adapterId, repoRo
       "Largest read: (none: no decoded file reads)",
     ].join("\n");
   }
-  // Backlog #15 part 3b: the changes section is session-only. When the caller
-  // supplies the paths from the before/after snapshots, those win (they also
-  // cover writes made through bash). Otherwise derive them from the decoded
-  // edit/write events. An adapter with no decoded vocabulary keeps the raw
-  // diff stat it was handed (legacy behaviour).
-  let changedPaths = null;
-  if (Array.isArray(sessionPaths)) changedPaths = sessionPaths.map((p) => String(p ?? "")).filter(Boolean);
-  else if (adapterId === "opencode" || adapterId === "claude") {
-    try { changedPaths = sessionEditPaths(adapterId, events, String(repoRoot ?? "")); } catch { changedPaths = []; }
-  }
-  const diffRaw = String(diffStat ?? "").replace(/\s+/g, " ").trim();
+  // Backlog #15 part 3b / backlog #7: the changes section is session-only.
+  // When caller supplies paths from snapshots, those win for git-tracked
+  // changes. In a repo ignoring .autopilot/, decoded edit/write events
+  // surface un-tracked edits (e.g. PLAN.md, TASKS.md) with suffix
+  // `(edited — not tracked by git)`.
   let diffBody;
-  if (changedPaths !== null) {
+  if (Array.isArray(sessionPaths)) {
+    const sessionClean = sessionPaths.map((p) => String(p ?? "")).filter(Boolean);
+    let editPaths = [];
+    if (adapterId === "opencode" || adapterId === "claude") {
+      try { editPaths = sessionEditPaths(adapterId, events, String(repoRoot ?? "")); } catch { editPaths = []; }
+    }
+    if (sessionClean.length === 0) {
+      if (editPaths.length > 0) {
+        diffBody = editPaths.map((p) => `${p} (edited — not tracked by git)`).join("\n");
+      } else {
+        diffBody = "This session changed no files.";
+      }
+    } else {
+      const kept = filterDiffStatToPaths(diffStat, sessionClean);
+      const baseLines = kept.length ? kept : sessionClean.map((p) => `${p} (changed)`);
+      const norm = (p) => String(p ?? "").replace(/\\/g, "/");
+      const sessionSet = new Set(sessionClean.map(norm));
+      const extra = editPaths.filter((p) => !sessionSet.has(norm(p))).map((p) => `${p} (edited — not tracked by git)`);
+      diffBody = [...baseLines, ...extra].join("\n");
+    }
+  } else if (adapterId === "opencode" || adapterId === "claude") {
+    let changedPaths = [];
+    try { changedPaths = sessionEditPaths(adapterId, events, String(repoRoot ?? "")); } catch { changedPaths = []; }
     if (changedPaths.length === 0) diffBody = "This session changed no files.";
     else {
       const kept = filterDiffStatToPaths(diffStat, changedPaths);
       diffBody = kept.length ? kept.join("\n") : changedPaths.map((p) => `${p} (changed)`).join("\n");
     }
   } else {
+    const diffRaw = String(diffStat ?? "").replace(/\s+/g, " ").trim();
     diffBody = diffRaw || "(unavailable: git diff --stat failed or was empty)";
   }
   if (diffBody.length > FALLBACK_NOTE_DIFF_MAX_CHARS) {

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import {spawnAgentSync, resolveAgentBinary} from "./agent-process.mjs";
+import {spawnAgentSync, resolveAgentBinary, resolveCodexNativeBinary} from "./agent-process.mjs";
 import {equivalentEventPath, eventReferencesPath} from "./event-paths.mjs";
 // agy stream-json event helpers (decode/observe/accumulate) plus the per-run
 // permissions allow-rule writer. Imported for driver dispatch only; the
@@ -27,7 +27,7 @@ function codexDriver() {
   return {
     id: "codex",
     contractVersion: 2,
-    resolveBinary: binary => resolveAgentBinary(binary),
+    resolveBinary: binary => resolveCodexNativeBinary(binary),
     version: binary => versionOf(binary),
     buildInvocation: codexInvocation,
     appliedSelections: codexAppliedSelections,
@@ -541,38 +541,19 @@ function agyInvocation(request) {
   if (request.model) args.push("--model", request.model);
   if (request.reasoning) args.push("--effort", request.reasoning);
   if (request.scratchDir) args.push("--add-dir", request.scratchDir);
-  // Per-run permissions, never --dangerously-skip-permissions: agy has no
-  // --allowedTools/--settings equivalent (verified against `agy --help`), so
-  // the only least-privileged grant surface is the settings file agy reads at
-  // $HOME/.gemini/antigravity-cli/settings.json (headless runs honor its
-  // permissions per the CLI's own changelog). The writer emits that file under
-  // the run's OWN scratch dir, so nothing global is touched and every run is
-  // scoped to its own tree. read_only (plan mode) needs no grant at all — no
-  // allow-rule, and therefore no command(...) permission, is written for it.
-  // The child only reads agy's settings file when it resolves it as its $HOME,
-  // so the record surfaces the written path as settingsPath for a launcher to
-  // consume later (route the child's HOME to this one scratch dir, never the
-  // operator's real HOME). That consumption is DEFERRED to task 1.4: the
-  // production relay resolves agy from the static adapters/agents.json manifest
-  // args — runRelay passes no `mode` (scripts/autopilot.mjs:2806), so
-  // resolveAdapterTransport never reaches buildInvocation and spawns no per-run
-  // HOME — so today no settingsPath is produced in production and agy has not yet
-  // read this file. Task 1.3 only WRITES and SURFACES the file (PLAN.md limits
-  // 1.3's autopilot.mjs edits to the unrelated :3062 comment); task 1.4 owns
-  // injecting it into runRelay's launch env (launchEnv) once the agy child is
-  // routed through buildInvocation with its mode + scratchDir. Until then a
-  // write/scratch agy run whose command needs a permission fails loud via
-  // denied_actions (-> PERMISSION_DENIED, tested in scripts/test-agy-wire.mjs),
-  // never a silent pass. The file still lands in the run's OWN scratch dir,
-  // which the relay harness has already created (autopilot.mjs:2508 for a write
-  // role, :2514 for a disposable workspace); a scratch dir that is not on disk
-  // at all — a synthetic request path, or a resolution before the harness made
-  // the tree — writes nothing and claims no path, so nothing global is ever
-  // touched and settingsPath is only ever non-null for a file that exists.
+  // Per-run permissions, never --dangerously-skip-permissions. agy applies
+  // `--settings <file>` to that one session only, so each write/scratch run gets
+  // its own settings file under its OWN scratch dir (nothing global is touched).
+  // The production relay (runRelay in autopilot.mjs) builds the same flag from
+  // agyAllowRulesForRole(); this driver path does it when a caller passes
+  // allowRules. read_only (plan mode) gets no settings file and no grants.
+  // A command without a matching command(...) rule fails loud via
+  // denied_actions (-> PERMISSION_DENIED, tested in scripts/test-agy-wire.mjs).
   const settingsPath = ["write", "scratch"].includes(request.mode)
     && request.scratchDir && fs.existsSync(request.scratchDir)
     ? writeAgyAllowRule(request.scratchDir, Array.isArray(request.allowRules) ? request.allowRules : [])
     : null;
+  if (settingsPath) args.push("--settings", settingsPath);
   return {binary: request.binary, args, settingsPath};
 }
 

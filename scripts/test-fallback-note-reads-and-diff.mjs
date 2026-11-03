@@ -126,5 +126,46 @@ const wholeWorktreeDiff = [
       .includes("scripts/b.mjs | 2 ++"));
 }
 
+// ── (v) backlog #7: files edited outside git's view (git-ignored mission files) ──
+{
+  const edit = (filePath) => ({type: "tool_use", part: {type: "tool_use", tool: "edit",
+    state: {input: {filePath}, status: "completed"}}});
+  const write = (filePath) => ({type: "tool_use", part: {type: "tool_use", tool: "write",
+    state: {input: {filePath}, status: "completed"}}});
+
+  // (a) opencode events with edit/write of .autopilot/missions/m/PLAN.md and .autopilot/missions/m/TASKS.md,
+  // sessionPaths = [] -> note contains both paths with "(edited — not tracked by git)" and does NOT contain "This session changed no files."
+  const ignoredEvents = [
+    edit("/repo/.autopilot/missions/m/PLAN.md"),
+    write("/repo/.autopilot/missions/m/TASKS.md"),
+  ];
+  const noteA = buildOrchestratorFallbackNote("T11", ignoredEvents, "opencode", "/repo", "", null, []);
+  check("backlog #7 (a): note lists PLAN.md with suffix",
+    noteA.includes(".autopilot/missions/m/PLAN.md (edited — not tracked by git)"), noteA);
+  check("backlog #7 (a): note lists TASKS.md with suffix",
+    noteA.includes(".autopilot/missions/m/TASKS.md (edited — not tracked by git)"), noteA);
+  check("backlog #7 (a): note does not say changed no files",
+    !noteA.includes("This session changed no files."), noteA);
+
+  // (b) no edit/write events and sessionPaths = [] -> still "This session changed no files."
+  const noteB = buildOrchestratorFallbackNote("T12", [], "opencode", "/repo", "", null, []);
+  check("backlog #7 (b): no edit/write events and sessionPaths = [] still says changed no files",
+    noteB.includes("This session changed no files."), noteB);
+
+  // (c) sessionPaths = ["src/a.js"] with a diff stat for it, plus an event editing .autopilot/missions/m/PLAN.md -> both appear, PLAN.md with suffix
+  const mixedEvents = [edit("/repo/.autopilot/missions/m/PLAN.md")];
+  const diffC = [
+    " src/a.js | 2 ++",
+    " 1 file changed, 2 insertions(+)",
+  ].join("\n");
+  const noteC = buildOrchestratorFallbackNote("T13", mixedEvents, "opencode", "/repo", diffC, null, ["src/a.js"]);
+  check("backlog #7 (c): note contains tracked file diff stat",
+    noteC.includes("src/a.js | 2 ++"), noteC);
+  check("backlog #7 (c): note contains ignored file with suffix",
+    noteC.includes(".autopilot/missions/m/PLAN.md (edited — not tracked by git)"), noteC);
+  check("backlog #7 (c): note does not say changed no files",
+    !noteC.includes("This session changed no files."), noteC);
+}
+
 console.log(`\n${ok} passed, ${failed} failed`);
 if (failed) process.exit(1);

@@ -35,7 +35,7 @@ check("report has the planning and implementation tables", headers.length >= 2, 
 check("planning round 1 is planner-only", !model.planning.rounds[0].runs.some((r) => r.role === "plan_reviewer"), model.planning.rounds[0].runs.map((r) => r.role));
 check("a later round holds the plan_reviewer", model.planning.rounds.slice(1).some((round) => round.runs.some((r) => r.role === "plan_reviewer")), model.planning.rounds.map((round) => round.runs.map((r) => r.role)));
 
-const words = ["ROLE", "MODEL", "TASK", "STATUS", "DURATION", "SNAPSHOT", "PRICE", "CONTEXT", "TURNS", "STARTED", "NOTE"];
+const words = ["ROLE", "MODEL", "TASK", "STATUS", "TURNS", "CONTEXT", "TOKENS", "STARTED", "DURATION", "NOTE"];
 const expected = Object.fromEntries(words.map((word) => [word, headers[0].indexOf(word)]));
 headers.forEach((header, i) => {
   for (const word of words) {
@@ -44,8 +44,8 @@ headers.forEach((header, i) => {
 });
 
 const roleWidth = expected.MODEL - expected.ROLE - 2;
-check("ROLE column is at least 25 wide", roleWidth >= 25, { roleWidth, header: headers[0] });
-check("STATUS column fits the longest status word", expected.DURATION - expected.STATUS - 2 >= "INTERRUPTED".length, { statusWidth: expected.DURATION - expected.STATUS - 2, header: headers[0] });
+check("ROLE column is at least 16 wide", roleWidth >= 16, { roleWidth, header: headers[0] });
+check("STATUS column fits the longest status word", expected.TURNS - expected.STATUS - 2 >= "INTERRUPTED".length, { statusWidth: expected.TURNS - expected.STATUS - 2, header: headers[0] });
 check("no trailing spaces", report.split("\n").every((line) => line === line.replace(/\s+$/, "")), report.split("\n").find((line) => line !== line.replace(/\s+$/, "")));
 
 if (failures.length) { console.error(`${failures.length} column-width check(s) failed.`); process.exit(1); }

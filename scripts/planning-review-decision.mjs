@@ -24,8 +24,9 @@
 // `evaluatePlanningGate()` precedent in `scripts/phase-stage-checkpoint.mjs`:
 // - `{action: "retry", ...}` — a `retryable:true` adapter/infrastructure
 //   failure with budget available: retry the reviewer only.
-// - `{action: "escalate", ...}` — `PATH_UNSUPPORTED`/`PERMISSION_DENIED`, a
-//   retryable adapter/infrastructure failure with budget exhausted, or an
+// - `{action: "escalate", ...}` — `PATH_UNSUPPORTED`/`PERMISSION_DENIED`/
+//   `AUTH_REQUIRED`/`READ_ONLY_CONTAINMENT_UNAVAILABLE`, a retryable
+//   adapter/infrastructure failure with budget exhausted, or an
 //   `INTERNAL_CONTRACT_ERROR`/`"orchestrator"` failure. Carries the failure's
 //   `class` and `domain` in the result.
 // - `{action: "passthrough", ...}` — `PLANNING_REJECTED` or any other
@@ -44,6 +45,10 @@ const NON_RETRYABLE_ESCALATE_CLASSES = Object.freeze([
   // The CLI is logged out: another reviewer attempt on the same adapter
   // cannot succeed any more than another path/permission attempt can.
   "AUTH_REQUIRED",
+  // Backlog #5: the read-only launch-plan denial (containment not available
+  // / adapter runtime sibling missing). Another attempt on the same adapter
+  // fails identically until the operator fixes the environment.
+  "READ_ONLY_CONTAINMENT_UNAVAILABLE",
 ]);
 
 // Functional class that is never intercepted here: the caller runs its
@@ -129,8 +134,9 @@ export function decidePlanningReview({failure, budget, scope} = {}) {
     };
   }
 
-  // Permanently unsupported paths / denied permissions: retrying cannot
-  // change containment reality. Always escalate, whatever the budget state.
+  // Permanently unsupported paths / denied permissions / unavailable
+  // containment: retrying cannot change containment reality. Always escalate,
+  // whatever the budget state.
   if (NON_RETRYABLE_ESCALATE_CLASSES.includes(failureClass)) {
     return {
       action: "escalate",

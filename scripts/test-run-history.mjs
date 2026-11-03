@@ -347,7 +347,7 @@ write(path.join(layoutRoot, ".autopilot", "missions", "004-layout", "watch-event
 
 const layout = renderWatchReport(layoutRoot, "004-layout", { tail: 5 });
 // Clock-stamped title once, then the watcher.md sections in order.
-assert(/^=== \d{2}:\d{2}:\d{2} — PIPELINE STATE ===$/m.test(layout), `watch render should print the clock-stamped title once: ${layout.slice(0, 200)}`);
+assert(/^=== \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} — PIPELINE STATE ===$/m.test(layout), `watch render should print the clock-stamped title once: ${layout.slice(0, 200)}`);
 assert((layout.match(/PIPELINE STATE ===/g) || []).length === 1, "the clock title must appear exactly once (no duplicate)");
 assert(layout.includes("Mission: 004-layout"), "PIPELINE STATE names the mission");
 assert(layout.includes("Status:") && layout.includes("Stage:"), "PIPELINE STATE has the Status/Stage lines");
@@ -358,7 +358,7 @@ assert(layout.includes("=== IMPLEMENTATION STAGE ==="), "watch render includes I
 assert(!layout.includes("=== FINAL REVIEW STAGE ==="), "watch render omits the not-started FINAL REVIEW STAGE");
 assert(layout.includes("GATE (orchestrator)"), "gate events render a GATE (orchestrator) row");
 assert(layout.includes("12/12 runs passed"), "the gate row carries its passed/total progress");
-assert(layout.includes("01-implementer-aaaa0001") && layout.includes("02-code_reviewer-bbbb0002"), "implementation run rows render");
+assert(layout.includes("01-implementer") && layout.includes("02-code_reviewer"), "implementation run rows render");
 assert(layout.includes("T1.1"), "run rows carry their taskRef");
 assert(layout.includes("opus-4.5"), "MODEL cell shows the shortened resolved model");
 assert(layout.includes("=== CURRENT RUN ==="), "a live run renders the CURRENT RUN section");
@@ -375,7 +375,7 @@ assert(outFile === path.join(layoutRoot, ".autopilot", "missions", "004-layout",
 assert(fs.existsSync(outFile), "watch file should exist after write");
 const fileContent = fs.readFileSync(outFile, "utf8");
 assert(fileContent.startsWith("```\n") && fileContent.trimEnd().endsWith("```"), "watch .md file should be wrapped in a fenced code block");
-assert(fileContent.includes("01-implementer-aaaa0001") && fileContent.includes("=== IMPLEMENTATION STAGE ==="), "watch file should contain the new layout");
+assert(fileContent.includes("01-implementer") && fileContent.includes("=== IMPLEMENTATION STAGE ==="), "watch file should contain the new layout");
 assert(!fileContent.includes(".tmp."), "watch file should be atomically replaced (no leftover tmp marker)");
 
 // A cancelled mission: Status: CANCELLED and no CURRENT RUN section at all.
@@ -399,14 +399,14 @@ write(path.join(staleRun, "status.json"), JSON.stringify({
 write(path.join(staleRoot, ".autopilot", "owner.pid"), JSON.stringify({pid: 2147483645}));
 const staleStatusBefore = fs.readFileSync(path.join(staleRun, "status.json"), "utf8");
 const staleReport = renderWatchReport(staleRoot, null, { isOwnerAlive: deadOwner });
-const staleRow = staleReport.split("\n").find((l) => l.includes("01-implementer-aaaaaaaa"));
+const staleRow = staleReport.split("\n").find((l) => l.includes("01-implementer"));
 assert(staleRow && staleRow.includes("INTERRUPTED") && !staleRow.includes("RUNNING"), "the stale row's STATUS cell reads the bare word INTERRUPTED, never RUNNING");
 assert(staleRow && staleRow.includes("orchestrator not running"), "the stale row's NOTE carries the orchestrator-not-running reason");
 assert(staleRow && !staleRow.includes("INTERRUPTED (ORCHESTRATOR NOT RUNNING)"), "the stale row's STATUS cell is not widened by the parenthesised reason");
 assert(!staleReport.includes("=== CURRENT RUN ==="), "a stale run is never CURRENT");
 assert(fs.readFileSync(path.join(staleRun, "status.json"), "utf8") === staleStatusBefore, "watch render must NOT mutate a stale-looking RUNNING status.json");
 const liveReport = renderWatchReport(staleRoot, null, { isOwnerAlive: liveOwner });
-assert(/01-implementer-aaaaaaaa/.test(liveReport) && liveReport.includes("=== CURRENT RUN ==="), "a live owner keeps the run RUNNING and CURRENT");
+assert(/01-implementer/.test(liveReport) && liveReport.includes("=== CURRENT RUN ==="), "a live owner keeps the run RUNNING and CURRENT");
 
 // watchRunsDir / readWatchEvents: mission-scoped paths, malformed lines skipped.
 assert(watchRunsDir(layoutRoot, "004-layout") === layoutRuns, "watchRunsDir resolves the mission runs bucket");

@@ -242,7 +242,7 @@ try {
     const r = await runSetup({mode: '--wizard', repo, binDir, answers: Array(20).fill('')});
     check('wizard exits 0', r.status === 0, r.combined.slice(-2000));
     check('prints the one-line planning result',
-      r.combined.includes('✓ Planning: Standalone — SPEC.md + PLAN.md + TASKS.md per mission'),
+      r.combined.includes('✓ Planning: Standalone — PLAN.md + TASKS.md per mission'),
       r.combined.slice(-2000));
     check('does not ask "Planning framework"', !r.combined.includes('Planning framework'));
     check('wizard test-command prompt (nothing detected)',
@@ -268,7 +268,7 @@ try {
     check('still asks "Planning framework"', r.combined.includes('Planning framework'), r.combined.slice(-2000));
     checkEqual('saved framework follows the answer', readConfig(repo).project.planning_framework, 'standalone');
     check('Standalone is option 1 when SpecKit is detected',
-      r.combined.includes('Planning framework\n1) Standalone — Autopilot writes the plan itself: a SPEC.md (the requirements), a PLAN.md (the plan)\n   and TASKS.md (the task list) for each mission\n2) SpecKit — use this project\'s SpecKit files (.specify/, specs/*/tasks.md);\n   Autopilot implements, reviews and tests the tasks\n'),
+      r.combined.includes('Planning framework\n1) Standalone — Autopilot writes the plan itself: PLAN.md (the plan) and TASKS.md (the task list) for each mission (optional SPEC.md stage: workflow.standalone_spec)\n2) SpecKit — use this project\'s SpecKit files (.specify/, specs/*/tasks.md);\n   Autopilot implements, reviews and tests the tasks\n'),
       r.combined.slice(-3000));
     check('no "ignore" text in the framework choices', !/ignore (SpecKit|GSD|the detected)/.test(r.combined), r.combined.slice(-3000));
 

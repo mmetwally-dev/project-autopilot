@@ -27,7 +27,13 @@ export function specPath(repo, mission){
   return path.join(repo,".autopilot","missions",mission,"SPEC.md");
 }
 
-export function contextPath(repo, mission){
+export function codemapPath(repo, mission){
+  if(!mission) return path.join(repo,".autopilot","missions","CODEMAP.md");
+  assertSafeMissionName(repo, mission, "standalone mission");
+  return path.join(repo,".autopilot","missions",mission,"CODEMAP.md");
+}
+
+export function legacyContextPath(repo, mission){
   if(!mission) return path.join(repo,".autopilot","missions","CONTEXT.md");
   assertSafeMissionName(repo, mission, "standalone mission");
   return path.join(repo,".autopilot","missions",mission,"CONTEXT.md");

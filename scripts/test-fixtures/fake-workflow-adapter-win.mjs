@@ -607,10 +607,10 @@ async function main() {
       if (specFile) {
         fs.mkdirSync(path.dirname(specFile), {recursive: true});
         fs.writeFileSync(specFile, "# Spec\n\n## Requirements\n\n- **FR-001**: System MUST do the fixture task.\n");
-        const contextFile = firstLineMatch(prompt, /^Write the codebase context to exactly: (.*?) — /);
+        const contextFile = firstLineMatch(prompt, /^Write the code map to exactly: (.*?) — /);
         if (contextFile) {
           fs.mkdirSync(path.dirname(contextFile), {recursive: true});
-          fs.writeFileSync(contextFile, "# Context\n\nfixture.\n");
+          fs.writeFileSync(contextFile, "# Code map\n\nfixture.\n");
         }
       }
       const planFile = firstLineMatch(prompt, /^Write the narrative plan to exactly: (.*)$/)

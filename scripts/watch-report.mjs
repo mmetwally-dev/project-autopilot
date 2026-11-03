@@ -4,6 +4,7 @@ import path from "node:path";
 import { normalizeFindings } from "./review-feedback.mjs";
 import { formatPrimaryModelFallbackLine, primaryModelFallbackEntries } from "./primary-model-fallback.mjs";
 import { allPlanPassNotes } from "./plan-review-rounds.mjs";
+import { defaultIsPidAlive } from "./run-recovery.mjs";
 
 // Mission 094 Phase 1 task 1.1 — the core report model.
 //
@@ -108,6 +109,8 @@ function readRunExtras(dir) {
       if (st.planRevision !== undefined) extras.planRevision = st.planRevision;
       if (st.planningStage !== undefined) extras.planningStage = st.planningStage;
       if (st.note !== undefined) extras.note = st.note;
+      if (extras.note == null && st.failure_reason) extras.note = st.failure_reason;
+      if (extras.note == null && st.error) extras.note = st.error;
       if (st.interrupted_at !== undefined) extras.interrupted_at = st.interrupted_at;
       if (st.interruption_reason !== undefined) extras.interruption_reason = st.interruption_reason;
     }
@@ -115,6 +118,10 @@ function readRunExtras(dir) {
   try {
     const rs = JSON.parse(fs.readFileSync(path.join(dir, "result.json"), "utf8"));
     if (rs && typeof rs === "object") {
+      if (extras.note == null && rs.note) extras.note = rs.note;
+      if (extras.note == null && rs.failure?.reason) extras.note = rs.failure.reason;
+      if (extras.note == null && rs.failure?.message) extras.note = rs.failure.message;
+      if (extras.note == null && rs.error) extras.note = rs.error;
       if (extras.planningStage == null && rs.planningStage !== undefined) extras.planningStage = rs.planningStage;
       if (Array.isArray(rs.review?.findings) && rs.review.findings.length) extras.findings = rs.review.findings.map(String);
       else if (Array.isArray(rs.findings) && rs.findings.length) extras.findings = rs.findings.map(String);
@@ -476,7 +483,16 @@ function buildPlanningRuns(runs, { status: missionStatus } = {}) {
     rounds,
     runs,
     findings: aggregateFindings(runs),
-    revision: runs.reduce((max, r) => (typeof r.planRevision === "number" && (max == null || r.planRevision > max) ? r.planRevision : max), null),
+    revision: runs.reduce((max, r) => {
+      if (typeof r.planRevision !== "number") return max;
+      if (r.taskRef && r.taskRef.startsWith("standalone-") && !r.taskRef.startsWith("standalone-planning-")) return max;
+      return max == null || r.planRevision > max ? r.planRevision : max;
+    }, null),
+    specRevision: runs.reduce((max, r) => {
+      if (typeof r.planRevision !== "number") return max;
+      if (!r.taskRef || !r.taskRef.startsWith("standalone-spec-")) return max;
+      return max == null || r.planRevision > max ? r.planRevision : max;
+    }, null),
   };
 }
 
@@ -549,6 +565,20 @@ function isFinalReviewRun(run, phaseCount) {
   return true;
 }
 
+// A planning-only run (ap plan, or ap run --stage planning) stops at
+// tasks_ready with no implementation/verification/review runs.
+export function planningOnlyDone(state, runs = []) {
+  if (state?.phase !== "tasks_ready") return false;
+  const cmd = state?.command;
+  const stopsAfterPlanning = cmd?.stopAfter === "planning" || cmd?.name === "plan";
+  if (!stopsAfterPlanning) return false;
+  const list = Array.isArray(runs) ? runs : [];
+  return !list.some((r) => {
+    const role = roleOf(r);
+    return role === "implementer" || role === "verifier" || role === "code_reviewer";
+  });
+}
+
 function classifyStage(state, planning, phases, finalReview, runs = []) {
   const statePhase = typeof state?.phase === "string" ? state.phase : "";
   const stateStep = typeof state?.step === "string" ? state.step : "";
@@ -558,6 +588,7 @@ function classifyStage(state, planning, phases, finalReview, runs = []) {
   // is a real stage signal even before state.phase has been written.
   if (statePhase === "final_review") return "FINAL REVIEW";
   if (statePhase === "planning" || statePhase === "plan_approval" || /plan/i.test(stateStep)) return "PLANNING";
+  if (planningOnlyDone(state, runs)) return "PLANNING";
   if (statePhase === "implementing" || statePhase === "verifying" || statePhase === "tasks_ready") return "IMPLEMENTATION";
   if (finalReview.status === "skipped") return "FINAL REVIEW";
   if (finalReview.runs.length > 0 && (finalReview.status === "in_progress" || finalReview.status === "passed")) return "FINAL REVIEW";
@@ -703,24 +734,52 @@ export function parseDiffStat(stat) {
 // Full status/stop-line classification (task 1.2). The base status drives the
 // header; `stopLine` is the single stop/resume line. A cancel record belonging
 // to a different mission is never carried (watcher.md rule 8).
+// The reason an envelope-denial-style failure carries on its evidence entry
+// (e.g. "adapter_runtime_file_missing"); null for anything else.
+function evidenceReason(failure) {
+  for (const entry of Array.isArray(failure?.evidence) ? failure.evidence : []) {
+    if (entry && typeof entry === "object" && typeof entry.reason === "string" && entry.reason !== "") return entry.reason;
+  }
+  return null;
+}
+
 function statusStopLine(info) {
   switch (info.status) {
     case "COMPLETED": return "COMPLETED";
     case "CANCELLED": return `CANCELLED${info.at ? ` at ${formatStamp(info.at)}` : ""}${info.reason ? ` — reason: ${info.reason}` : ""}`;
     case "ESCALATED": return `ESCALATED${info.at ? ` at ${formatStamp(info.at)}` : ""}${info.failureClass ? ` — ${info.failureClass}` : ""}${info.cause ? ` (${info.cause})` : ""} — human intervention required`;
-    case "STOPPED": return info.orchestratorNotRunning
-      ? `STOPPED · orchestrator not running (resumable)`
-      : `STOPPED${info.at ? ` at ${formatStamp(info.at)}` : ""}`;
+    case "STOPPED":
+      if (info.planningOnlyDone) return "STOPPED — planning done (tasks ready) · next: ap run";
+      return info.orchestratorNotRunning
+        ? `STOPPED · orchestrator not running (resumable)`
+        : `STOPPED${info.at ? ` at ${formatStamp(info.at)}` : ""}`;
     case "PAUSED": return `AWAITING PLAN APPROVAL${info.at ? ` at ${formatStamp(info.at)}` : ""} — run \`ap run\` to approve and continue`;
     default: return null;
   }
 }
 
-export function classifyStatus(state, { operatorEvents = [], runs = [], ownerAlive } = {}) {
+function escalatedButResumed(state, runs, ownerAlive, isAlive) {
+  let oa = ownerAlive;
+  if (oa === undefined) {
+    const withFlag = (Array.isArray(runs) ? runs : []).find((r) => typeof r?.ownerAlive === "boolean");
+    if (withFlag) oa = withFlag.ownerAlive === true;
+  }
+  if (oa !== true) return false;
+  const stateUpdated = Date.parse(state?.updatedAt ?? state?.updated_at ?? "") || 0;
+  const liveProbe = typeof isAlive === "function" ? isAlive : defaultIsPidAlive;
+  return (Array.isArray(runs) ? runs : []).some((r) => {
+    if (String(r?.status || "").toLowerCase() !== "running") return false;
+    const started = Date.parse(r?.started_at ?? r?.startedAt ?? "") || 0;
+    if (stateUpdated > 0 && started <= stateUpdated) return false;
+    return liveProbe(r?.pid) === true;
+  });
+}
+
+export function classifyStatus(state, { operatorEvents = [], runs = [], ownerAlive, isAlive } = {}) {
   const phase = String(state?.phase || "");
   const mission = state?.mission ?? null;
-  const info = { status: "RUNNING", at: null, reason: null, failureClass: null, cause: null, humanRequired: false, stopLine: null, orchestratorNotRunning: false };
-  if (phase === "complete") {
+  const info = { status: "RUNNING", at: null, reason: null, failureClass: null, cause: null, humanRequired: false, stopLine: null, orchestratorNotRunning: false, planningOnlyDone: false };
+  if (phase === "complete" || phase === "completed") {
     info.status = "COMPLETED";
   } else if (phase === "cancelled") {
     info.status = "CANCELLED";
@@ -729,12 +788,26 @@ export function classifyStatus(state, { operatorEvents = [], runs = [], ownerAli
       info.at = c.at ?? null;
       info.reason = c.reason ?? null;
     }
+  } else if (phase === "escalated" && escalatedButResumed(state, runs, ownerAlive, isAlive)) {
+    // Backlog #6: `ap run` resumed an escalated mission; state.phase is only
+    // rewritten when the stage finishes, but a live run newer than the state
+    // write means the mission is running again.
+    info.status = "RUNNING";
   } else if (phase === "escalated") {
     info.status = "ESCALATED";
     info.humanRequired = true;
     const failure = state?.lastFailure;
-    info.failureClass = (typeof state?.step === "string" && state.step) ? state.step : (failure?.class ?? null);
-    info.cause = failure?.code ?? failure?.message ?? state?.phaseCheckpointError?.code ?? null;
+    const stepText = (typeof state?.step === "string" && state.step) ? state.step : null;
+    const cls = (typeof failure?.class === "string" && failure.class) ? failure.class : null;
+    // Prefer the recorded step when it already names the class (e.g.
+    // "auth_required_escalation" for AUTH_REQUIRED or
+    // "read_only_containment_unavailable" for READ_ONLY_CONTAINMENT_UNAVAILABLE).
+    // A step that names neither ("non_retryable_failure") shows the failure's
+    // class instead, so the stop line says WHY the mission escalated.
+    const compact = (v) => String(v ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const stepNamesClass = !!(stepText && cls && compact(stepText).includes(compact(cls)));
+    info.failureClass = (cls && !stepNamesClass) ? cls : (stepText ?? cls ?? null);
+    info.cause = failure?.code ?? failure?.message ?? evidenceReason(failure) ?? state?.phaseCheckpointError?.code ?? null;
     info.at = state?.lastContinuation?.at ?? null;
   } else if (phase === "idle") {
     info.status = "STOPPED";
@@ -743,6 +816,21 @@ export function classifyStatus(state, { operatorEvents = [], runs = [], ownerAli
     // running and not stopped. Every other status stays untouched.
     info.status = "PAUSED";
     info.at = state?.planApproval?.at ?? null;
+  } else if (planningOnlyDone(state, runs)) {
+    info.status = "STOPPED";
+    info.planningOnlyDone = true;
+    const pRuns = (Array.isArray(runs) ? runs : []).filter((r) => PLANNING_ROLES.has(roleOf(r)));
+    const ends = pRuns
+      .map((r) => runEndAt(r))
+      .filter(Boolean)
+      .map((stamp) => ({ stamp, at: Date.parse(stamp) }))
+      .filter((e) => Number.isFinite(e.at));
+    if (ends.length) {
+      const last = ends.reduce((max, e) => (e.at > max.at ? e : max), ends[0]);
+      info.at = last.stamp;
+    } else if (state?.updatedAt) {
+      info.at = state.updatedAt;
+    }
   } else {
     // Owner liveness takes precedence when known.
     let oa = ownerAlive;
@@ -889,29 +977,164 @@ function fieldMapOf(text) {
   return map;
 }
 
+function unescapeJsonText(value) {
+  let v = String(value ?? "");
+  if (/(?<!\\)\\(?:\\\\)*$/.test(v)) v = v.slice(0, -1);
+  try {
+    return JSON.parse(`"${v}"`);
+  } catch {
+    return v
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, "\\")
+      .replace(/\\n/g, "\n")
+      .replace(/\\r/g, "\r")
+      .replace(/\\t/g, "\t")
+      .replace(/\\'/g, "'");
+  }
+}
+
+function stripCodexBash(cmd) {
+  let s = String(cmd ?? "").trim();
+  const bashMatch = s.match(/^\/bin\/(?:ba)?sh\s+-[a-zA-Z]*c\s+/);
+  if (bashMatch) s = s.slice(bashMatch[0].length).trim();
+  if (s.startsWith('\\"') && s.endsWith('\\"')) {
+    s = s.slice(2, -2).trim();
+  } else if (s.startsWith("\\'") && s.endsWith("\\'")) {
+    s = s.slice(2, -2).trim();
+  } else if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    s = s.slice(1, -1).trim();
+  } else if (s.startsWith('"') || s.startsWith("'")) {
+    s = s.slice(1);
+    if (s.endsWith('"') || s.endsWith("'")) s = s.slice(0, -1);
+    s = s.trim();
+  } else if (s.startsWith('\\"') || s.startsWith("\\'")) {
+    s = s.slice(2);
+    if (s.endsWith('\\"') || s.endsWith("\\'")) s = s.slice(0, -2);
+    s = s.trim();
+  }
+  return s.split(/\r?\n/)[0].trim();
+}
+
+function decodeActivityRegexFallback(raw) {
+  const text = String(raw ?? "");
+  if (/"type"\s*:\s*"command_execution"/.test(text)) {
+    const m = text.match(/"command"\s*:\s*"((?:[^"\\]|\\.)*)/);
+    const cmd = m ? stripCodexBash(unescapeJsonText(m[1])) : "";
+    return { kind: "command", text: cmd || "command" };
+  }
+  if (/"type"\s*:\s*"(?:file_change|patch)"/.test(text)) {
+    const m = text.match(/"(?:path|file|file_path|filePath)"\s*:\s*"((?:[^"\\]|\\.)*)/);
+    const p = m ? unescapeJsonText(m[1]).split(/\r?\n/)[0].trim() : "";
+    return { kind: "edit", text: p || "edit" };
+  }
+  if (/"type"\s*:\s*"tool_use"/.test(text)) {
+    const tm = text.match(/"(?:name|tool)"\s*:\s*"((?:[^"\\]|\\.)+)"/);
+    const dm = text.match(/"(?:command|file_path|filePath|pattern|path|description)"\s*:\s*"((?:[^"\\]|\\.)*)/);
+    const kind = tm ? unescapeJsonText(tm[1]).toLowerCase() : "tool";
+    const detail = dm ? unescapeJsonText(dm[1]).split(/\r?\n/)[0].trim() : "";
+    return { kind, text: detail || kind };
+  }
+  if (/"tool"\s*:\s*"((?:[^"\\]|\\.)+)"/.test(text)) {
+    const tm = text.match(/"tool"\s*:\s*"((?:[^"\\]|\\.)+)"/);
+    const dm = text.match(/"(?:command|filePath|file_path|path|description)"\s*:\s*"((?:[^"\\]|\\.)*)/);
+    const kind = tm ? unescapeJsonText(tm[1]).toLowerCase() : "tool";
+    const detail = dm ? unescapeJsonText(dm[1]).split(/\r?\n/)[0].trim() : "";
+    return { kind, text: detail || kind };
+  }
+  if (/"type"\s*:\s*"(?:agent_message|reasoning|step_start|step-start|thread\.started|turn\.started)"/.test(text)) {
+    return null;
+  }
+  if (/"type"\s*:\s*"error"/.test(text)) {
+    const m = text.match(/"(?:message|error)"\s*:\s*"((?:[^"\\]|\\.)*)/);
+    const msg = m ? unescapeJsonText(m[1]) : "error";
+    return { kind: "WARN", text: msg.startsWith("⚠") ? msg : `⚠ ${msg}` };
+  }
+  return null;
+}
+
 // Decode one `progress.log` ACTIVITY JSON snippet: a tool call becomes its
 // `<tool> <first arg line>`, a genuine provider error becomes WARN, and every
 // streaming-noise part (step_start/text/reasoning/…) is dropped (rule 6).
-function decodeActivityJson(raw) {
+export function decodeActivityJson(raw) {
   // opencode stderr `message=loop … step=N`: a heartbeat that proves the run is
   // alive even when every sampled chunk is streaming noise (backlog #6b).
   const loop = String(raw ?? "").match(/message="?loop"?\b[\s\S]*?\bstep=(\d+)/);
   if (loop) return { kind: "STEP", text: `step ${loop[1]}` };
   const trouble = providerTroubleLabel(raw);
   let obj = null;
-  try { obj = JSON.parse(raw); } catch { return trouble ? { kind: "WARN", text: `⚠ ${trouble}` } : null; }
-  const part = obj && typeof obj === "object" ? obj.part : null;
-  if (trouble && (!part || part.type !== "tool")) return { kind: "WARN", text: `⚠ ${trouble}` };
-  if (!part || typeof part !== "object") return null;
-  if (part.type === "tool" && part.tool) {
-    const input = part.state?.input || {};
-    const detail = input.command || input.filePath || input.description || "";
-    return { kind: String(part.tool).toLowerCase(), text: detail ? String(detail).split("\n")[0] : String(part.tool) };
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    const fallback = decodeActivityRegexFallback(raw);
+    if (fallback) return fallback;
+    return trouble ? { kind: "WARN", text: `⚠ ${trouble}` } : null;
   }
+  if (!obj || typeof obj !== "object") {
+    return trouble ? { kind: "WARN", text: `⚠ ${trouble}` } : null;
+  }
+
+  // opencode: {part:{type:"tool",...}}
+  const part = obj.part && typeof obj.part === "object" ? obj.part : null;
+  if (part) {
+    if (part.type === "tool" && part.tool) {
+      const input = part.state?.input || {};
+      const detail = input.command || input.filePath || input.description || "";
+      return { kind: String(part.tool).toLowerCase(), text: detail ? String(detail).split("\n")[0] : String(part.tool) };
+    }
+    if (trouble) return { kind: "WARN", text: `⚠ ${trouble}` };
+    return null;
+  }
+
+  // Codex: item.started / item.completed / error
+  const topType = String(obj.type || "");
+  const item = obj.item && typeof obj.item === "object" ? obj.item : null;
+  const itemType = String(item?.type || "");
+
+  if (topType === "error" || itemType === "error") {
+    const msg = item?.message || item?.error || item?.text || obj.message || obj.error || "error";
+    return { kind: "WARN", text: msg.startsWith("⚠") ? msg : `⚠ ${msg}` };
+  }
+  if (itemType === "command_execution") {
+    const cmd = stripCodexBash(item.command);
+    return { kind: "command", text: cmd || "command" };
+  }
+  if (itemType === "file_change" || itemType === "patch") {
+    const paths = Array.isArray(item.changes)
+      ? item.changes.map((c) => c?.path || c?.file || c?.file_path).filter(Boolean).join(" ")
+      : (item.path || item.file || item.file_path || item.filePath || "");
+    const firstLine = String(paths || "").split("\n")[0].trim();
+    return { kind: "edit", text: firstLine || "edit" };
+  }
+  if (itemType === "agent_message" || itemType === "reasoning" || topType === "agent_message" || topType === "reasoning") {
+    return null;
+  }
+
+  // Claude stream-json: {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":…}}]}}
+  const blocks = [];
+  if (Array.isArray(obj.message?.content)) blocks.push(...obj.message.content);
+  if (Array.isArray(obj.content)) blocks.push(...obj.content);
+  if (obj.content_block && typeof obj.content_block === "object") blocks.push(obj.content_block);
+  for (const block of blocks) {
+    if (block && typeof block === "object" && (block.type === "tool_use" || block.type === "tool")) {
+      const tool = String(block.name || block.tool || "").toLowerCase();
+      const input = (block.input && typeof block.input === "object") ? block.input : {};
+      const detail = input.command || input.file_path || input.filePath || input.pattern || input.path || input.description || "";
+      return { kind: tool || "tool", text: detail ? String(detail).split("\n")[0] : (tool || "tool") };
+    }
+  }
+  if (topType === "assistant" || topType === "thinking") {
+    return null;
+  }
+
+  if (topType === "thread.started" || topType === "turn.started" || topType === "step_start" || topType === "step_finish") {
+    return null;
+  }
+
+  if (trouble) return { kind: "WARN", text: `⚠ ${trouble}` };
   return null;
 }
 
-function decodeProgressEntry(raw) {
+export function decodeProgressEntry(raw) {
   if (raw && typeof raw === "object") {
     if (typeof raw.kind === "string" && typeof raw.text === "string") return { at: raw.at ?? null, kind: raw.kind.toUpperCase(), text: raw.text };
     if (typeof raw.line === "string") raw = raw.line;
@@ -928,6 +1151,10 @@ function decodeProgressEntry(raw) {
     return { at, kind: "START", text: `role=${f.ROLE ?? "-"} · phase=${f.PHASE ?? "-"} · TASK=${f.TASK ?? "-"} · attempt=${f.ATTEMPT ?? "-"} · pid=${f.PID ?? "-"}` };
   }
   if (/^FINISHED \|/.test(rest)) return { at, kind: "FINISHED", text: "run finished" };
+  if (/^INTERRUPTED \|/.test(rest)) {
+    const f = fieldMapOf(rest.slice(rest.indexOf("|") + 1));
+    return { at, kind: "INTERRUPTED", text: f.REASON || f.STATUS || "interrupted" };
+  }
   if (/^ACTIVITY \|/.test(rest)) {
     const m = rest.match(/LAST=([\s\S]*)$/);
     if (!m) return null;
@@ -1213,7 +1440,7 @@ function missionStartedAt(state, runs) {
   return earliest;
 }
 
-export function buildReportModel({ state = null, runs = [], events = [], phases = [], policy = {}, layout = null, progress = [], gateLog = null, now = null, skill = null, command = null, missionFallback = null, ownerAlive, notRunText = "" } = {}) {
+export function buildReportModel({ state = null, runs = [], events = [], phases = [], policy = {}, layout = null, workflow = null, progress = [], gateLog = null, now = null, skill = null, command = null, missionFallback = null, ownerAlive, notRunText = "", isAlive } = {}) {
   const eventList = Array.isArray(events) ? events : [];
   const progressList = Array.isArray(progress) ? progress : [];
   const phaseDefs = normalizePhases(phases);
@@ -1259,7 +1486,7 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
     if (withFlag) resolvedOwnerAlive = withFlag.ownerAlive === true;
   }
   const operatorEvents = buildOperatorEvents(eventList);
-  const statusInfo = classifyStatus(state, { operatorEvents, runs: enrichedRuns, ownerAlive: resolvedOwnerAlive });
+  const statusInfo = classifyStatus(state, { operatorEvents, runs: enrichedRuns, ownerAlive: resolvedOwnerAlive, isAlive });
   const gates = buildGateEntries(eventList);
   const gateCommand = gates.map((g) => g.command).filter(Boolean).pop() ?? null;
   const operatorResetBudgetDomains = operatorResetDomains(eventList);
@@ -1331,7 +1558,7 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
   const finalReview = buildFinalReview(finalReviewRuns, { status: statusInfo.status, skipped: Boolean(state?.finalReviewSkipped) });
 
   const mission = typeof state?.mission === "string" && state.mission ? state.mission : null;
-  const framework = state?.planningDetection?.framework ?? null;
+  const framework = state?.planningDetection?.framework ?? state?.framework ?? null;
   const storedRevision = statePlanningRevision(state, framework);
   if (storedRevision != null) {
     const runRevision = typeof planning.revision === "number" ? planning.revision : 0;
@@ -1342,7 +1569,24 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
   // or from the last run's end time for COMPLETED missions.
   let missionEndedAt = null;
   if (isMissionEnded(statusInfo.status)) {
-    if (statusInfo.at) {
+    if (statusInfo.planningOnlyDone) {
+      if (statusInfo.at) {
+        missionEndedAt = statusInfo.at;
+      } else {
+        const pRuns = planningRuns.length ? planningRuns : enrichedRuns.filter((r) => PLANNING_ROLES.has(roleOf(r)));
+        const ends = pRuns
+          .map((r) => runEndAt(r))
+          .filter(Boolean)
+          .map((stamp) => ({ stamp, at: Date.parse(stamp) }))
+          .filter((e) => Number.isFinite(e.at));
+        if (ends.length) {
+          const last = ends.reduce((max, e) => (e.at > max.at ? e : max), ends[0]);
+          missionEndedAt = last.stamp;
+        } else if (state?.updatedAt) {
+          missionEndedAt = state.updatedAt;
+        }
+      }
+    } else if (statusInfo.at) {
       missionEndedAt = statusInfo.at;
     } else if (statusInfo.status === "COMPLETED") {
       // For COMPLETED, use the latest run end time
@@ -1381,6 +1625,7 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
     status: statusInfo.status,
     statusInfo,
     stopLine: statusInfo.stopLine,
+    planningOnlyDone: statusInfo.planningOnlyDone === true,
     stage: classifyStage(state, planning, phasesOut, finalReview, enrichedRuns),
     phaseIndex,
     phaseNumber: phaseIndex != null ? phaseIndex + 1 : null,
@@ -1388,6 +1633,8 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
     attempt: displayAttempt,
     policy: policy && typeof policy === "object" ? policy : {},
     layout: layout && typeof layout === "object" ? layout : null,
+    state,
+    workflow: workflow ?? layout?.workflow ?? policy?.workflow ?? state?.workflow ?? null,
     budgets: buildBudgetEntries(state, policy, layout),
     operatorResetBudgets: [...operatorResetBudgetDomains],
     now: now ?? null,
@@ -1664,24 +1911,65 @@ function durationCell(run, now = null) {
   return ms != null ? formatClock(ms) : "-";
 }
 
-function startedCell(run) {
-  const at = run?.started_at ?? run?.startedAt ?? null;
-  return at ? formatStamp(at) : "-";
+function dateDay(at) {
+  if (!at) return null;
+  const stamp = formatStamp(at);
+  if (stamp === "-" || !stamp.includes(" ")) return null;
+  return stamp.split(" ")[0];
 }
 
-// The NOTE cell a planning row carries. A recorded `note` wins; a
-// plan_reviewer otherwise states its finding count; a FAILED/KILLED/
-// INTERRUPTED run also carries its failure reason (backlog #29).
+export function startedCell(run, tracker = null, missionStart = null) {
+  const at = run?.started_at ?? run?.startedAt ?? (typeof run === "string" ? run : null);
+  if (!at) return "-";
+  const stamp = formatStamp(at);
+  if (stamp === "-" || !stamp.includes(" ")) return stamp;
+  const [datePart, timePart] = stamp.split(" ");
+  const hhmm = timePart.slice(0, 5);
+  const compareDay = tracker?.lastDay !== undefined ? tracker.lastDay : dateDay(missionStart);
+  let res = hhmm;
+  if (compareDay && datePart !== compareDay) {
+    res = `${datePart.slice(5)} ${hhmm}`;
+  }
+  if (tracker) {
+    tracker.lastDay = datePart;
+  }
+  return res;
+}
+
+function slowSnapshotNote(run) {
+  const beforeStart = run?.snapshotBeforeStartedAt ?? null;
+  const beforeEnd = run?.snapshotBeforeAt ?? null;
+  const afterStart = run?.snapshotAfterStartedAt ?? null;
+  const afterEnd = run?.snapshotAfterAt ?? null;
+  const beforeSec = (beforeStart && beforeEnd) ? (Date.parse(beforeEnd) - Date.parse(beforeStart)) / 1000 : 0;
+  const afterSec = (afterStart && afterEnd) ? (Date.parse(afterEnd) - Date.parse(afterStart)) / 1000 : 0;
+  const maxSec = Math.max(beforeSec, afterSec);
+  if (maxSec >= 10) {
+    return `slow snapshot ${Math.round(maxSec)}s`;
+  }
+  return null;
+}
+
+// The NOTE cell a planning row carries. A recorded `note` comes first; a
+// plan_reviewer always adds its findings count and minor notes; a FAILED/KILLED/
+// INTERRUPTED run also carries its failure reason (backlog #29); slow snapshots
+// (>= 10s) are noted.
 function planningNote(run, model) {
   const parts = [];
-  if (run && typeof run.note === "string" && run.note) {
-    parts.push(run.note);
-  } else if (roleOf(run) === "plan_reviewer") {
+  const noteText = (run && typeof run.note === "string" && run.note)
+    ? run.note
+    : (run && typeof run.error === "string" && run.error ? run.error : (run && typeof run.failure_reason === "string" ? run.failure_reason : null));
+  if (noteText) {
+    parts.push(noteText);
+  }
+  if (roleOf(run) === "plan_reviewer") {
     const n = Array.isArray(run.findings) ? run.findings.length : 0;
     parts.push(`${n} finding${n === 1 ? "" : "s"}`);
     const notes = Array.isArray(run.notes) ? run.notes.length : 0;
     if (notes) parts.push(`notes: ${notes} minor`);
   }
+  const slowSnapshot = slowSnapshotNote(run);
+  if (slowSnapshot) parts.push(slowSnapshot);
   const failureReason = failureReasonText(run, model?.runs);
   if (failureReason) parts.push(failureReason);
   const staleReason = statusReason(run);
@@ -1690,27 +1978,31 @@ function planningNote(run, model) {
 }
 
 // The single table column order shared by planning, implementation and final
-// review (watcher.md Table columns): ROLE MODEL TASK STATUS DURATION SNAPSHOT
-// PRICE CONTEXT TURNS STARTED NOTE.
+// review (watcher.md Table columns): ROLE MODEL TASK STATUS TURNS CONTEXT TOKENS
+// STARTED DURATION NOTE.
 const TABLE_COLUMNS = [
   { header: "ROLE", cell: (r) => r.role ?? "-" },
   { header: "MODEL", cell: (r) => r.model ?? "-" },
   { header: "TASK", cell: (r) => r.task ?? "-" },
   { header: "STATUS", cell: (r) => r.status ?? "-" },
-  { header: "DURATION", cell: (r) => r.duration ?? "-" },
-  { header: "SNAPSHOT", cell: (r) => r.snapshot ?? "-" },
-  { header: "PRICE", cell: (r) => r.price ?? "-" },
-  { header: "CONTEXT", cell: (r) => r.context ?? "-" },
   { header: "TURNS", cell: (r) => r.turns ?? "-" },
+  { header: "CONTEXT", cell: (r) => r.context ?? "-" },
+  { header: "TOKENS", cell: (r) => r.tokens ?? r.price ?? "-" },
   { header: "STARTED", cell: (r) => r.started ?? "-" },
+  { header: "DURATION", cell: (r) => r.duration ?? "-" },
   { header: "NOTE", cell: (r) => r.note ?? "" },
 ];
 
-// The longest run directory name the report can print: `NN-<role>-xxxxxxxx`
-// (two-digit sequence, a real role name, eight hex chars).
+function roleCell(run) {
+  const raw = run?.dirName || run?.id || "-";
+  return raw.replace(/-[0-9a-fA-F]{8}$/, "");
+}
+
+// The longest run directory name the report can print: `NN-<role>`
+// (two-digit sequence, a real role name).
 function longestRunName() {
   const roles = [...new Set([...PLANNING_ROLES, ...REVIEW_ROLES, ...IMPLEMENTATION_ROLES])];
-  return Math.max(...roles.map((role) => `NN-${role}-xxxxxxxx`.length));
+  return Math.max(...roles.map((role) => `NN-${role}`.length));
 }
 
 // One set of column widths for a whole report, so the planning, implementation
@@ -1748,10 +2040,11 @@ function renderRows(rows, { indent = "    ", widths: sharedWidths = null, collec
   return lines;
 }
 
-// The planning TASK cell. Standalone planning keeps the historical
+// The planning TASK cell. Standalone PLAN/TASKS planning keeps the historical
 // `plan/tasks` label (its planner writes and its reviewer reads both files).
+// Standalone spec-stage runs record `spec/codemap`.
 // SpecKit rows name the stage the run worked on (`spec`/`plan`/`tasks`) and
-// GSD rows their stage (`discuss`/`research`/`plan`/`plan-check`), both from
+// GSD rows their stage (`discuss`/`research`/`plan`/`plan-check`), all from
 // the stage recorded on the run at launch. A legacy run without that field
 // keeps the old `plan/tasks` label rather than inventing a stage.
 const PLANNING_STAGE_LABELS = {
@@ -1776,19 +2069,20 @@ function planningTaskLabel(run) {
 
 // A planning run as a shared-table row: standalone keeps `plan/tasks`, while
 // SpecKit/GSD rows show the stage the run actually worked on.
-function planningRow(run, model) {
+function planningRow(run, model, tracker = null) {
   return {
     running: isRunning(run),
-    role: run?.dirName || run?.id || "-",
+    role: roleCell(run),
     model: run?.displayModel ?? modelDisplay(run),
     task: planningTaskLabel(run),
     status: runStatusCell(run),
     duration: durationCell(run, model?.now ?? null),
     snapshot: snapshotCell(run),
     price: priceCell(run),
+    tokens: priceCell(run),
     context: contextCell(run),
     turns: turnsCell(run),
-    started: startedCell(run),
+    started: startedCell(run, tracker, model?.missionStartedAt),
     note: planningNote(run, model),
   };
 }
@@ -1825,15 +2119,16 @@ export function renderFindings(findings, { runId = null, indent = "      " } = {
 // `=== PLANNING STAGE ===  ✓ PASSED at <time> · <price> · <time> (N review
 // rounds, R revision of M)`; one `Round N` block per review round, each with
 // its own table and the reviewer's findings under the reviewer row.
-export function renderPlanningStage(model, { widths = null, collectRows = null } = {}) {
+export function renderPlanningStage(model, { widths = null, collectRows = null, tracker = null } = {}) {
   const planning = model?.planning || { status: "not_started", rounds: [], runs: [], revision: null };
+  const dayTracker = tracker || { lastDay: dateDay(model?.missionStartedAt) };
   const runs = Array.isArray(planning.runs) ? planning.runs : [];
   const rounds = Array.isArray(planning.rounds) ? planning.rounds : [];
   const price = sumPrice(runs);
   const duration = sumDurationMs(runs);
   const roundsCount = rounds.length;
   const revision = typeof planning.revision === "number" ? planning.revision : 0;
-  const maxRevisions = Number(model?.policy?.max_plan_revisions);
+  const maxRevisions = Number(model?.layout?.retries?.plan_revisions ?? model?.policy?.max_plan_revisions);
 
   // Rule 7 (backlog #7): nothing is shown before it starts - a planning stage
   // with no runs renders nothing, so no `○ NOT STARTED` placeholder.
@@ -1885,7 +2180,7 @@ export function renderPlanningStage(model, { widths = null, collectRows = null }
       header += ` (revision ${round.revision}${max})`;
     }
     out.push(header);
-    out.push(...renderRows((round.runs || []).map((run) => planningRow(run, model)), { widths, collectRows }));
+    out.push(...renderRows((round.runs || []).map((run) => planningRow(run, model, dayTracker)), { widths, collectRows }));
     const passed = planning.status === "passed" || rounds.slice(i + 1).some(roundApproved);
     if (passed) return;
     for (const run of round.runs || []) {
@@ -1946,7 +2241,12 @@ export function stageText(model) {
   if (status === "COMPLETED" || status === "CANCELLED") return "done";
   const stage = model?.stage;
   if (stage === "STARTING") return "STARTING";
-  if (stage === "PLANNING") return "PLANNING";
+  if (stage === "PLANNING") {
+    if (model?.planningOnlyDone || model?.statusInfo?.planningOnlyDone || (model?.state && planningOnlyDone(model.state, model.runs))) {
+      return "PLANNING — done (tasks ready)";
+    }
+    return "PLANNING";
+  }
   if (stage === "FINAL REVIEW") {
     const limit = Number(model?.policy?.final_review_fix_rounds);
     const used = Number(model?.finalReview?.fixRoundsUsed);
@@ -1968,15 +2268,30 @@ export function stageText(model) {
   return text;
 }
 
+function formatBudgetEntry(model, b) {
+  const base = b.used > b.limit && operatorResetBudget(model, b.domain)
+    ? `${b.domain}=${b.used} (limit ${b.limit}, reset by operator)`
+    : `${b.domain}=${b.used}/${b.limit}`;
+  return b.earlier > 0 ? `${base} (${b.earlier} in earlier phases)` : base;
+}
+
+function formatBudgetOrFallback(model, domain, layoutKey, legacyKey) {
+  const budgets = Array.isArray(model?.budgets) ? model.budgets : [];
+  const b = budgets.find((x) => x.domain === domain);
+  if (b) {
+    return formatBudgetEntry(model, b);
+  }
+  const limit = model?.layout?.retries?.[layoutKey] ?? model?.policy?.failure_budgets?.[legacyKey];
+  if (limit !== undefined && limit !== null) {
+    return `${domain}=${limit}`;
+  }
+  return null;
+}
+
 function budgetsText(model) {
   const budgets = Array.isArray(model?.budgets) ? model.budgets : [];
   if (!budgets.length) return "-";
-  return budgets.map((b) => {
-    const base = b.used > b.limit && operatorResetBudget(model, b.domain)
-      ? `${b.domain}=${b.used} (limit ${b.limit}, reset by operator)`
-      : `${b.domain}=${b.used}/${b.limit}`;
-    return b.earlier > 0 ? `${base} (${b.earlier} in earlier phases)` : base;
-  }).join("  ");
+  return budgets.map((b) => formatBudgetEntry(model, b)).join("  ");
 }
 
 // Time the mission spent with no live orchestrator (backlog #35c): every
@@ -2042,27 +2357,81 @@ function elapsedText(model) {
   return formatClock(Math.max(0, ms - downtime));
 }
 
-// `Retries: plan_revisions=8 · implementation=4 · verification=4 · final_review_fix_rounds=2 · cli_errors=3 · infrastructure=3 · no_progress_sessions=3 · extra_sessions_per_task=1`
-// from `layout.retries.*` (v4) with legacy `policy.*` fallback.
-const RETRY_KEYS = ["plan_revisions", "implementation", "verification", "final_review_fix_rounds", "cli_errors", "infrastructure", "no_progress_sessions", "extra_sessions_per_task"];
-const LEGACY_RETRY_READERS = {
-  plan_revisions: (p) => p.max_plan_revisions,
-  implementation: (p) => p.failure_budgets?.implementationFailureBudget,
-  verification: (p) => p.failure_budgets?.verificationFailureBudget,
-  final_review_fix_rounds: (p) => p.final_review_fix_rounds,
-  cli_errors: (p) => p.failure_budgets?.adapterRetryBudget,
-  infrastructure: (p) => p.failure_budgets?.infrastructureRetryBudget,
-  no_progress_sessions: (p) => p.no_progress_generations,
-  extra_sessions_per_task: (p) => p.continuation_allowance,
-};
+// `Retries: spec_revisions=2/3 · plan_revisions=0/10 · implementation=0/4 · verification=0/4 · final_review_fix_rounds=0/2 · extra_sessions_per_task=5 · escalate_after_not_fixed=2`
+// With trouble: `... implementation=1/4 (2 in earlier phases) · ... · adapter=1/3`
+const RETRY_KEYS = ["spec_revisions", "plan_revisions", "implementation", "verification", "final_review_fix_rounds", "extra_sessions_per_task", "escalate_after_not_fixed", "adapter", "infrastructure"];
 function retriesText(model) {
   const layoutRetries = model?.layout?.retries && typeof model.layout.retries === "object" ? model.layout.retries : null;
   const policy = model?.policy && typeof model.policy === "object" ? model.policy : {};
   const parts = [];
-  for (const key of RETRY_KEYS) {
-    const value = layoutRetries?.[key] ?? LEGACY_RETRY_READERS[key](policy);
-    if (value !== undefined && value !== null) parts.push(`${key}=${value}`);
+
+  // spec_revisions — when framework is standalone AND (the mission has at least one "standalone-spec-" run OR workflow.standalone_spec === true).
+  const isStandalone = (model?.framework || "").toLowerCase() === "standalone";
+  const workflow = model?.workflow ?? model?.layout?.workflow ?? model?.policy?.workflow ?? model?.state?.workflow;
+  const standaloneSpecConfiguredOn = Boolean(workflow && (workflow.standalone_spec === true || workflow.standaloneSpec === true));
+  const hasSpecRun = typeof model?.planning?.specRevision === "number" ||
+    Boolean(model?.planning?.runs?.some((r) => r.taskRef && r.taskRef.startsWith("standalone-spec-")));
+  if (isStandalone && (hasSpecRun || standaloneSpecConfiguredOn)) {
+    const specLimit = layoutRetries?.spec_revisions ?? policy?.max_spec_revisions;
+    if (specLimit !== undefined && specLimit !== null && Number.isFinite(Number(specLimit))) {
+      let used;
+      if (typeof model?.planning?.specRevision === "number") {
+        used = model.planning.specRevision;
+      } else if (hasSpecRun) {
+        used = 0;
+      } else {
+        used = Number(model?.state?.standaloneSpecReview?.revision) || 0;
+      }
+      parts.push(`spec_revisions=${used}/${specLimit}`);
+    }
   }
+
+  // plan_revisions — used = planning.revision, limit from layout.retries / policy.max_plan_revisions
+  const planLimit = layoutRetries?.plan_revisions ?? policy?.max_plan_revisions;
+  const planUsed = typeof model?.planning?.revision === "number" ? model.planning.revision : 0;
+  if (planLimit !== undefined && planLimit !== null && Number.isFinite(Number(planLimit))) {
+    parts.push(`plan_revisions=${planUsed}/${planLimit}`);
+  }
+
+  // implementation
+  const implPart = formatBudgetOrFallback(model, "implementation", "implementation", "implementationFailureBudget");
+  if (implPart) parts.push(implPart);
+
+  // verification
+  const verifPart = formatBudgetOrFallback(model, "verification", "verification", "verificationFailureBudget");
+  if (verifPart) parts.push(verifPart);
+
+  // final_review_fix_rounds — used = model.finalReview.fixRoundsUsed (0 when absent), limit from layout/policy
+  const frLimit = layoutRetries?.final_review_fix_rounds ?? policy?.final_review_fix_rounds;
+  if (frLimit !== undefined && frLimit !== null && Number.isFinite(Number(frLimit))) {
+    const frUsed = Number(model?.finalReview?.fixRoundsUsed) || 0;
+    parts.push(`final_review_fix_rounds=${frUsed}/${frLimit}`);
+  }
+
+  // extra_sessions_per_task — limit only
+  const extraLimit = layoutRetries?.extra_sessions_per_task ?? policy?.continuation_allowance;
+  if (extraLimit !== undefined && extraLimit !== null && Number.isFinite(Number(extraLimit))) {
+    parts.push(`extra_sessions_per_task=${extraLimit}`);
+  }
+
+  // escalate_after_not_fixed — limit only (omit when absent)
+  const escLimit = layoutRetries?.escalate_after_not_fixed ?? policy?.escalate_after_not_fixed;
+  if (escLimit !== undefined && escLimit !== null && Number.isFinite(Number(escLimit))) {
+    parts.push(`escalate_after_not_fixed=${escLimit}`);
+  }
+
+  // adapter — from model.budgets, ONLY when used > 0
+  const adapterBudget = (Array.isArray(model?.budgets) ? model.budgets : []).find((b) => b.domain === "adapter");
+  if (adapterBudget && adapterBudget.used > 0) {
+    parts.push(formatBudgetEntry(model, adapterBudget));
+  }
+
+  // infrastructure — from model.budgets, ONLY when used > 0
+  const infraBudget = (Array.isArray(model?.budgets) ? model.budgets : []).find((b) => b.domain === "infrastructure");
+  if (infraBudget && infraBudget.used > 0) {
+    parts.push(formatBudgetEntry(model, infraBudget));
+  }
+
   return parts.length ? parts.join(" · ") : "-";
 }
 
@@ -2192,8 +2561,53 @@ export function commandText(model) {
   return base;
 }
 
+function formatMinuteStamp(val) {
+  if (!val) return "-";
+  const stamp = formatStamp(val);
+  if (stamp === "-" || !stamp.includes(" ")) return stamp;
+  const [d, t] = stamp.split(" ");
+  return `${d} ${t.slice(0, 5)}`;
+}
+
+function missionStartTimestamp(model) {
+  return model?.missionStartedAt
+    ?? model?.state?.planningStartedAt
+    ?? (Array.isArray(model?.runs) && model.runs.length ? (model.runs[0]?.started_at ?? model.runs[0]?.startedAt) : null);
+}
+
+function missionEndTimestamp(model) {
+  if (model?.missionEndedAt) return model.missionEndedAt;
+  if (model?.planningOnlyDone || model?.statusInfo?.planningOnlyDone) {
+    const runs = model?.planning?.runs || (Array.isArray(model?.runs) ? model.runs.filter((r) => PLANNING_ROLES.has(roleOf(r))) : []);
+    const ends = runs
+      .map((r) => runEndAt(r))
+      .filter(Boolean)
+      .map((stamp) => ({ stamp, at: Date.parse(stamp) }))
+      .filter((e) => Number.isFinite(e.at));
+    if (ends.length) {
+      const last = ends.reduce((max, e) => (e.at > max.at ? e : max), ends[0]);
+      return last.stamp;
+    }
+    if (model?.state?.updatedAt) return model.state.updatedAt;
+  }
+  return null;
+}
+
+function startedHeaderText(model) {
+  const start = missionStartTimestamp(model);
+  const startFmt = formatMinuteStamp(start);
+  const status = String(model?.status || "").toUpperCase();
+  const isFinished = ["COMPLETED", "CANCELLED", "ESCALATED"].includes(status) || model?.planningOnlyDone || model?.statusInfo?.planningOnlyDone;
+  const end = missionEndTimestamp(model);
+  if (isFinished && end) {
+    const endFmt = formatMinuteStamp(end);
+    return `${startFmt} · finished ${endFmt}`;
+  }
+  return startFmt;
+}
+
 // `=== [<stamp> — ]PIPELINE STATE ===` block (watcher.md Sections): mission,
-// status, command, stage, budgets used/limit, retries, totals, caps, skill copy and the Events
+// started, status, command, stage, retries, totals, caps, skill copy and the Events
 // line. No current-run detail leaks in here.
 export function renderPipelineState(model, { stamp = null } = {}) {
   const head = stamp ? `=== ${stamp} — PIPELINE STATE ===` : "=== PIPELINE STATE ===";
@@ -2202,10 +2616,10 @@ export function renderPipelineState(model, { stamp = null } = {}) {
   const lines = [
     head,
     `Mission: ${missionName}`,
+    label("Started") + startedHeaderText(model),
     label("Status") + statusText(model),
     ...(commandLine ? [label("Command") + commandLine] : []),
     label("Stage") + stageText(model),
-    label("Budgets") + budgetsText(model),
     label("Retries") + retriesText(model),
     label("Total") + totalText(model),
     label("Caps") + capsText(model),
@@ -2253,6 +2667,7 @@ const FAILURE_CLASS_LABELS = {
   READ_ONLY_VIOLATION: "read-only violation",
   GIT_MUTATION_BLOCKED: "git mutation blocked",
   GIT_COMMIT_DETECTED: "git commit detected",
+  READ_ONLY_CONTAINMENT_UNAVAILABLE: "read-only containment unavailable",
   COMMAND_FAILED: "command failed",
   SERVER_UNAVAILABLE: "server unavailable",
   RATE_LIMITED: "rate limited",
@@ -2367,8 +2782,8 @@ function retryText(run, model) {
 
 // The NOTE cell of an implementation/phase-review row: the role hint, the
 // finding count, the recorded note, the `session k of N` scope, the failure
-// reason (backlog #29), the high-usage ⚠ (rule 15) and the provider-trouble ⚠
-// (rule 11).
+// reason (backlog #29), the high-usage ⚠ (rule 15), provider-trouble ⚠ (rule 11)
+// and slow snapshots (>= 10s).
 function implementationNote(run, model, noteHint = null) {
   const parts = [];
   const role = roleOf(run);
@@ -2381,7 +2796,9 @@ function implementationNote(run, model, noteHint = null) {
     else if (role === "verifier") parts.push("phase verify");
     if (findingsCount > 0) parts.push(`${findingsCount} finding${findingsCount === 1 ? "" : "s"}`);
   }
-  const noteText = typeof run?.note === "string" ? run.note.trim() : "";
+  const notesCount = Array.isArray(run?.notes) ? run.notes.length : 0;
+  if (notesCount > 0) parts.push(`notes: ${notesCount} minor`);
+  const noteText = typeof run?.note === "string" ? run.note.trim() : (typeof run?.error === "string" ? run.error.trim() : (typeof run?.failure_reason === "string" ? run.failure_reason.trim() : ""));
   const label = run?.providerTrouble ?? null;
   if (noteText) {
     if (label && !noteText.includes(label) && !noteText.includes("⚠")) { parts.push(noteText); parts.push(`⚠ ${label}`); }
@@ -2390,6 +2807,8 @@ function implementationNote(run, model, noteHint = null) {
   } else if (label) {
     parts.push(`⚠ ${label}`);
   }
+  const slowSnapshot = slowSnapshotNote(run);
+  if (slowSnapshot) parts.push(slowSnapshot);
   const cappedEscalation = String(run?.status || "") === "capped"
     && (Boolean(run?.policyViolation) || run?.escalated === true || /GIT_MUTATION_BLOCKED|^POLICY/i.test(String(run?.failureClass || "")));
   if (cappedEscalation) {
@@ -2415,19 +2834,20 @@ function implementationNote(run, model, noteHint = null) {
 
 // A run row of an implementation/final-review table; `task` overrides the
 // display ref (final review uses the mission-wide task range).
-function implementationRow(run, model, { task = undefined, noteHint = null } = {}) {
+function implementationRow(run, model, { task = undefined, noteHint = null, tracker = null } = {}) {
   return {
     running: String(run?.status || "") === "running",
     task: task !== undefined ? task : (runRef(run) ?? "-"),
-    role: run?.dirName || run?.id || "-",
+    role: roleCell(run),
     model: run?.displayModel ?? modelDisplay(run),
     status: runStatusCell(run),
     duration: durationCell(run, model?.now ?? null),
     snapshot: snapshotCell(run),
     price: priceCell(run),
+    tokens: priceCell(run),
     context: contextCell(run),
     turns: turnsCell(run),
-    started: startedCell(run),
+    started: startedCell(run, tracker, model?.missionStartedAt),
     note: implementationNote(run, model, noteHint),
   };
 }
@@ -2435,7 +2855,7 @@ function implementationRow(run, model, { task = undefined, noteHint = null } = {
 // A `GATE (orchestrator)` row (rule 10): no model/price/context/turns; the
 // command and `passed/total` runs come from the gate events. STARTED is when
 // the gate started (DURATION is its measured run time).
-function gateRow(gate, model, task) {
+function gateRow(gate, model, task, tracker = null) {
   const running = gate.status === "running";
   const p = gate.progress || {};
   const cmd = gate.command ? ` (${gate.command})` : "";
@@ -2468,8 +2888,8 @@ function gateRow(gate, model, task) {
     model: "-",
     status: gateStatusText(gate),
     duration,
-    snapshot: "-", price: "-", context: "-", turns: "-",
-    started: gate.at ? formatStamp(gate.at) : (gate.resultAt ? formatStamp(gate.resultAt) : "-"),
+    snapshot: "-", price: "-", tokens: "-", context: "-", turns: "-",
+    started: startedCell(gate.at ? gate.at : (gate.resultAt ? gate.resultAt : null), tracker, model?.missionStartedAt),
     note,
   };
 }
@@ -2478,7 +2898,7 @@ function gateRow(gate, model, task) {
 // start time, each in the attempt whose window contains that start. Each entry
 // carries its own run's findings so the renderer can hang the `findings →`
 // block directly under the row that produced it (bug c).
-function attemptRows(attempt, model, phase) {
+function attemptRows(attempt, model, phase, tracker = null) {
   const allRefs = phaseTaskRefs(phase);
   const range = taskRange(allRefs);
   const entries = [];
@@ -2486,12 +2906,16 @@ function attemptRows(attempt, model, phase) {
     let task;
     if (IMPLEMENTATION_ROLES.has(roleOf(run))) task = runRef(run) ?? "-";
     else task = normalizeRunTaskRef(runRef(run), allRefs) ?? range ?? "-";
-    entries.push({ ts: Date.parse(run.started_at ?? run.startedAt) || 0, seq: entries.length, row: implementationRow(run, model, { task }), findings: run.findings || [], runId: run.dirName || run.id || null });
+    entries.push({ ts: Date.parse(run.started_at ?? run.startedAt) || 0, seq: entries.length, run, task, findings: run.findings || [], runId: run.dirName || run.id || null });
   }
   for (const g of attempt.gates || []) {
-    entries.push({ ts: Date.parse(g.at ?? g.resultAt) || 0, seq: entries.length, row: gateRow(g, model, range ?? "-"), findings: [] });
+    entries.push({ ts: Date.parse(g.at ?? g.resultAt) || 0, seq: entries.length, gate: g, task: range ?? "-", findings: [] });
   }
   entries.sort((a, b) => (a.ts - b.ts) || (a.seq - b.seq));
+  for (const e of entries) {
+    if (e.run) e.row = implementationRow(e.run, model, { task: e.task, tracker });
+    else if (e.gate) e.row = gateRow(e.gate, model, e.task, tracker);
+  }
   return entries;
 }
 
@@ -2611,12 +3035,13 @@ function denyingRole(runs) {
 // has more than one), the DENIED attempt's findings + carried-forward +
 // changed-files lines, CAPPED `session k of N`, and GATE rows. Rows appear
 // only once they have started; each sits in the attempt containing its start.
-export function renderImplementationStage(model, { widths = null, collectRows = null } = {}) {
+export function renderImplementationStage(model, { widths = null, collectRows = null, tracker = null } = {}) {
   // Rule 7 (backlog #7): nothing is shown before it starts - a phase with no
   // runs is omitted entirely, so no `○ NOT STARTED` header and no section while
   // the mission is still planning.
   const started = (model?.phases || []).filter((p) => p.status !== "not_started" && (p.runs || []).length > 0);
   if (!started.length) return "";
+  const dayTracker = tracker || { lastDay: dateDay(model?.missionStartedAt) };
   const out = ["=== IMPLEMENTATION STAGE ==="];
   started.forEach((phase, phaseIndex) => {
     // Backlog #35e: the first phase header follows the section header with no
@@ -2640,7 +3065,7 @@ export function renderImplementationStage(model, { widths = null, collectRows = 
         && phase.status === "in_progress"
         && isLast;
       if (showAttemptHeaders) out.push(`    Attempt ${attempt.number}  ${attemptHeader(attempt, phase, i, model, isLast)}`);
-      const entries = attemptRows(attempt, model, phase);
+      const entries = attemptRows(attempt, model, phase, dayTracker);
       if (entries.length) {
         const lines = renderRows(entries.map((e) => e.row), { indent: tableIndent, widths, collectRows });
         out.push(lines[0]);
@@ -2691,8 +3116,9 @@ export function renderImplementationStage(model, { widths = null, collectRows = 
 // `=== FINAL REVIEW STAGE ===` (rule 16; never `Phase N`): result line with
 // fix rounds, then one `Round N` block per review (a denied review's fix pass
 // under `Fix round k of N` with its gate + changed-files lines).
-export function renderFinalReviewStage(model, { widths = null, collectRows = null } = {}) {
+export function renderFinalReviewStage(model, { widths = null, collectRows = null, tracker = null } = {}) {
   const fr = model?.finalReview || { status: "not_started", rounds: [], runs: [] };
+  const dayTracker = tracker || { lastDay: dateDay(model?.missionStartedAt) };
   const limitRaw = Number(model?.policy?.final_review_fix_rounds);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : null;
   const runs = fr.runs || [];
@@ -2739,7 +3165,7 @@ export function renderFinalReviewStage(model, { widths = null, collectRows = nul
     const reviewers = (round.runs || []).filter((r) => REVIEW_ROLES.has(roleOf(r)));
     const implRuns = (round.runs || []).filter((r) => IMPLEMENTATION_ROLES.has(roleOf(r)));
     out.push(`  Round ${round.number}`);
-    out.push(...renderRows(reviewers.map((r) => implementationRow(r, model, { task: scopeOf(r), noteHint: "final review" })), { widths, collectRows }));
+    out.push(...renderRows(reviewers.map((r) => implementationRow(r, model, { task: scopeOf(r), noteHint: "final review", tracker: dayTracker })), { widths, collectRows }));
     const findingsPassed = fr.status === "passed" || (fr.rounds || []).slice(roundIndex + 1).some(roundApproved);
     if (!findingsPassed) {
       for (const r of reviewers) {
@@ -2752,10 +3178,14 @@ export function renderFinalReviewStage(model, { widths = null, collectRows = nul
       fix += 1;
       out.push(limit ? `  Fix round ${fix} of ${limit}` : `  Fix round ${fix}`);
       const entries = [
-        ...implRuns.map((r) => ({ ts: Date.parse(r.started_at ?? r.startedAt) || 0, seq: 0, row: implementationRow(r, model, { task: scopeOf(r) }) })),
-        ...finalGates.map((g) => ({ ts: Date.parse(g.at ?? g.resultAt) || 0, seq: 1, row: gateRow(g, model, range ?? "-") })),
+        ...implRuns.map((r) => ({ ts: Date.parse(r.started_at ?? r.startedAt) || 0, seq: 0, run: r, task: scopeOf(r) })),
+        ...finalGates.map((g) => ({ ts: Date.parse(g.at ?? g.resultAt) || 0, seq: 1, gate: g, task: range ?? "-" })),
       ];
       entries.sort((a, b) => (a.ts - b.ts) || (a.seq - b.seq));
+      for (const e of entries) {
+        if (e.run) e.row = implementationRow(e.run, model, { task: e.task, tracker: dayTracker });
+        else if (e.gate) e.row = gateRow(e.gate, model, e.task, dayTracker);
+      }
       out.push(...renderRows(entries.map((e) => e.row), { widths, collectRows }));
     }
   });
@@ -2884,8 +3314,7 @@ export function renderCurrentRun(model) {
 
   const started = current.startedAt ? formatStamp(current.startedAt) : null;
   const elapsed = elapsedSince(current.startedAt, now);
-  const prep = prepSnapshotClock(current);
-  out.push(label("started") + (started || "-") + (elapsed ? ` · elapsed ${elapsed}` : "") + (prep ? ` (pre-run snapshot ${prep})` : ""));
+  out.push(label("started") + (started || "-") + (elapsed ? ` · elapsed ${elapsed}` : ""));
 
   if (current.updatedAt) {
     const ago = agoText(current.updatedAt, now);
@@ -2944,18 +3373,20 @@ export function renderReport(model, { stamp = null } = {}) {
   // with that shared width set so rounds/phases never change the alignment.
   const allRows = [];
   const collectRows = (rows) => allRows.push(...rows);
-  renderPlanningStage(model, { collectRows });
-  renderImplementationStage(model, { collectRows });
-  renderFinalReviewStage(model, { collectRows });
+  const collectTracker = { lastDay: dateDay(model?.missionStartedAt) };
+  renderPlanningStage(model, { collectRows, tracker: collectTracker });
+  renderImplementationStage(model, { collectRows, tracker: collectTracker });
+  renderFinalReviewStage(model, { collectRows, tracker: collectTracker });
   const widths = reportColumnWidths(allRows);
   // Rule 7 (backlog #7): a stage section that has not started renders nothing
   // and is omitted, so a planning-stage report carries no IMPLEMENTATION or
   // FINAL REVIEW header.
+  const renderTracker = { lastDay: dateDay(model?.missionStartedAt) };
   const stages = [
     renderPipelineState(model, { stamp }),
-    renderPlanningStage(model, { widths }),
-    renderImplementationStage(model, { widths }),
-    renderFinalReviewStage(model, { widths }),
+    renderPlanningStage(model, { widths, tracker: renderTracker }),
+    renderImplementationStage(model, { widths, tracker: renderTracker }),
+    renderFinalReviewStage(model, { widths, tracker: renderTracker }),
   ].filter((section) => section && section.trim());
   const sections = [stages.join("\n\n")];
   const current = renderCurrentRun(model);

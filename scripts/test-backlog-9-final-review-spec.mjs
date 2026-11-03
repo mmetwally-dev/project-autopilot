@@ -99,8 +99,8 @@ function missionFinalBase(extra = {}) {
     writeConfig(repo, {planningFramework: "standalone", maxPlanRevisions: 1});
     const cfgPath = path.join(repo, ".autopilot", "config.json");
     const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-    delete cfg.workflow.standaloneSpec;
-    delete cfg.workflow.standalone_spec;
+    cfg.workflow.standaloneSpec = true;
+    cfg.workflow.standalone_spec = true;
     fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
 
     setScenario(repo, "success");

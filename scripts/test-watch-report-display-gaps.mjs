@@ -157,7 +157,7 @@ const mkroot = (prefix) => {
   fs.writeFileSync(path.join(missionDir, "watch-events.jsonl"), "");
 
   const report = renderWatchReport(root, mission, { now: "2026-10-28T00:06:01+00:00", tail: 10 });
-  const reviewerRow = report.split("\n").find((l) => l.includes("02-plan_reviewer-bbbbbbbb")) || "";
+  const reviewerRow = report.split("\n").find((l) => l.includes("02-plan_reviewer")) || "";
   check("findings: plan-review FAIL row shows the count", reviewerRow.includes("10 findings"), reviewerRow);
   check("findings: first finding line is shown", report.includes("Finding 1: the plan must name its verification command."), report.split("\n").filter((l) => l.includes("findings →")));
   check("findings: second finding line is shown", report.includes("Finding 2: the plan must name its verification command."));

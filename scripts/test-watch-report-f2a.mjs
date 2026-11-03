@@ -114,7 +114,7 @@ try {
       run({ dir: dir75, id: "75-implementer-9166ac99", dirName: "75-implementer-9166ac99", role: "implementer", phase: "4", attempt: "1", taskRef: "T4.1", status: "interrupted (orchestrator not running)", sessionNumber: 3, resolvedModel: "nemotron-3-ultra-free", started_at: "2026-10-19T20:46:36+03:00" }),
     ]);
     const report = renderImplementationStage(model);
-    const row = report.split("\n").find((l) => l.includes("75-implementer-9166ac99"));
+    const row = report.split("\n").find((l) => l.includes("75-implementer"));
     check("f2a: bare status cell for a long label", runStatusCell(model.runs[0]) === "INTERRUPTED", runStatusCell(model.runs[0]));
     check("f2a: reason moved to the NOTE after the session", Boolean(row && row.includes("session 3 of 6 · orchestrator not running")), row);
     check("f2a: long reason not in the STATUS cell", Boolean(row && !row.includes("ORCHESTRATOR NOT RUNNING")), row);
@@ -145,7 +145,7 @@ try {
       run({ dir: dirS, id: "s-implementer-dddd4444", dirName: "s-implementer-dddd4444", role: "implementer", phase: "1", attempt: "1", taskRef: "T1.1", status: "completed", resolvedModel: "muse", started_at: base }),
     ]);
     const report = renderImplementationStage(model);
-    check("f2a: rendered row shows the seconds snapshot", report.includes("0.9s/0.5s"), report);
+    check("f2a: snapshotCell shows the seconds snapshot", snapshotCell(model.runs[0]) === "0.9s/0.5s", snapshotCell(model.runs[0]));
   }
 } finally {
   fs.rmSync(root, { recursive: true, force: true });

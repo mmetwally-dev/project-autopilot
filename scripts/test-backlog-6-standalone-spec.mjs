@@ -86,13 +86,13 @@ function check(name, condition, detail) {
     rtOn.workflow);
 
   const defaultsRt = toRuntimeConfig(DEFAULTS);
-  check("config: DEFAULTS gives workflow.standaloneSpec === true",
-    defaultsRt.workflow.standaloneSpec === true,
+  check("config: DEFAULTS gives workflow.standaloneSpec === false",
+    defaultsRt.workflow.standaloneSpec === false,
     defaultsRt.workflow);
 
   const roundTrip = toNewLayoutConfig(defaultsRt);
-  check("config: toNewLayoutConfig round-trips it back to standalone_spec: true",
-    roundTrip.workflow.standalone_spec === true,
+  check("config: toNewLayoutConfig round-trips it back to standalone_spec: false",
+    roundTrip.workflow.standalone_spec === false,
     roundTrip.workflow);
 
   const layoutOff = {
@@ -112,10 +112,10 @@ function check(name, condition, detail) {
 }
 
 // ---- Integration: real autopilot.mjs run ----
-// Case 1: absent standaloneSpec (default = on). Fake planner writes SPEC.md (FR-001), CONTEXT.md and (FR-001) citations.
+// Case 1: absent standaloneSpec (default = off). Expect NO spec stage (planner prompt has no "Write the feature specification", no SPEC.md written).
 {
-  const repo = makeFixtureRepo("backlog6-spec-on");
-  const binDir = makeFixtureBin("backlog6-spec-on");
+  const repo = makeFixtureRepo("backlog6-spec-absent");
+  const binDir = makeFixtureBin("backlog6-spec-absent");
   try {
     writeConfig(repo, {planningFramework: "standalone", maxPlanRevisions: 1});
     const cfgPath = path.join(repo, ".autopilot", "config.json");
@@ -126,14 +126,44 @@ function check(name, condition, detail) {
 
     setScenario(repo, "success");
     const run = runAutopilot(repo, binDir, {request: "implement the fixture task", timeoutMs: 120000});
+    const events = readObservedEvents(repo);
+    const state = JSON.parse(fs.readFileSync(path.join(repo, ".autopilot", "state.json"), "utf8"));
+    const missionDir = path.join(repo, ".autopilot", "missions", state.mission);
+    const specFile = path.join(missionDir, "SPEC.md");
+    const plannerEvents = events.filter(e => e.role === "planner");
+    const plannerPrompts = plannerEvents.map(e => fs.readFileSync(path.join(path.dirname(e.file), "brief.txt"), "utf8"));
+
+    check("integration (absent default = off): run exits 0", run.status === 0, {status: run.status, timedOut: run.timedOut});
+    check("integration (absent default = off): SPEC.md does NOT exist", !fs.existsSync(specFile), specFile);
+    check("integration (absent default = off): planner prompt has no 'Write the feature specification'",
+      plannerPrompts.every(p => !p.includes("Write the feature specification")), plannerPrompts);
+  } finally {
+    cleanup(repo, binDir);
+  }
+}
+
+// Case 1b: standalone_spec: true (opt-in). Spec stage runs, writes SPEC.md (FR-001) and TASKS.md cites FR-001.
+{
+  const repo = makeFixtureRepo("backlog6-spec-on");
+  const binDir = makeFixtureBin("backlog6-spec-on");
+  try {
+    writeConfig(repo, {planningFramework: "standalone", maxPlanRevisions: 1});
+    const cfgPath = path.join(repo, ".autopilot", "config.json");
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    cfg.workflow.standalone_spec = true;
+    cfg.workflow.standaloneSpec = true;
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+
+    setScenario(repo, "success");
+    const run = runAutopilot(repo, binDir, {request: "implement the fixture task", timeoutMs: 120000});
     const state = JSON.parse(fs.readFileSync(path.join(repo, ".autopilot", "state.json"), "utf8"));
     const missionDir = path.join(repo, ".autopilot", "missions", state.mission);
     const specFile = path.join(missionDir, "SPEC.md");
     const tasksFile = path.join(missionDir, "TASKS.md");
 
-    check("integration (on): run exits 0", run.status === 0, {status: run.status, timedOut: run.timedOut});
-    check("integration (on): SPEC.md exists", fs.existsSync(specFile), specFile);
-    check("integration (on): TASKS.md contains FR-001",
+    check("integration (true opt-in): run exits 0", run.status === 0, {status: run.status, timedOut: run.timedOut});
+    check("integration (true opt-in): SPEC.md exists", fs.existsSync(specFile), specFile);
+    check("integration (true opt-in): TASKS.md contains FR-001",
       fs.existsSync(tasksFile) && fs.readFileSync(tasksFile, "utf8").includes("FR-001"),
       tasksFile);
   } finally {

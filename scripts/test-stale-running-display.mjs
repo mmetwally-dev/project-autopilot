@@ -41,9 +41,9 @@ fs.writeFileSync(path.join(repo, ".autopilot", "owner.pid"), JSON.stringify({ pi
 const before = fs.readFileSync(statusFile, "utf8");
 const mtime = fs.statSync(statusFile).mtimeMs;
 const report = renderWatchReport(repo, null, { isOwnerAlive: dead });
-const staleRow = report.split("\n").find((l) => l.includes("01-implementer-aaaaaaaa"));
+const staleRow = report.split("\n").find((l) => l.includes("01-implementer"));
 assert.ok(staleRow && /\bINTERRUPTED\b/.test(staleRow) && staleRow.includes("orchestrator not running"), report);
-assert.ok(!/aaaaaaaa\s+RUNNING\b/.test(report), "row must not render RUNNING");
+assert.ok(!/01-implementer\b.*?\bRUNNING\b/.test(report), "row must not render RUNNING");
 assert.ok(!report.includes("=== CURRENT RUN ==="), "a stale run must not be CURRENT");
 const liveReport = renderWatchReport(repo, null, { isOwnerAlive: live });
 assert.ok(liveReport.includes("=== CURRENT RUN ===") && /status:  RUNNING\b/.test(liveReport), "live owner -> running");

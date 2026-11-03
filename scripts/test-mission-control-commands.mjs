@@ -700,7 +700,7 @@ try {
     check("R6 the watch report shows the cancel as Status: CANCELLED with its reason",
       report.includes("CANCELLED") && report.includes("reason: operator testing"), report.slice(0, 500));
     check("R6 the pipeline-state block names the mission and stage",
-      /^=== \d{2}:\d{2}:\d{2} — PIPELINE STATE ===$/m.test(report) && /Mission: 999-test-mission/.test(report) && /Stage:/.test(report),
+      /^=== \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} — PIPELINE STATE ===$/m.test(report) && /Mission: 999-test-mission/.test(report) && /Stage:/.test(report),
       report.slice(0, 400));
   }
 } finally {

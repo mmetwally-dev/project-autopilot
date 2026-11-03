@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Backlog #7 — standalone spec stage: planner explores the code, writes SPEC.md + CONTEXT.md, own review loop, then PLAN/TASKS
+// Backlog #7 — standalone spec stage: planner explores the code, writes SPEC.md + CODEMAP.md, own review loop, then PLAN/TASKS
 import fs from "node:fs";
 import path from "node:path";
 import {specContentFindings, specCoverageFindings} from "./verify-denylist.mjs";
@@ -84,8 +84,8 @@ function check(name, condition, detail) {
     writeConfig(repo, {planningFramework: "standalone", maxPlanRevisions: 1});
     const cfgPath = path.join(repo, ".autopilot", "config.json");
     const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-    delete cfg.workflow.standaloneSpec;
-    delete cfg.workflow.standalone_spec;
+    cfg.workflow.standaloneSpec = true;
+    cfg.workflow.standalone_spec = true;
     fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
 
     setScenario(repo, "success");
@@ -94,11 +94,11 @@ function check(name, condition, detail) {
     const state = JSON.parse(fs.readFileSync(path.join(repo, ".autopilot", "state.json"), "utf8"));
     const missionDir = path.join(repo, ".autopilot", "missions", state.mission);
     const specFile = path.join(missionDir, "SPEC.md");
-    const contextFile = path.join(missionDir, "CONTEXT.md");
+    const codemapFile = path.join(missionDir, "CODEMAP.md");
 
     check("integration (spec on): planning run exits 0", run.status === 0, {status: run.status, stderr: run.stderr});
     check("integration (spec on): SPEC.md exists in mission folder", fs.existsSync(specFile), specFile);
-    check("integration (spec on): CONTEXT.md exists in mission folder", fs.existsSync(contextFile), contextFile);
+    check("integration (spec on): CODEMAP.md exists in mission folder", fs.existsSync(codemapFile), codemapFile);
 
     const firstFourRoles = events.slice(0, 4).map(e => e.role);
     check("integration (spec on): role order of first four events is planner, plan_reviewer, planner, plan_reviewer",
@@ -118,14 +118,31 @@ function check(name, condition, detail) {
       && !firstPlannerPrompt.includes("Write the narrative plan to exactly:"),
       firstPlannerPrompt.slice(0, 400));
 
-    check("integration (spec on): second planner prompt contains CONTEXT.md path and 'Read both in full first'",
-      secondPlannerPrompt.includes(contextFile)
+    check("integration (spec on): second planner prompt contains CODEMAP.md path and 'Read both in full first'",
+      secondPlannerPrompt.includes(codemapFile)
       && secondPlannerPrompt.includes("Read both in full first"),
       secondPlannerPrompt.slice(0, 400));
 
     check("integration (spec on): state.json has standaloneSpecReview.approved === true",
       state.standaloneSpecReview?.approved === true,
       state.standaloneSpecReview);
+
+    // Backlog #4 / #5: standalone spec stage runs record planningStage "spec/codemap",
+    // while standalone plan stage runs keep planningStage null.
+    const runStatusFiles = events.map(e => path.join(path.dirname(e.file), "status.json")).filter(f => fs.existsSync(f));
+    const runStatuses = runStatusFiles.map(f => JSON.parse(fs.readFileSync(f, "utf8")));
+    const specPlannerStatus = runStatuses.find(s => s.taskRef === "standalone-spec-planner");
+    const specReviewerStatus = runStatuses.find(s => s.taskRef === "standalone-spec-plan_reviewer");
+    const planPlannerStatus = runStatuses.find(s => s.role === "planner" && s.taskRef !== "standalone-spec-planner");
+    check("integration (planningStage): standalone-spec-planner records planningStage 'spec/codemap'",
+      specPlannerStatus?.planningStage === "spec/codemap",
+      specPlannerStatus?.planningStage);
+    check("integration (planningStage): standalone-spec-plan_reviewer records planningStage 'spec/codemap'",
+      specReviewerStatus?.planningStage === "spec/codemap",
+      specReviewerStatus?.planningStage);
+    check("integration (planningStage): standalone PLAN/TASKS planner records null planningStage",
+      planPlannerStatus?.planningStage === null,
+      planPlannerStatus?.planningStage);
   } finally {
     cleanup(repo, binDir);
   }
@@ -139,16 +156,16 @@ function check(name, condition, detail) {
     writeConfig(repo, {planningFramework: "standalone", maxPlanRevisions: 1});
     const cfgPath = path.join(repo, ".autopilot", "config.json");
     const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-    delete cfg.workflow.standaloneSpec;
-    delete cfg.workflow.standalone_spec;
+    cfg.workflow.standaloneSpec = true;
+    cfg.workflow.standalone_spec = true;
     fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
 
     const request = "implement the fixture task";
-    const mission = "001-implement-the-fixture-task";
+    const mission = "001-implement-fixture-task";
     const missionDir = path.join(repo, ".autopilot", "missions", mission);
     fs.mkdirSync(missionDir, {recursive: true});
     fs.writeFileSync(path.join(missionDir, "SPEC.md"), "# Spec\n\n## Requirements\n\n- **FR-001**: System MUST do the fixture task.\n");
-    fs.writeFileSync(path.join(missionDir, "CONTEXT.md"), "# Context\n\nfixture.\n");
+    fs.writeFileSync(path.join(missionDir, "CODEMAP.md"), "# Code map\n\nfixture.\n");
     fs.writeFileSync(path.join(repo, ".autopilot", "state.json"), JSON.stringify({
       version: 1,
       phase: "planning",
@@ -186,6 +203,52 @@ function check(name, condition, detail) {
     check("integration (spec off): no prompt contains 'Write the feature specification for this request'",
       events.length > 0 && !anyHasSpecStageLine,
       events.map(e => e.role));
+  } finally {
+    cleanup(repo, binDir);
+  }
+}
+
+// ---- Integration: legacy CONTEXT.md fallback on resume ----
+{
+  const repo = makeFixtureRepo("backlog7-legacy-context-fallback");
+  const binDir = makeFixtureBin("backlog7-legacy-context-fallback");
+  try {
+    writeConfig(repo, {planningFramework: "standalone", maxPlanRevisions: 1});
+    const cfgPath = path.join(repo, ".autopilot", "config.json");
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    cfg.workflow.standaloneSpec = true;
+    cfg.workflow.standalone_spec = true;
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+
+    const request = "implement the fixture task";
+    const mission = "001-implement-fixture-task";
+    const missionDir = path.join(repo, ".autopilot", "missions", mission);
+    fs.mkdirSync(missionDir, {recursive: true});
+    fs.writeFileSync(path.join(missionDir, "SPEC.md"), "# Spec\n\n## Requirements\n\n- **FR-001**: System MUST do the fixture task.\n");
+    const legacyContextFile = path.join(missionDir, "CONTEXT.md");
+    fs.writeFileSync(legacyContextFile, "# Legacy Context\n\nfixture.\n");
+    fs.writeFileSync(path.join(repo, ".autopilot", "state.json"), JSON.stringify({
+      version: 1,
+      phase: "planning",
+      step: "standalone-plan",
+      planningRequest: request,
+      mission,
+      missionSeq: "001",
+      standaloneSpecReview: {revision: 0, position: "reviewer", approved: true}
+    }, null, 2));
+
+    setScenario(repo, "success");
+    const run = runAutopilot(repo, binDir, {request, stage: "planning", timeoutMs: 120000});
+    const events = readObservedEvents(repo);
+    check("integration (legacy context fallback): planning run exits 0", run.status === 0, {status: run.status, stderr: run.stderr});
+
+    const plannerEvents = events.filter(e => e.role === "planner");
+    const plannerPrompt = plannerEvents[0]
+      ? fs.readFileSync(path.join(path.dirname(plannerEvents[0].file), "brief.txt"), "utf8")
+      : "";
+    check("integration (legacy context fallback): planner prompt cites legacy CONTEXT.md path",
+      plannerPrompt.includes(legacyContextFile),
+      plannerPrompt.slice(0, 1000));
   } finally {
     cleanup(repo, binDir);
   }

@@ -1064,7 +1064,7 @@
         },
         "spec_revisions": {
           "type": "number",
-          "description": "Standalone with workflow.standalone_spec on: the most spec-stage planner revisions after a SPEC.md review FAIL. When they run out, the open findings are handed to the plan stage instead of stopping the mission. 0 = review once, never revise.",
+          "description": "Standalone with workflow.standalone_spec set to true: the most spec-stage planner revisions after a SPEC.md review FAIL. When they run out, the open findings are handed to the plan stage instead of stopping the mission. 0 = review once, never revise.",
           "default": 3,
           "minimum": 0
         },
@@ -1241,7 +1241,7 @@
       "default": {
         "plan_review": true,
         "plan_review_rounds_converge": true,
-        "standalone_spec": true,
+        "standalone_spec": false,
         "gsd_planning_review": false,
         "spec_review": true,
         "code_review_per_phase": true,
@@ -1266,8 +1266,8 @@
         },
         "standalone_spec": {
           "type": "boolean",
-          "description": "Standalone only: the planner first reads the related code and writes SPEC.md (user stories, numbered FR-### requirements, success criteria) and CONTEXT.md (code map), reviewed until they pass; then PLAN.md and TASKS.md, where every task cites the FRs it covers and the plan fails review while any FR has no task; the mission-final code review checks every FR. Costs more planning tokens; set false for small requests to keep the cheaper plan-only path. Default true.",
-          "default": true
+          "description": "Standalone only, off by default: set true to add a spec stage for big features — the planner first reads the related code and writes SPEC.md (user stories, numbered FR-### requirements, success criteria) and CODEMAP.md (code map), reviewed until they pass; then PLAN.md and TASKS.md, where every task cites the FRs it covers and the plan fails review while any FR has no task; the mission-final code review checks every FR. Costs more planning tokens; set false for small requests to keep the cheaper plan-only path. Default false.",
+          "default": false
         },
         "gsd_planning_review": {
           "type": "boolean",

@@ -30,7 +30,7 @@ assert.match(
 );
 assert.match(
   setup,
-  /Standalone — Autopilot writes the plan itself: a SPEC\.md \(the requirements\), a PLAN\.md \(the plan\)\\n   and TASKS\.md \(the task list\) for each mission/,
+  /Standalone — Autopilot writes the plan itself: PLAN\.md \(the plan\) and TASKS\.md \(the task list\) for each mission \(optional SPEC\.md stage: workflow\.standalone_spec\)/,
   "the standalone label must be the exact short wording"
 );
 assert.doesNotMatch(setup, /ignore \$\{|Standalone — ignore/, "no 'ignore <framework>' standalone variant may exist");
@@ -56,7 +56,7 @@ assert.match(
 );
 assert.match(
   setup,
-  /✓ Standalone: built in — Autopilot writes the plan itself \(SPEC\.md \+ PLAN\.md \+ TASKS\.md per mission\)/,
+  /✓ Standalone: built in — Autopilot writes the plan itself \(PLAN\.md \+ TASKS\.md per mission\)/,
   "framework availability must show the built-in Standalone first"
 );
 assert.doesNotMatch(

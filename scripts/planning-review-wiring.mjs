@@ -150,13 +150,26 @@ function escalate(recorded,{state,saveState,fatal,escalatePrefix,cause}){
 // recorded-shaped object so the shared naming takes its immediate-escalation
 // step even if the relay marked the failure retryable, and writes zero
 // failure-budget state.
-export function escalateIfRateLimited(config,state,taskScope,result,{fatal,saveState,escalatePrefix}={}){
+// Backlog #8: with `writeRole:true` a PERMISSION_DENIED (adapter domain) result
+// of a planner/implementer escalates too, naming the denied command, so the
+// reviewer never runs on files the role could not revise.
+export function deniedCommandOf(failure){
+  for(const entry of Array.isArray(failure?.evidence)?failure.evidence:[]){
+    const params=entry?.event?.step_update?.tool_info?.parameters;
+    const command=params?.CommandLine??params?.command;
+    if(entry?.type==="command_attempted"&&typeof command==="string"&&command!=="") return command;
+  }
+  return null;
+}
+export function escalateIfRateLimited(config,state,taskScope,result,{fatal,saveState,escalatePrefix,writeRole=false}={}){
   const failureClass=result?.failure?.class;
-  if(failureClass!=="RATE_LIMITED"&&failureClass!=="AUTH_REQUIRED") return false;
+  const denied=writeRole&&failureClass==="PERMISSION_DENIED"&&result.failure.domain==="adapter";
+  if(failureClass!=="RATE_LIMITED"&&failureClass!=="AUTH_REQUIRED"&&!denied) return false;
+  const deniedCommand=denied?deniedCommandOf(result.failure):null;
   const failureRecord={...result.failure,class:failureClass,retryable:false};
   const scope=failureBudgetScope(failureRecord,taskScope,result);
   escalate({failure:failureRecord,budget:{allowed:false,budget:null,used:0,limit:0,scope},scope},
-    {state,saveState:typeof saveState==="function"?saveState:()=>{},fatal:typeof fatal==="function"?fatal:(m)=>{throw new Error(String(m));},escalatePrefix,cause:`${failureRecord.class}/${failureRecord.domain}`});
+    {state,saveState:typeof saveState==="function"?saveState:()=>{},fatal:typeof fatal==="function"?fatal:(m)=>{throw new Error(String(m));},escalatePrefix,cause:`${failureRecord.class}/${failureRecord.domain}${denied?` (command denied: ${deniedCommand??"unknown"}; no fallback model left)`:""}`});
   return true;
 }
 

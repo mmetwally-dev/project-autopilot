@@ -23,6 +23,8 @@ export const RATE_LIMITED_FAILURE_CLASS = "RATE_LIMITED";
 export const IDLE_HANG_FAILURE_CLASS = "IDLE_HANG";
 export const PROVIDER_ERROR_FAILURE_CLASS = "PROVIDER_ERROR";
 export const AUTH_REQUIRED_FAILURE_CLASS = "AUTH_REQUIRED";
+// Backlog #8: a write-role run denied a command it needed can use a fallback model.
+export const PERMISSION_DENIED_FAILURE_CLASS = "PERMISSION_DENIED";
 
 function isRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -194,14 +196,15 @@ export function decideRoleFallback({role, roleConfig, activeModel = null, failur
   const silentHang = failureClass === IDLE_HANG_FAILURE_CLASS && noOutput === true;
   const providerError = failureClass === PROVIDER_ERROR_FAILURE_CLASS;
   const authRequired = failureClass === AUTH_REQUIRED_FAILURE_CLASS;
-  if (failureClass !== RATE_LIMITED_FAILURE_CLASS && !silentHang && !providerError && !authRequired) {
+  const permissionDenied = failureClass === PERMISSION_DENIED_FAILURE_CLASS;
+  if (failureClass !== RATE_LIMITED_FAILURE_CLASS && !silentHang && !providerError && !authRequired && !permissionDenied) {
     return {
       action: "none",
       reason: `${name}: failure class ${String(failureClass)} is not RATE_LIMITED; no fallback switch`,
     };
   }
   const fallbacks = fallbackListOf(roleConfig);
-  const label = silentHang ? "IDLE_HANG (no output)" : authRequired ? "AUTH_REQUIRED" : providerError ? "PROVIDER_ERROR" : "RATE_LIMITED";
+  const label = silentHang ? "IDLE_HANG (no output)" : authRequired ? "AUTH_REQUIRED" : permissionDenied ? "PERMISSION_DENIED" : providerError ? "PROVIDER_ERROR" : "RATE_LIMITED";
   if (fallbacks.length === 0) {
     if (silentHang) {
       return {action: "none", reason: `${name}: ${label} with no fallbacks configured; normal retry`};

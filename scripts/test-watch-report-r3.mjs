@@ -143,6 +143,24 @@ try {
     check("6: standalone reviewer TASK stays plan/tasks", taskCell(report, "02-plan_reviewer-b") === "plan/tasks", cells(report, "02-plan_reviewer-b"));
   }
 
+  // Standalone spec-stage: rows with planningStage "spec/codemap" show spec/codemap
+  {
+    const model = buildReportModel({
+      state: {
+        mission: "6-standalone-spec", phase: "planning", step: "standalone-plan",
+        planningDetection: { framework: "standalone" },
+      },
+      runs: [
+        run({ id: "01-planner-a", dirName: "01-planner-a", role: "planner", taskRef: "standalone-spec-planner", planningStage: "spec/codemap", started_at: "2026-10-30T01:30:00.000Z" }),
+        run({ id: "02-plan_reviewer-b", dirName: "02-plan_reviewer-b", role: "plan_reviewer", taskRef: "standalone-spec-plan_reviewer", planningStage: "spec/codemap", decision: "PASS", started_at: "2026-10-30T01:31:00.000Z" }),
+      ],
+      phases: [], policy: { max_plan_revisions: 8 },
+    });
+    const report = renderPlanningStage(model);
+    check("6: standalone spec planner TASK is spec/codemap", taskCell(report, "01-planner-a") === "spec/codemap", cells(report, "01-planner-a"));
+    check("6: standalone spec reviewer TASK is spec/codemap", taskCell(report, "02-plan_reviewer-b") === "spec/codemap", cells(report, "02-plan_reviewer-b"));
+  }
+
   // SpecKit: rows show spec/plan/tasks, read from status.json (the first run
   // has planningStage only on disk, never inline), and the header revision
   // counter follows state.planReviewRevisions["speckit-stage:*"].

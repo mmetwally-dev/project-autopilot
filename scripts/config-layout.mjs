@@ -151,7 +151,7 @@ export const DEFAULTS = {
   workflow: {
     plan_review: true,
     plan_review_rounds_converge: true,
-    standalone_spec: true,
+    standalone_spec: false,
     gsd_planning_review: false,
     spec_review: true,
     code_review_per_phase: true,

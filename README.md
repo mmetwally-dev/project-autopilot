@@ -99,7 +99,7 @@ versions were private development.)
 | What you need | Run | Outcome |
 | --- | --- | --- |
 | Build a feature or fix a bug from start to finish | `ap run "<request>"` | A reviewed plan, coded and tested phase by phase, waiting in your working tree |
-| Only a reviewed plan, to read before any code is written | `ap run --stage planning "<request>"` | `SPEC.md` + `CONTEXT.md`, then `PLAN.md` + `TASKS.md`, each approved by the plan reviewer |
+| Only a reviewed plan, to read before any code is written | `ap run --stage planning "<request>"` | `SPEC.md` + `CODEMAP.md`, then `PLAN.md` + `TASKS.md`, each approved by the plan reviewer |
 | Run one step of an open mission yourself | `ap run --stage implement \| review \| verify` | That one step for the current phase, then it stops |
 | A second opinion on a plan you already have | `ap plan-review <plan-file>` | A verdict and findings; nothing is changed |
 | A review of a commit, a range, a diff or a folder | `ap code-review <target>` | A verdict and findings; nothing is changed |
@@ -194,14 +194,13 @@ the task list, the logs and the report after the mission ends.
 
 ### 1. Planning and plan review
 
-The planner first reads the related code and writes `SPEC.md` (user stories,
+The spec stage is opt-in (`workflow.standalone_spec: true`); without it standalone writes `PLAN.md` + `TASKS.md` only. With the spec stage on, the planner first reads the related code and writes `SPEC.md` (user stories,
 numbered FR-### requirements, success criteria — every rule in the request
-becomes an FR) and `CONTEXT.md` (the files and functions the feature touches,
+becomes an FR) and `CODEMAP.md` (the files and functions the feature touches,
 with file:line). The plan reviewer reviews them until they pass. Then the
 planner writes `PLAN.md` (goal, scope, design) and `TASKS.md` (phases of small
 tasks); each task cites the FRs it implements, and the plan fails review while
-any FR has no task. Set `workflow.standalone_spec: false` to skip the spec and
-go straight to the plan (cheaper, for small requests). Every task is one concrete action on
+any FR has no task. Every task is one concrete action on
 about one file, names the exact paths, and says how it is accepted and how to
 verify it, for example:
 
@@ -599,7 +598,7 @@ run's brief, output and result).
 
 | Role | Writes to the repo? | Job |
 | --- | --- | --- |
-| `planner` | Yes (the plan files) | Writes `SPEC.md` + `CONTEXT.md`, then `PLAN.md` and `TASKS.md`; revises them after review |
+| `planner` | Yes (the plan files) | Writes `SPEC.md` + `CODEMAP.md`, then `PLAN.md` and `TASKS.md`; revises them after review |
 | `plan_reviewer` | No — read-only | Approves or denies the plan with findings |
 | `implementer` | Yes | Codes one task per session; fixes findings |
 | `code_reviewer` | No — read-only | Reviews each phase, and the whole change in the final review |
@@ -703,7 +702,7 @@ The planner and implementer write to the repository in every mode.
 (detect). `ap setup` detects what the project uses.
 
 **Standalone** (the default — nothing else to install). Each mission keeps its
-spec and plan in `.autopilot/missions/<NNN>-<slug>/` (`SPEC.md`, `CONTEXT.md`,
+spec and plan in `.autopilot/missions/<NNN>-<slug>/` (`SPEC.md`, `CODEMAP.md`,
 `PLAN.md`, `TASKS.md`). All
 features, including `--stage`, work here.
 
@@ -787,7 +786,7 @@ Everything lives in `.autopilot/` (git-ignored by setup):
   config.json                 your settings
   state.json                  mission state and checkpoints (do not edit by hand)
   missions/<NNN>-<slug>/      one folder per mission, kept after it ends
-    SPEC.md, CONTEXT.md       the feature spec (FR-### requirements) and the code map
+    SPEC.md, CODEMAP.md       the feature spec (FR-### requirements) and the code map
     PLAN.md, TASKS.md         the plan and the task list (ticked as tasks pass)
     WATCH-REPORT.md           live status
     orchestrator.log          full log

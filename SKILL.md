@@ -80,9 +80,8 @@ and `ap watch` do not exist; the WATCH-REPORT is the status view.
 
 ## How a mission runs
 
-- **Planning.** The planner first writes `SPEC.md` (FR-### requirements) and
-  `CONTEXT.md` (code map), reviewed until they pass (skipped when
-  `workflow.standalone_spec` is false), then `PLAN.md` and `TASKS.md` in
+- **Planning.** The spec stage is opt-in (`workflow.standalone_spec: true`); without it standalone writes `PLAN.md` + `TASKS.md` only. With the spec stage on, the planner first writes `SPEC.md` (FR-### requirements) and
+  `CODEMAP.md` (code map), reviewed until they pass; then `PLAN.md` and `TASKS.md` in
   `.autopilot/missions/<NNN>-<slug>/`; tasks cite the FRs they implement. Each task is one concrete action on about
   one file, with exact paths, an `accept:` line and a `verify:` command; more than
   3 changes or 2 files means split it. The read-only plan reviewer APPROVES or
@@ -314,7 +313,7 @@ Every setting with its default is in [docs/configuration.md](docs/configuration.
 
 ## SpecKit, standalone and not-yet-reviewed integrations
 
-- **Standalone** (default): each mission keeps `SPEC.md`, `CONTEXT.md`, `PLAN.md` and `TASKS.md` in
+- **Standalone** (default): each mission keeps `SPEC.md`, `CODEMAP.md`, `PLAN.md` and `TASKS.md` in
   `.autopilot/missions/<NNN>-<slug>/`. All features, including `--stage`, work here.
 - **SpecKit**: `.specify/workflows/speckit/workflow.yml` is authoritative; command
   steps map to the planner, gate steps to the plan reviewer, and implementation is

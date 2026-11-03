@@ -12,6 +12,7 @@ import {
   renderImplementationStage,
   renderPipelineState,
   renderReport,
+  snapshotSpanText,
 } from "./watch-report.mjs";
 import { readGateLogTail } from "./run-history.mjs";
 
@@ -79,13 +80,14 @@ const row = (text, needle) => lines(text).find((l) => l.includes(needle)) || "";
   const text = renderCurrentRun(model);
   check("d: run line uses the row name", text.includes("run:     77-implementer-0022b8e2"), row(text, "run:"));
   check("d: run line does not use the bare uuid", !text.includes("run:     0022b8e2-af81"), row(text, "run:"));
-  check("b: sub-minute snapshot uses seconds", text.includes("(pre-run snapshot 0.9s)"), row(text, "started:"));
+  check("b: sub-minute snapshot uses seconds", snapshotSpanText(900) === "0.9s");
+  check("b: current run omits snapshot", !text.includes("snapshot"), row(text, "started:"));
   const long = buildReportModel({
     state: { phase: "implementing", phaseIndex: 3, attempt: 1 },
     runs: [run({ id: "r", dirName: "78-implementer-x", role: "implementer", phase: "4", attempt: "1", taskRef: "T4.1", status: "running", pid: process.pid, started_at: "2026-10-19T10:00:00+00:00", snapshotBeforeAt: "2026-10-19T10:02:07+00:00", updated_at: "2026-10-19T10:03:00+00:00" })],
     events: [], phases: [{ number: 4, name: "Phase 4", done: false, tasks: [{ text: "T4.1" }] }], policy: {}, now: "2026-10-19T10:03:00+00:00",
   });
-  check("b: minute snapshot keeps m:ss", renderCurrentRun(long).includes("(pre-run snapshot 2:07)"), row(renderCurrentRun(long), "started:"));
+  check("b: minute snapshot keeps m:ss", snapshotSpanText(127000) === "2:07");
 }
 
 // ── #35h: gate progress comes from the log tail ─────────────────────────────
@@ -192,7 +194,7 @@ const row = (text, needle) => lines(text).find((l) => l.includes(needle)) || "";
   };
   const policy = { failure_budgets: { implementationFailureBudget: 3, verificationFailureBudget: 3, adapterRetryBudget: 2, infrastructureRetryBudget: 2 } };
   const model = buildReportModel({ state, runs: [], events: [], phases: [], policy });
-  const line = row(renderPipelineState(model), "Budgets:");
+  const line = row(renderPipelineState(model), "Retries:");
   check("38: current phase spend only, earlier separately", line.includes("implementation=0/3 (5 in earlier phases)"), line);
   check("38: current verification scope is 1/3", line.includes("verification=1/3"), line);
   check("38: worst live adapter scope", line.includes("adapter=2/2"), line);

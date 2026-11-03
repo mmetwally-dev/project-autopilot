@@ -170,3 +170,81 @@ export function spawnAgent(binary,args,opts={}){
   if(shim) return spawn(shim.bin,shim.args,{...opts,shell:false});
   return spawn(resolved,args,{...opts,shell:false});
 }
+
+// Codex npm-layout resolution: when `codex` resolves to the npm launcher
+// `.../@openai/codex/bin/codex.js`, the native binary + its siblings live
+// in a platform package under <pkg>/node_modules/@openai/codex-<platform>-<arch>/
+// (or <pkg>/vendor/<triple>/bin/ for older layouts). Return that native path;
+// otherwise return the original resolved path unchanged.
+const CODEX_PLATFORM_PACKAGE = {
+  linux: { x64: "codex-linux-x64", arm64: "codex-linux-arm64" },
+  darwin: { x64: "codex-darwin-x64", arm64: "codex-darwin-arm64" },
+  win32: { x64: "codex-win32-x64", arm64: "codex-win32-arm64" },
+};
+const CODEX_TARGET_TRIPLE = {
+  linux: { x64: "x86_64-unknown-linux-musl", arm64: "aarch64-unknown-linux-musl" },
+  darwin: { x64: "x86_64-apple-darwin", arm64: "aarch64-apple-darwin" },
+  win32: { x64: "x86_64-pc-windows-msvc", arm64: "aarch64-pc-windows-msvc" },
+};
+
+function codexBinaryName() {
+  return process.platform === "win32" ? "codex.exe" : "codex";
+}
+
+function findCodexNativeBinary(pkgRoot) {
+  const binaryName = codexBinaryName();
+  const expectedTriple = (CODEX_TARGET_TRIPLE[process.platform] || {})[process.arch] || null;
+  const roots = new Set();
+  const platformPkg = (CODEX_PLATFORM_PACKAGE[process.platform] || {})[process.arch];
+  if (platformPkg) roots.add(path.join(pkgRoot, "node_modules", "@openai", platformPkg));
+  try {
+    const scopeDir = path.join(pkgRoot, "node_modules", "@openai");
+    if (fs.existsSync(scopeDir)) {
+      for (const entry of fs.readdirSync(scopeDir)) {
+        if (entry.startsWith("codex-") && entry !== "codex") {
+          roots.add(path.join(scopeDir, entry));
+        }
+      }
+    }
+  } catch {}
+  const candidates = [];
+  for (const root of roots) {
+    const vendorDir = path.join(root, "vendor");
+    if (!fs.existsSync(vendorDir)) continue;
+    let triples = [];
+    try { triples = fs.readdirSync(vendorDir); } catch {}
+    for (const triple of triples) {
+      const cand = path.join(vendorDir, triple, "bin", binaryName);
+      if (fs.existsSync(cand)) candidates.push({ path: cand, triple });
+    }
+  }
+  // older layouts: <pkg>/vendor/<triple>/bin/codex
+  const oldVendor = path.join(pkgRoot, "vendor");
+  if (fs.existsSync(oldVendor)) {
+    let triples = [];
+    try { triples = fs.readdirSync(oldVendor); } catch {}
+    for (const triple of triples) {
+      const cand = path.join(oldVendor, triple, "bin", binaryName);
+      if (fs.existsSync(cand)) candidates.push({ path: cand, triple });
+    }
+  }
+  if (candidates.length === 0) return null;
+  if (expectedTriple) {
+    const preferred = candidates.find(c => c.triple === expectedTriple);
+    if (preferred) return preferred.path;
+  }
+  return candidates[0].path;
+}
+
+export function resolveCodexNativeBinary(binary) {
+  const resolved = resolveAgentBinary(binary);
+  let realPath;
+  try { realPath = fs.realpathSync(resolved); } catch { return resolved; }
+  if (path.basename(realPath) !== "codex.js") return resolved;
+  const pkgRoot = path.resolve(path.dirname(realPath), "..");
+  const native = findCodexNativeBinary(pkgRoot);
+  if (native) {
+    try { return fs.realpathSync(native); } catch { return native; }
+  }
+  return resolved;
+}

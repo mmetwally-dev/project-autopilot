@@ -7,7 +7,7 @@ import { peekSummary } from "./watch-summary.mjs";
 import { defaultIsPidAlive } from "./run-recovery.mjs";
 import { growingTerm } from "./per-task-budget.mjs";
 import { readOwnerPid, ownerPidAlive } from "./owner-pid.mjs";
-import { buildReportModel, renderReport } from "./watch-report.mjs";
+import { buildReportModel, renderReport, formatStamp } from "./watch-report.mjs";
 import { detectUiProject } from "./e2e-detect.mjs";
 import { formatNotRunInMissions } from "./command-probe.mjs";
 import { phases as standalonePhases } from "../adapters/standalone.mjs";
@@ -41,10 +41,32 @@ export function pidLiveness(pid) {
 // orchestrator is known dead cannot be progressing (SIGKILL, shutdown) and is
 // shown as interrupted whatever its own pid says. Unknown owner keeps the
 // legacy dead-pid -> killed rule.
-export function displayStatus(run, { isAlive = pidLiveness } = {}) {
+export function hasNewerMissionRun(run, runs) {
+  if (!run || !Array.isArray(runs) || runs.length <= 1) return false;
+  const runSeq = Number(run?.seq ?? parseRunDirName(run?.dirName || run?.id)?.seq);
+  const runTime = Date.parse(run?.started_at ?? run?.startedAt) || 0;
+  for (const other of runs) {
+    if (!other || other === run || (run.id && other.id === run.id)) continue;
+    const otherSeq = Number(other?.seq ?? parseRunDirName(other?.dirName || other?.id)?.seq);
+    if (Number.isFinite(runSeq) && Number.isFinite(otherSeq)) {
+      if (otherSeq > runSeq) return true;
+      if (otherSeq < runSeq) continue;
+    }
+    const otherTime = Date.parse(other?.started_at ?? other?.startedAt) || 0;
+    if (runTime > 0 && otherTime > runTime) return true;
+  }
+  return false;
+}
+
+export function displayStatus(run, { isAlive = pidLiveness, runs = null, hasNewerRun = null } = {}) {
   if (String(run?.status || "") !== "running") return run?.status;
   const live = isAlive(run.pid);
   if (live === true) return run.status;
+  const newer = hasNewerRun === true || (hasNewerRun !== false && hasNewerMissionRun(run, runs));
+  if (newer && (run.pid == null || live === false)) {
+    const hasError = Boolean(run?.failureClass || run?.failure || run?.failure_reason || run?.failureReason || run?.error);
+    return hasError ? "failed" : "interrupted";
+  }
   if (run.ownerAlive === true) return run.status;
   if (run.ownerAlive === false) return "interrupted";
   return live === false ? "killed" : run.status;
@@ -53,9 +75,9 @@ export function displayStatus(run, { isAlive = pidLiveness } = {}) {
 export const STALE_RUNNING_LABEL = "interrupted (orchestrator not running)";
 
 // Text shown for a status cell: the long label for an orchestrator-dead run.
-export function displayStatusLabel(run, opts) {
+export function displayStatusLabel(run, opts = {}) {
   const st = displayStatus(run, opts);
-  return st === "interrupted" && String(run?.status || "") === "running" ? STALE_RUNNING_LABEL : st;
+  return st === "interrupted" && String(run?.status || "") === "running" && run?.ownerAlive === false ? STALE_RUNNING_LABEL : st;
 }
 
 // Display-only: mark each run with whether the mission orchestrator is alive.
@@ -173,6 +195,15 @@ export function readRunMeta(dir, id) {
   const model = status?.model ?? result?.model ?? null;
   const runId = status?.run_id || result?.run_id || id;
 
+  // Backlog #26 Step B: wrap-up marker (status.json only). Renders as a
+  // NOTE suffix on the run line; runs without it read null and render
+  // exactly as before.
+  const failure = result?.failure ?? status?.failure ?? null;
+  const failureReason = status?.failure_reason ?? result?.failure?.reason ?? result?.failure?.message ?? status?.error ?? result?.error ?? null;
+  const failureClass = result?.failure?.class ?? status?.failureClass ?? null;
+  const recordedError = failureReason ?? (failure?.message || null);
+  const note = status?.note ?? result?.note ?? recordedError ?? null;
+
   return {
     id: runId,
     dir,
@@ -198,14 +229,18 @@ export function readRunMeta(dir, id) {
     // only and may be stale or null (see observabilityMeta in
     // autopilot.mjs). result.json first (#110), status.json fallback for old runs.
     taskRef: result?.taskRef ?? status?.taskRef ?? null,
-  // The SpecKit/GSD planning stage this run worked on, recorded at launch.
-  // Null for non-planning runs and for standalone planning (`plan/tasks`).
+  // The planning stage this run worked on (`spec`/`plan`/`tasks` for SpecKit,
+  // `discuss`/`research`/`plan`/`plan-check` for GSD, or `spec/codemap` for
+  // standalone spec-stage runs), recorded at launch.
+  // Null for non-planning runs and for standalone PLAN/TASKS planning (`plan/tasks`).
   planningStage: status?.planningStage ?? result?.planningStage ?? null,
   attempt: status?.attempt ?? result?.attempt ?? null,
-  // Backlog #26 Step B: wrap-up marker (status.json only). Renders as a
-  // NOTE suffix on the run line; runs without it read null and render
-  // exactly as before.
-  note: status?.note ?? result?.note ?? null,
+  note,
+  failure,
+  failureReason,
+  failure_reason: failureReason,
+  failureClass,
+  error: recordedError,
   // Backlog #35a/#35c: the lasting interruption reason and the moment the run
   // was stopped (the report derives the owner-down reason and downtime).
   interrupted_at: status?.interrupted_at ?? null,
@@ -289,7 +324,7 @@ export function detectCurrentRun(runs) {
   // while the newest real run goes unmarked is the defect being fixed here. The
   // liveness guard is kept alongside the status check so a caller that hands in
   // raw (unreconciled) statuses still cannot select a dead run.
-  const running = runs.filter((r) => displayStatus(r) === "running");
+  const running = runs.filter((r) => displayStatus(r, { runs }) === "running");
   if (running.length) {
     running.sort((a, b) => (new Date(b.started_at).getTime() || 0) - (new Date(a.started_at).getTime() || 0));
     return running[0];
@@ -569,7 +604,14 @@ export function appendNoE2eNoteToReport(repo, file) {
 export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAlive, phases, policy, events, now, skill, gateLog } = {}) {
   const d = now ? new Date(now) : new Date();
   const p = (n) => String(n).padStart(2, "0");
-  const stamp = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  let stamp;
+  if (now) {
+    const s = formatStamp(now);
+    if (s !== "-" && s.includes(" ")) stamp = s;
+  }
+  if (!stamp) {
+    stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
   const runsDir = watchRunsDir(repo, mission);
   const state = readJsonFile(path.join(repo, ".autopilot", "state.json"));
   const configResult = loadAndMigrateConfig(path.join(repo, ".autopilot", "config.json"), {persist: false});
@@ -585,17 +627,17 @@ export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAl
   // the label displayStatusLabel computes — a dead-owner/dead-pid "running" run
   // becomes "interrupted (orchestrator not running)".
   const runs = annotated.map((r) => {
-    const shown = displayStatusLabel(r, { isAlive: isAlive || pidLiveness });
+    const shown = displayStatusLabel(r, { isAlive: isAlive || pidLiveness, runs: annotated });
     return shown === r.status ? r : { ...r, status: shown };
   });
   // A cancelled mission has no current run: without this, detection falls
   // back to the newest real run. Display-level only — detectCurrentRun itself
   // is untouched, so live reporting and recovery keep working.
   const current = state?.phase === "cancelled" ? null : detectCurrentRun(runs);
-  const hasRunning = state?.phase !== "cancelled" && Array.isArray(runs) && runs.some((r) => displayStatus(r) === "running");
+  const hasRunning = state?.phase !== "cancelled" && Array.isArray(runs) && runs.some((r) => displayStatus(r, { runs }) === "running");
   let progressDir = null;
   if (hasRunning) {
-    const runningSorted = runs.filter((r) => displayStatus(r) === "running").sort((a, b) => (Date.parse(b?.started_at ?? b?.startedAt) || 0) - (Date.parse(a?.started_at ?? a?.startedAt) || 0));
+    const runningSorted = runs.filter((r) => displayStatus(r, { runs }) === "running").sort((a, b) => (Date.parse(b?.started_at ?? b?.startedAt) || 0) - (Date.parse(a?.started_at ?? a?.startedAt) || 0));
     progressDir = runningSorted.length ? runningSorted[0]?.dir : null;
   } else if (state?.phase !== "cancelled" && Array.isArray(runs) && runs.length) {
     const newest = [...runs].sort((a, b) => (Date.parse(b?.started_at ?? b?.startedAt) || 0) - (Date.parse(a?.started_at ?? a?.startedAt) || 0));
@@ -656,6 +698,7 @@ export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAl
     missionFallback: mission ?? null,
     ownerAlive,
     notRunText: formatNotRunInMissions(config?.gates?.not_run_in_missions),
+    isAlive,
   });
   const e2eNote = noE2eReportNote(repo, configResult?.layout ?? null);
   const out = renderReport(model, { stamp });

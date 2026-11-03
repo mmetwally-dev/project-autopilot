@@ -91,6 +91,26 @@ export function decideEscalationName({failureClass, retryable, used, limit, budg
       }
       return {step: "auth_required_escalation", detail: `${cli} is logged out${why} — run \`${cli}\` and log in, then \`ap run\``};
     }
+    // Backlog #5: the read-only launch-plan denial. The reason (and the
+    // missing runtime file when present) travel on the evidence; name both so
+    // the persisted step and the WATCH-REPORT stop line say WHY the mission
+    // escalated, not just "non_retryable_failure". The class stem follows
+    // the rate_limited_escalation/auth_required_escalation convention.
+    if (failureClass === "READ_ONLY_CONTAINMENT_UNAVAILABLE") {
+      let reason = null;
+      let missingRuntimeFile = null;
+      if (Array.isArray(evidence)) {
+        for (const entry of evidence) {
+          if (!entry || typeof entry !== "object") continue;
+          if (reason == null && typeof entry.reason === "string" && entry.reason !== "") reason = entry.reason;
+          if (missingRuntimeFile == null && typeof entry.missingRuntimeFile === "string" && entry.missingRuntimeFile !== "") missingRuntimeFile = entry.missingRuntimeFile;
+        }
+      }
+      const why = missingRuntimeFile
+        ? `${reason ?? "adapter_runtime_file_missing"}: missing runtime file ${missingRuntimeFile}`
+        : (reason ?? "unknown reason");
+      return { step: "read_only_containment_unavailable", detail: `READ_ONLY_CONTAINMENT_UNAVAILABLE (${why})` };
+    }
     return {step: "non_retryable_failure", detail: `${failureClass} is not retryable`};
   }
   if (budget == null) {

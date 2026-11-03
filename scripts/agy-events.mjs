@@ -292,3 +292,69 @@ export function writeAgyAllowRule(scratchDir, extraRules = []) {
   fs.writeFileSync(settingsPath, `${JSON.stringify({permissions: {allow}}, null, 2)}\n`, "utf8");
   return settingsPath;
 }
+
+// Backlog #7: command(...) grants for an agy WRITE-mode run. Rule syntax is
+// `command(<command prefix by words>)` with no wildcard: `command(git status)`
+// allows `git status --short`. Without a matching rule headless agy
+// auto-denies the command (PERMISSION_DENIED). Never commit/push/reset/checkout:
+// Autopilot's git guard forbids them. Extend the lists below to grant more.
+export const AGY_READ_COMMANDS = Object.freeze([
+  "ls", "cat", "head", "tail", "wc", "nl", "grep", "rg", "find", "sed", "awk", "sort", "uniq",
+  "diff", "file", "stat", "pwd", "which",
+  "git status", "git diff", "git log", "git show", "git ls-files", "git grep", "git rev-parse", "git blame"
+]);
+export const AGY_IMPLEMENTER_COMMANDS = Object.freeze(["npx", "npm", "pnpm", "yarn", "node", "tsc", "git add"]);
+export const AGY_SPECKIT_COMMANDS = Object.freeze(["pwsh"]);
+
+// Leading words of a gate command that name the program (and subcommand for
+// runners like `npx vitest run ...` -> "npx vitest"). Skips env assignments.
+function gateCommandPrefix(command) {
+  const words = String(command ?? "").trim().split(/\s+/).filter((w) => w !== "" && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
+  if (words.length === 0) return null;
+  const runners = new Set(["npx", "npm", "pnpm", "yarn", "bunx", "bun", "python", "python3", "dotnet", "cargo", "go", "git"]);
+  const take = runners.has(words[0]) && words.length > 1 && !words[1].startsWith("-") ? 2 : 1;
+  return words.slice(0, take).join(" ");
+}
+
+export function agyAllowRulesForRole(roleName, config = {}, {speckit = false, repo} = {}) {
+  const commands = [...AGY_READ_COMMANDS, "node"];
+  const speckitOn = speckit === true || (speckit !== false && repo != null && fs.existsSync(path.join(String(repo), ".specify")));
+  if (speckitOn) {
+    commands.push(...AGY_SPECKIT_COMMANDS);
+    if (repo != null) {
+      const bashDir = path.join(String(repo), ".specify", "scripts", "bash");
+      try {
+        if (fs.existsSync(bashDir) && fs.statSync(bashDir).isDirectory()) {
+          for (const entry of fs.readdirSync(bashDir)) {
+            const full = path.join(bashDir, entry);
+            let isFile = false;
+            try { isFile = fs.statSync(full).isFile(); } catch { isFile = false; }
+            if (!isFile) continue;
+            const name = String(entry).replace(/\\/g, "/");
+            commands.push(`.specify/scripts/bash/${name}`);
+            commands.push(`bash .specify/scripts/bash/${name}`);
+            commands.push(`./.specify/scripts/bash/${name}`);
+          }
+        }
+      } catch {}
+    }
+  }
+  if (roleName === "implementer") {
+    commands.push(...AGY_IMPLEMENTER_COMMANDS);
+    const gates = [...(config?.tests?.gate_commands ?? []), ...(config?.gates?.commands ?? [])];
+    for (const gate of gates) {
+      const prefix = gateCommandPrefix(gate);
+      if (prefix) commands.push(prefix);
+    }
+  }
+  return [...new Set(commands)].map((command) => `command(${command})`);
+}
+
+// Backlog #7: extra argv for the production relay. An agy WRITE role gets
+// `--settings <file>`, a per-run file under the run's own dir; read-only runs
+// and other adapters get nothing (read-only containment is unchanged).
+export function agyRelayExtraArgs({adapter, readOnly, roleName, config, runDir, repo}) {
+  if (adapter !== "antigravity" || readOnly) return [];
+  const rules = agyAllowRulesForRole(roleName, config, {speckit: fs.existsSync(path.join(String(repo ?? ""), ".specify")), repo});
+  return ["--settings", writeAgyAllowRule(path.join(String(runDir), "agy"), rules)];
+}

@@ -149,7 +149,7 @@ const POLICY = {
   has("run line", "run:     17-implementer-db4d1811");
   has("role line", "role:    implementer · task T2.3 · model muse-spark-1.3 · session 1 of 6");
   has("status line", "status:  RUNNING · pid 81234 (alive)");
-  has("started line", "started: 2026-09-29 01:41:55 · elapsed 00:06:35 (pre-run snapshot 2:07)");
+  has("started line", "started: 2026-09-29 01:41:55 · elapsed 00:06:35");
   has("last activity line", "last activity: 2026-09-29 01:48:22 (8s ago)");
   has("usage line", "usage so far: ~52.0K of 500K cap · context ~27.3K · 9 turns");
 

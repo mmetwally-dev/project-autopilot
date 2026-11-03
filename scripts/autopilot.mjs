@@ -37,7 +37,6 @@ export {openCodeSandboxModelWarnings as openCodeSandboxModelWarningsForTests};
 // Exported for offline tests of the live reset-request application path, which
 // otherwise only runs inside a live mission.
 export {applyPendingBudgetReset as applyPendingBudgetResetForTests};
-
 // F2b #23b: test-callable handler that records an orchestrator_exit event
 // without re-raising the signal. Accepts (signal, repo, state) or an options
 // object. Never throws.
@@ -60,6 +59,7 @@ import { discoverPlaywrightRuntime } from "./playwright-runtime.mjs";
 import {parseReviewContract, classifyObservedFailure, reclassifySilentOpenCodeFailure, verdictFailure, failure, recordFailureBudget, selectAttemptFailure, clearStaleStandaloneBudgets, shouldRefusePassForEvidence, linkedVerifyCommandsForPhase, reviewerLinkedToolResults} from "./failure-contract.mjs";
 import {isPlanningReviewRetryFramework} from "./planning-review-decision.mjs";
 import {decideEscalationName} from "./escalation-naming.mjs";
+import {envelopeDenialFailure,envelopeDenialDetail,recordEnvelopeDenial} from "./envelope-denial.mjs";
 import {deriveGsdUnitResetRecord, applyCarriedGsdReset} from "./gsd-unit-reset.mjs";
 import {resolvePlanningReviewAttempt as resolvePlanningReviewAttemptWired, escalateIfRateLimited} from "./planning-review-wiring.mjs";
 import {evaluateStandaloneReview, createStandaloneCheckpoint, artifactDigest as planningReviewArtifactDigest,
@@ -69,6 +69,7 @@ import {evaluateStandaloneReview, createStandaloneCheckpoint, artifactDigest as 
 import {preflightConfig, preflightPrimaryModels, primaryModelPreflightMessage, opencodeCliDefaultWarnings, opencodeCliDefaultWarningMessage} from "./preflight.mjs";
 import {spawnRelayChild} from "./subprocess-relay.mjs";
 import {adapterDriver, finalAgentText, sessionIdFromEvents, accumulateUsage, recordRunModel, runModelPatch, applyClaudeReadOnlyScratchAllow} from "./adapter-drivers.mjs";
+import {agyRelayExtraArgs} from "./agy-events.mjs";
 import {mergeTaskFacts,mergeTaskLineFacts,browserVerifierNote} from "./task-requirements.mjs";
 import {buildRoleRequirements, requirementFailure} from "./role-requirements.mjs";
 import { classifyPlanningRequest } from "./planning-request.mjs";
@@ -3010,6 +3011,7 @@ const PLANNING_STAGE_BY_STEP={
 };
 function planningStageFromState(s, taskRef=null){
   const ref=typeof taskRef==="string"?taskRef:"";
+  if(ref.startsWith("standalone-spec-")) return "spec/codemap";
   if(!ref.startsWith("speckit-planning-")&&!ref.startsWith("gsd-planning-")) return null;
   const key=String(s?.step||"").toLowerCase()
     .replace(/^(?:speckit|gsd)-/,"")
@@ -3035,9 +3037,11 @@ function observabilityMeta(s, taskRef=null){
     // scope is unknown). Supplied explicitly per relay call, never derived
     // from global state.
     taskRef: typeof taskRef==="string"&&taskRef ? taskRef : null,
-    // The SpecKit/GSD planning stage this run worked on (`spec`/`plan`/`tasks`
-    // or `discuss`/`research`/`plan`/`plan-check`). Null for every other run
-    // and for standalone planning (whose report label stays `plan/tasks`).
+    // The planning stage this run worked on (`spec`/`plan`/`tasks` for
+    // SpecKit, `discuss`/`research`/`plan`/`plan-check` for GSD, or
+    // `spec/codemap` for standalone spec-stage runs). Null for every other
+    // run and for standalone PLAN/TASKS planning (whose report label stays
+    // `plan/tasks`).
     planningStage: planningStageFromState(s,taskRef),
     attempt: s?.attempt!=null ? String(s.attempt) : null
   };
@@ -3053,7 +3057,7 @@ function resolvePermissionFiles(repo,files){
     return path.isAbsolute(expanded)?expanded:path.resolve(repo,expanded);
   });
 }
-function resolveRuntimeFiles(binaryPath,siblings){
+export function resolveRuntimeFiles(binaryPath,siblings){
   return (siblings||[]).map(name=>{
     if(path.basename(name)!==name) throw new Error(`Adapter runtime sibling '${name}' must be a basename.`);
     return path.join(path.dirname(binaryPath),name);
@@ -3080,6 +3084,24 @@ function syncStickyFallback(s,c,roleName){
 function effectiveRoleModelFor(s,c,roleName){
   syncStickyFallback(s,c,roleName);
   return resolveEffectiveRoleModel(c.roles?.[roleName]??null,s.activeRoleModels?.[roleName]??null);
+}
+export function recordLaunchFailure(dir,reason,{id=null,role=null,meta=null}={}){
+  try{
+    if(!dir||!fs.existsSync(dir)) return false;
+    const statusFile=path.join(dir,"status.json");
+    let curStatus=null;
+    try{ curStatus=JSON.parse(fs.readFileSync(statusFile,"utf8")); }catch{}
+    if(!curStatus||curStatus.status==="running"){
+      finalizeRun(dir,{status:"failed",exitCode:null,decision:null,startedAt:curStatus?.started_at??null});
+      try{
+        const after=JSON.parse(fs.readFileSync(statusFile,"utf8"));
+        fs.writeFileSync(statusFile,JSON.stringify({...after,note:reason,failure_reason:reason,last_action:"launch_denied"},null,2));
+      }catch{}
+      try{ updateSummaryForRunDir(dir); }catch{}
+      return true;
+    }
+  }catch{}
+  return false;
 }
 async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,review=false,persistState=true,alwaysSave=false,fatal,includeError=true,requirements=[],taskFacts={},timeoutMs=null,taskRef=null,isWrapUp=false,runNote=null,capEnabled=false,contScope=null,planRevision=null,carriedForwardTasks=null,resultExtra=null,__fallbackDepth=0,__sessionRetry=false}={}){
   const fail=(m)=>{ if(fatal) return fatal(m); throw new Error(m); };
@@ -3189,6 +3211,9 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // null default on non-carry runs) degrades to null, never fabricated.
   const carriedForwardTasksValue=(Array.isArray(carriedForwardTasks)&&carriedForwardTasks.length>0?carriedForwardTasks:null);
   initRun(dir,{role:roleName,runId:id,...meta,configuredModel,resolvedModel:null,modelMismatch:null,sessionNumber,snapshotBeforeStartedAt:null,snapshotBeforeAt:null,snapshotAfterStartedAt:null,snapshotAfterAt:null,planRevision:planRevisionValue,carriedForwardTasks:carriedForwardTasksValue,deferStart:true,last_action:"preparing: setup"});
+  const recordPreLaunchFailure=(reason)=>{
+    recordLaunchFailure(dir,reason,{id,role:roleName,meta});
+  };
   // Backlog 003#31: track the active run for the SIGTERM/SIGINT flush
   // (installed once below). Deliberately never cleared: markInterrupted()
   // only touches `running` status files, so a stale reference to a finished
@@ -3224,7 +3249,9 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       const workspaceConfig=disposableArgs||{repository:cwd};
       disposableWorkspace=await createReviewerWorkspace(workspaceConfig);
     }catch(error){
-      return fail(`${roleName}: failed to create the Windows disposable reviewer workspace: ${error?.message||error}`);
+      const msg=`${roleName}: failed to create the Windows disposable reviewer workspace: ${error?.message||error}`;
+      recordPreLaunchFailure(msg);
+      return fail(msg);
     }
   }
   // workspaceCleaned is set to true ONLY after cleanup() actually succeeds —
@@ -3262,6 +3289,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // failure message rather than dropped — both the primary failure and the
   // cleanup failure are preserved when both exist.
   const failClosingWorkspace=(m)=>{
+    recordPreLaunchFailure(m);
     cleanupCredentialProvision();
     cleanupDisposableWorkspace();
     if(workspaceCleanupError){
@@ -3411,6 +3439,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       s.phase="escalated";s.step=classed.step;s.lastFailure=classed.failure;
       s.unrecognisedRequirement={token:err.token??null,role:roleName};
       saveState(s);
+      recordPreLaunchFailure(`${classed.message} STOP — human intervention required.`);
       die(`${classed.message} STOP — human intervention required.`);
     }
     const browserVerificationRequired=verifierRequirements.some(r=>(typeof r==="string"?r:r?.id)==="browser.playwright.deterministic");
@@ -3475,6 +3504,11 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // adapter sends the raw prompt text on stdin unchanged.
   const relayStdin={text:null};
   const args=buildRelayArgs(role,a,readOnly,resume,stateForRelay,{trustedEnvelope:attemptEnvelope, promptText: relayTaskText, stdinSink:relayStdin, forceResume:isWrapUp, scratchPath:promptScratch});
+  // Backlog #7: an agy write role gets its own per-run `--settings` file with
+  // command(...) grants for its role (read/search; plus test/build for the
+  // implementer). Lives in this run's dir; read-only agy runs get none.
+  try{ args.push(...agyRelayExtraArgs({adapter:role.adapter,readOnly,roleName,config:c,runDir:dir,repo:cwd})); }
+  catch(error){ return failClosingWorkspace(`${roleName}: could not write the agy permissions file: ${error?.message||error}`); }
   const relayStdinText=relayStdin.text==null?relayTaskText:relayStdin.text;
   // AUTHORITATIVE mission transport: the fully constructed mission request
   // (manifest argv + brief stdin) is resolved once here, and exactly
@@ -3591,16 +3625,24 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       // read-only roles (plan_reviewer, code_reviewer, verifier) are now
       // diverted to the disposable-copy compatibility path above and never
       // reach this branch — attemptEnvelope is false for every one of them.
-      // The former Native-Windows-specific wording ("only Verifier lacks a
-      // compatibility path") is therefore gone rather than left behind as a
-      // stale, now-untrue special case. What remains is the generic
-      // containment message, which is accurate for every context that can
-      // still land here: non-SpecKit frameworks (GSD, standalone) on any
-      // platform, and WSL/Linux without usable bubblewrap.
-      const detail=missionLaunchPlan.stage==="envelope"
-        ? `READ_ONLY_CONTAINMENT_UNAVAILABLE: ${missionLaunchPlan.reason}. Read-only roles (plan_reviewer, code_reviewer, verifier) require WSL/Linux bubblewrap filesystem containment (repository read-only bind, writable scratch); it is not available in this environment. Plain Windows without WSL is not currently supported for these roles.`
-        : `adapter transport unavailable (${missionLaunchPlan.reason})`;
-      return failClosingWorkspace(`${roleName}: ${detail}`);
+      // What remains lands here: non-SpecKit frameworks (GSD, standalone) on
+      // any platform, and WSL/Linux without usable bubblewrap. The detail
+      // message is assembled by envelopeDenialDetail(): the reason-specific
+      // text, with the "Plain Windows" sentence only on plain Windows.
+      const missingRuntimeFile=missionLaunchPlan?.envelope?.missingRuntimeFile;
+      // Backlog #5: the read-only launch-plan denial is a classified adapter
+      // failure, not an anonymous fail-closed stop. Record it before stopping
+      // (like the pre-launch requirement-failure stop above) so state.lastFailure,
+      // the WATCH-REPORT stop line and the resume flow name the reason — and the
+      // missing runtime file when present — instead of an unclassified "attempt
+      // failed". Keeps the mission resumable with `ap run` once the environment
+      // is fixed.
+      if(missionLaunchPlan.stage==="envelope"){
+        const denial=envelopeDenialFailure({reason:missionLaunchPlan.reason,missingRuntimeFile,role:roleName,adapter:role.adapter});
+        recordEnvelopeDenial(s,{failure:denial,roleName,adapter:role.adapter,persist:persistState?(st)=>saveState(st):null});
+        return failClosingWorkspace(`${roleName}: ${envelopeDenialDetail({reason:missionLaunchPlan.reason,missingRuntimeFile,platform:process.platform})}`);
+      }
+      return failClosingWorkspace(`${roleName}: adapter transport unavailable (${missionLaunchPlan.reason})`);
     }
   } else {
     const transport=resolveAdapterTransport({driver:adapterDriver(role.adapter),profile:null,request:{binary:a.binary,args,stdin:relayStdinText}});
@@ -4274,7 +4316,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // fallbackSwitch marker; the at-once re-run below returns the retry's
   // result). Exhausted and
   // non-RATE_LIMITED decisions leave state and behavior exactly as before.
-  if(result?.failure?.class==="RATE_LIMITED"||result?.failure?.class==="AUTH_REQUIRED"||result?.failure?.class==="PROVIDER_ERROR"||(result?.failure?.class==="IDLE_HANG"&&result?.idleHang?.noOutput===true)){
+  if(result?.failure?.class==="RATE_LIMITED"||result?.failure?.class==="AUTH_REQUIRED"||result?.failure?.class==="PROVIDER_ERROR"||(!readOnly&&result?.failure?.class==="PERMISSION_DENIED"&&result.failure.domain==="adapter")||(result?.failure?.class==="IDLE_HANG"&&result?.idleHang?.noOutput===true)){
     if(escalated){
       // Pending #22: the escalation model itself failed. The normal fallback
       // chain is untouched (the normal model never failed): drop the pending
@@ -4600,6 +4642,11 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
         return runRelay(roleName,appendFailureHandoff(task,failureHandoffText,failureHandoffQuotes),c,s,{cwd,readOnly,resume:retry.resume,review,persistState,alwaysSave,fatal,includeError,requirements,taskFacts,timeoutMs,taskRef,isWrapUp,runNote,capEnabled,contScope,planRevision,carriedForwardTasks,resultExtra,__fallbackDepth:Number(__fallbackDepth||0)+1});
       }
     }catch{}
+  }
+  // Backlog #8: no fallback left (or none configured) for a denied write role:
+  // stop here, before any reviewer runs on files this role never revised.
+  if(!readOnly && result?.failure?.class==="PERMISSION_DENIED"){
+    escalateIfRateLimited(c,s,`relay-${roleName}`,result,{fatal,saveState,escalatePrefix:`${roleName} (${role.adapter}/${role.model||"default"})`,writeRole:true});
   }
   return result;
   } catch(error){
@@ -5643,7 +5690,7 @@ ${request}`;
   const r=finalR;
   // Backlog #54: RATE_LIMITED short-circuits here — before the status die below —
   // so the planner is never treated as a generic planner failure.
-  escalateIfRateLimited(c,s,"speckit-gate-review",r,{fatal:die,saveState,escalatePrefix:`SpecKit planner ${step}`});
+  escalateIfRateLimited(c,s,"speckit-gate-review",r,{fatal:die,saveState,escalatePrefix:`SpecKit planner ${step}`,writeRole:true});
   if(r.status!=="completed" || r.policyViolation) die(`Planner failed or violated relay policy in phase ${step}.`);
   enforcePlanningWriteBoundary(s,step,r.touchedFiles||[],{revision:!!planRevision});
   // Record which earlier-stage artifacts a revision actually edited, so the
@@ -6035,7 +6082,7 @@ function standaloneTaskVerifyEntries(tasksFile){
   return out;
 }
 
-async function runStandaloneSpecStage(c, s, request, mission, specFile, contextFile) {
+async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapFile) {
   const specTemplateText = fs.readFileSync(path.join(skillRoot, "references", "spec-template.md"), "utf8").replace(/<!--[\s\S]*?-->\s*/g, "");
   fs.mkdirSync(path.dirname(specFile), { recursive: true });
   const maxRevisions = resolveSpecRevisionBudget(c.policy);
@@ -6056,8 +6103,8 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, contextF
       const prompt = [
         "Write the feature specification for this request — do not write PLAN.md or TASKS.md in this stage.",
         `Write the feature specification for this request to exactly: ${specFile}`,
-        `Write the codebase context to exactly: ${contextFile} — the files, functions and tests this feature touches, how the code works there today (exact file:line), patterns and helpers to reuse, and constraints. The plan stage reads CONTEXT.md instead of exploring the code again, so make it complete.`,
-        feedback ? "This is a REVISION round. Before changing anything, read the current SPEC.md and CONTEXT.md in full. The findings below are the ONLY things to change: locate each one's exact FR or section and edit only that; keep FR IDs stable (never renumber an existing FR)." : "",
+        `Write the code map to exactly: ${codemapFile} — the files, functions and tests this feature touches, how the code works there today (exact file:line), patterns and helpers to reuse, and constraints. The plan stage reads CODEMAP.md instead of exploring the code again, so make it complete.`,
+        feedback ? "This is a REVISION round. Before changing anything, read the current SPEC.md and CODEMAP.md in full. The findings below are the ONLY things to change: locate each one's exact FR or section and edit only that; keep FR IDs stable (never renumber an existing FR)." : "",
         `Use the structure of this spec template: prioritised user stories (P1, P2, ...) each with Given/When/Then acceptance scenarios, Edge Cases, Functional Requirements as numbered "- **FR-001**: System MUST ..." lines, Key Entities when data is involved, measurable Success Criteria (SC-###), and Assumptions. Replace all placeholder text; leave out the Feature Branch line.\n\n--- spec template ---\n${specTemplateText}\n--- end of spec template ---`,
         "Write SPEC.md about WHAT and WHY (user-visible behaviour and rules), not HOW. Every rule in the request — and in any source document the request names (e.g. a design/tasks file it says to follow) — must become an FR; go through such a document section by section so no rule is dropped. Do not leave [NEEDS CLARIFICATION] markers: nobody answers questions during a mission — pick a reasonable default and record it under Assumptions.",
         specReadCodeFirstLine("SPEC.md"),
@@ -6067,7 +6114,7 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, contextF
         plannerDeadEndsText,
         plannerHandoffNoteText,
         `Project request/context: ${request}`,
-        `Keep a hand-off note at ${handoffNoteRelPath(mission, 'standalone-spec-planner')}. OVERWRITE it (never append) at each milestone — after every important finding, before writing SPEC.md/CONTEXT.md — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${plannerBudgetReminder ? ` ${plannerBudgetReminder}` : ""}`,
+        `Keep a hand-off note at ${handoffNoteRelPath(mission, 'standalone-spec-planner')}. OVERWRITE it (never append) at each milestone — after every important finding, before writing SPEC.md/CODEMAP.md — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${plannerBudgetReminder ? ` ${plannerBudgetReminder}` : ""}`,
         feedback ? `Spec reviewer feedback that MUST be addressed:\n${feedback}` : ""
       ].filter(Boolean).join("\n\n");
       const planner = await relayAsync("planner", prompt, c, s, { resume: false, capEnabled: true, taskRef: 'standalone-spec-planner', planRevision: revision });
@@ -6094,7 +6141,7 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, contextF
           recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner' });
           die(`Standalone spec planner did not converge after ${cont.used} capped generations (${planner.capped.type} cap ${planner.capped.used}/${planner.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
         }
-        stopOnNoProgress(s, c, { framework: "standalone", contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner', touchedFiles: planningNoProgressTouchedFiles(specFile, contextFile, contScope, s), checkpoint: s[CHECKPOINT_STATE_KEY], step: "standalone_planning_no_progress" });
+        stopOnNoProgress(s, c, { framework: "standalone", contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner', touchedFiles: planningNoProgressTouchedFiles(specFile, codemapFile, contScope, s), checkpoint: s[CHECKPOINT_STATE_KEY], step: "standalone_planning_no_progress" });
         console.log(`Standalone spec planner hit the ${planner.capped.type} cap (${planner.capped.used}/${planner.capped.limit} ${capUnitLabel(planner.capped.type)}); continuing as session ${cont.used + 1} of ${cont.limit + 1}.`);
         continue;
       }
@@ -6107,26 +6154,26 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, contextF
           recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner' });
           die(`Standalone spec planner did not converge after ${cont.used} generations (last generation stopped voluntarily as incomplete). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
         }
-        stopOnNoProgress(s, c, { framework: "standalone", contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner', touchedFiles: planningNoProgressTouchedFiles(specFile, contextFile, contScope, s), checkpoint: s[CHECKPOINT_STATE_KEY], step: "standalone_planning_no_progress" });
+        stopOnNoProgress(s, c, { framework: "standalone", contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner', touchedFiles: planningNoProgressTouchedFiles(specFile, codemapFile, contScope, s), checkpoint: s[CHECKPOINT_STATE_KEY], step: "standalone_planning_no_progress" });
         console.log(`Standalone spec planner stopped voluntarily as incomplete; continuing as session ${cont.used + 1} of ${cont.limit + 1}.`);
         continue;
       }
-      escalateIfRateLimited(c, s, "standalone-spec-review", planner, { fatal: die, saveState, escalatePrefix: "Standalone spec planner" });
+      escalateIfRateLimited(c, s, "standalone-spec-review", planner, { fatal: die, saveState, escalatePrefix: "Standalone spec planner", writeRole: true });
       if (planner.status !== "completed" || planner.policyViolation) die("Standalone spec planner failed or violated relay policy.");
       if (!fs.existsSync(specFile)) die(`Standalone spec planner did not create ${specFile}.`);
-      if (!fs.existsSync(contextFile)) die(`Standalone spec planner did not create ${contextFile}.`);
+      if (!fs.existsSync(codemapFile)) die(`Standalone spec planner did not create ${codemapFile}.`);
       clearPlanningContinuationScope(s, 'task:standalone:spec:planner');
       clearHandoffNote(mission, 'standalone-spec-planner');
       position = "reviewer";
       s.standaloneSpecReview = { revision, position };
       saveState(s);
     }
-    // Deterministic gate: check SPEC.md content and non-empty CONTEXT.md before calling the reviewer.
+    // Deterministic gate: check SPEC.md content and non-empty CODEMAP.md before calling the reviewer.
     const specText = fs.existsSync(specFile) ? fs.readFileSync(specFile, "utf8") : "";
-    const contextText = fs.existsSync(contextFile) ? fs.readFileSync(contextFile, "utf8") : "";
+    const codemapText = fs.existsSync(codemapFile) ? fs.readFileSync(codemapFile, "utf8") : "";
     const gateFindings = [
       ...specContentFindings(specText),
-      ...(contextText.trim() ? [] : [{ location: "CONTEXT.md", problem: "CONTEXT.md is missing or empty", correction: "write the codebase context file" }])
+      ...(codemapText.trim() ? [] : [{ location: "CODEMAP.md", problem: "CODEMAP.md is missing or empty", correction: "write the code map file" }])
     ];
     let rawFindings = null;
     if (gateFindings.length) {
@@ -6139,9 +6186,9 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, contextF
       let reviewPrompt = [
         "Review the feature specification before planning starts.",
         `Spec file: ${specFile}`,
-        `Context file: ${contextFile}`,
-        "Check SPEC.md: every rule in the request and in any source document it names is an FR (go through such a document section by section); FRs are testable MUST statements; user stories have Given/When/Then scenarios; edge cases are listed; success criteria are measurable; it says WHAT and WHY, not HOW. Check CONTEXT.md: the files, functions and line numbers it names exist and are the ones the feature needs.",
-        "Cite locations as 'SPEC.md FR-003', 'SPEC.md <section heading>' or 'CONTEXT.md'.",
+        `Code map file: ${codemapFile}`,
+        "Check SPEC.md: every rule in the request and in any source document it names is an FR (go through such a document section by section); FRs are testable MUST statements; user stories have Given/When/Then scenarios; edge cases are listed; success criteria are measurable; it says WHAT and WHY, not HOW. Check CODEMAP.md: the files, functions and line numbers it names exist and are the ones the feature needs.",
+        "Cite locations as 'SPEC.md FR-003', 'SPEC.md <section heading>' or 'CODEMAP.md'.",
         REVIEWER_ALL_FINDINGS_LINE,
         PLAN_REVIEW_FULL_LINE,
         "Do not modify either file. End with the required AUTOPILOT_REVIEW sentinel.",
@@ -6254,9 +6301,10 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, contextF
 // Backlog #9: the spec the mission-final review checks FRs against; "" when
 // standalone_spec is off or the mission has no SPEC.md.
 function standaloneFinalSpecPath(c,mission){
-  if(c.workflow?.standaloneSpec===false) return "";
   const p=standalone.specPath(repo,mission);
-  return fs.existsSync(p)?p:"";
+  if(fs.existsSync(p)) return p;
+  if(c.workflow?.standaloneSpec!==true) return "";
+  return "";
 }
 
 async function runStandalonePlanning(c,s,request,opts={}){
@@ -6265,11 +6313,13 @@ async function runStandalonePlanning(c,s,request,opts={}){
   const mission=resolveStandaloneMission(repo,s,request);
   const file=standalone.planPath(repo,mission);
   const tasksFile=standalone.tasksPath(repo,mission);
-  // Backlog #6: optional SPEC.md stage (workflow.standalone_spec).
-  const specOn=c.workflow?.standaloneSpec!==false;
+  // Backlog #6 / #10: optional SPEC.md stage (workflow.standalone_spec, off by default).
+  const specOn=c.workflow?.standaloneSpec===true;
   const specFile=standalone.specPath(repo,mission);
-  const contextFile=standalone.contextPath(repo,mission);
-  if(specOn&&!s.standaloneSpecReview?.approved&&!fs.existsSync(file)) await runStandaloneSpecStage(c,s,request,mission,specFile,contextFile);
+  let codemapFile=standalone.codemapPath(repo,mission);
+  const legacyContext=standalone.legacyContextPath(repo,mission);
+  if(!fs.existsSync(codemapFile)&&fs.existsSync(legacyContext)) codemapFile=legacyContext;
+  if(specOn&&!s.standaloneSpecReview?.approved&&!fs.existsSync(file)) await runStandaloneSpecStage(c,s,request,mission,specFile,codemapFile);
   fs.mkdirSync(path.dirname(file),{recursive:true});
   s.phase="planning";s.step="standalone-plan";s.standalonePlanFile=file;saveState(s);
   // Plan Review gates Implementation: a FAIL returns to Planning (with the
@@ -6358,7 +6408,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
     const openFindings=s.standaloneSpecReview?.openFindings;
     const specNotes=s.standaloneSpecReview?.notes;
     const specLines=!specOn?[]:[
-      `The approved feature specification is at ${specFile} and the codebase context at ${contextFile}. Read both in full first. Use CONTEXT.md instead of exploring the code again; read more code only for something the plan needs that CONTEXT.md does not cover.`,
+      `The approved feature specification is at ${specFile} and the code map at ${codemapFile}. Read both in full first. Use CODEMAP.md instead of exploring the code again; read more code only for something the plan needs that CODEMAP.md does not cover.`,
       specCitationLine,
       ...(openFindings?.length?[`The spec review ran out of revisions with these SPEC.md findings still open — fix them in SPEC.md as part of this round (keep FR IDs stable):\n${feedbackText(openFindings)}`]:[]),
       ...(specNotes?.length?[`Spec reviewer notes (minor; fix in SPEC.md only if cheap):\n- ${specNotes.join("\n- ")}`]:[])
@@ -6524,7 +6574,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
     // Backlog #54: RATE_LIMITED short-circuits here — after the capped and
     // INCOMPLETE continuation branches above, before the status die below —
     // so the planner is never re-invoked for a rate limit.
-    escalateIfRateLimited(c,s,"standalone-plan-review",planner,{fatal:die,saveState,escalatePrefix:"Standalone planner"});
+    escalateIfRateLimited(c,s,"standalone-plan-review",planner,{fatal:die,saveState,escalatePrefix:"Standalone planner",writeRole:true});
     if(planner.status!=="completed" || planner.policyViolation)die("Standalone planner failed or violated relay policy.");
     if(!fs.existsSync(file))die(`Planner did not create ${file}.`);
     if(!fs.existsSync(tasksFile)){
@@ -6582,7 +6632,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       `Tasks file: ${tasksFile}`,
       ...(specOn?[
         `Spec file: ${specFile}`,
-        `Context file: ${contextFile}`,
+        `Code map file: ${codemapFile}`,
         "SPEC.md was reviewed and approved in its own stage — do not re-review its content. Check only that each task really implements the FRs it cites: FAIL a task that cites an FR it does not implement (cite the task ID). FR coverage by citation is already checked by the orchestrator — do not re-list uncited FRs."
       ]:[]),
       "Check PLAN.md (objective/scope/risks/strategy) and TASKS.md (phased checklist, each task's accept/verify inline on the same - [ ] line, ordering/dependencies). Validate cross-file consistency.",
@@ -7342,6 +7392,7 @@ async function gsdPlanningStage(c,s,{stage,phase,request,resume=false,planRevisi
     break;
   }
   const r=finalR;
+  escalateIfRateLimited(c,s,`gsd-planning-${stage}`,r,{fatal:die,saveState,escalatePrefix:`GSD planner ${stage}`,writeRole:true});
   if(r.status!=="completed" || r.policyViolation)die(`GSD planning stage ${stage} failed or violated relay policy.`);
   // Item 6: the planner completed this stage uncapped, so its continuation
   // allowance starts fresh on the next stage/revision.
@@ -8251,6 +8302,7 @@ async function runGsdPhase(c,s,phase){
     const fixPlan=await relayAsync("planner",
       `Create a focused GSD fix plan for phase ${phase}.\nDo not commit/push.\nCode review found these issues; fix only these findings:\n${feedbackText(findings)}`,
       c,s,{resume:false});
+    escalateIfRateLimited(c,s,`gsd-phase-fix-plan:${phase}`,fixPlan,{fatal:die,saveState,escalatePrefix:`GSD phase ${phase} fix plan`,writeRole:true});
     if(fixPlan.status!=="completed"){s.phase="escalated";saveState(s);die(`GSD phase ${phase} code review failed and fix-plan creation failed.`)}
     s.phase="phase_fix_ready";saveState(s);
     die(`GSD phase ${phase} needs fixes (code review). Run resume to continue.`);
@@ -8296,6 +8348,7 @@ async function runGsdPhase(c,s,phase){
     const fixPlan=await relayAsync("planner",
       `Create a focused GSD fix plan for phase ${phase}.\nDo not commit/push.\nFix only these findings:\n${feedbackText(findings)}`,
       c,s,{resume:false});
+    escalateIfRateLimited(c,s,`gsd-phase-fix-plan:${phase}`,fixPlan,{fatal:die,saveState,escalatePrefix:`GSD phase ${phase} fix plan`,writeRole:true});
     if(fixPlan.status!=="completed"){s.phase="escalated";saveState(s);die(`GSD phase ${phase} verification failed and fix-plan creation failed.`)}
     s.phase="phase_fix_ready";saveState(s);
     die(`GSD phase ${phase} needs fixes (verification). Run resume to continue.`);
