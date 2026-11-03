@@ -496,13 +496,15 @@ function buildPlanningRuns(runs, { status: missionStatus } = {}) {
   };
 }
 
-// The revision counter the planning header shows. Standalone keeps the
-// planner-run `planRevision` high-water mark; SpecKit and GSD gate loops keep
-// their own counters in `state.planReviewRevisions` (keys such as
-// `speckit-stage:specify`, or `gsd-*`), so read those too. GSD also records
-// the latest stage revision in `state.gsdPlanningReview.revision`. Each gate
-// has its own budget, so the header reports the highest counter used, never a
-// sum that could exceed `max_plan_revisions`.
+// The revision counter the planning header shows. SpecKit and GSD gate loops
+// keep their own counters in `state.planReviewRevisions` (keys such as
+// `speckit-stage:specify`, or `gsd-*`) and GSD records the latest stage
+// revision in `state.gsdPlanningReview.revision`. SpecKit and GSD show this state
+// counter only (0 if absent), never the historical run high-water. Standalone
+// keeps the planner-run `planRevision` high-water mark, but restarts it when
+// `state.standalonePlanReview?.revision` is recorded. Each gate has its own budget,
+// so the header reports the highest counter used, never a sum that could exceed
+// `max_plan_revisions`.
 function statePlanningRevision(state, framework) {
   if (framework !== "speckit" && framework !== "gsd") return null;
   const values = [];
@@ -1560,9 +1562,10 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
   const mission = typeof state?.mission === "string" && state.mission ? state.mission : null;
   const framework = state?.planningDetection?.framework ?? state?.framework ?? null;
   const storedRevision = statePlanningRevision(state, framework);
-  if (storedRevision != null) {
-    const runRevision = typeof planning.revision === "number" ? planning.revision : 0;
-    planning.revision = Math.max(runRevision, storedRevision);
+  if (framework === "speckit" || framework === "gsd") {
+    planning.revision = storedRevision ?? 0;
+  } else if (typeof state?.standalonePlanReview?.revision === "number") {
+    planning.revision = state.standalonePlanReview.revision;
   }
 
   // For ended missions, compute the end time from statusInfo.at (cancel/stop/escalation)
@@ -1799,6 +1802,7 @@ export function priceCell(run) {
 export function contextCell(run) {
   const usage = run?.usage;
   if (!usage || typeof usage !== "object") return "-";
+  if (usage.maxSingleTurnContext === null) return "-";
   let value = null;
   for (const key of ["peakContext", "maxSingleTurnContext"]) {
     const n = Number(usage[key]);
@@ -3197,10 +3201,20 @@ export function renderFinalReviewStage(model, { widths = null, collectRows = nul
 
 // The per-role token cap (`policy.caps.<role>.max_tokens`) for a current run.
 function capForRole(model, role) {
-  const caps = model?.policy?.caps && typeof model.policy.caps === "object" ? model.policy.caps : {};
-  const cap = role ? caps[role] : null;
-  if (!cap) return null;
-  const raw = cap.max_tokens ?? cap.maxTokens;
+  if (!role) return null;
+  const layoutCaps = model?.layout?.caps && typeof model.layout.caps === "object" ? model.layout.caps : null;
+  const legacyCaps = model?.policy?.caps && typeof model.policy.caps === "object" ? model.policy.caps : {};
+  const raw = layoutCaps?.[role]?.max_tokens ?? layoutCaps?.[role]?.maxTokens ?? legacyCaps[role]?.max_tokens ?? legacyCaps[role]?.maxTokens ?? (role === "implementer" ? model?.policy?.per_task_max_tokens : null);
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// The per-role turns cap (`policy.caps.<role>.max_turns`) for a current run.
+function turnsCapForRole(model, role) {
+  if (!role) return null;
+  const layoutCaps = model?.layout?.caps && typeof model.layout.caps === "object" ? model.layout.caps : null;
+  const legacyCaps = model?.policy?.caps && typeof model.policy.caps === "object" ? model.policy.caps : {};
+  const raw = layoutCaps?.[role]?.max_turns ?? layoutCaps?.[role]?.maxTurns ?? legacyCaps[role]?.max_turns ?? legacyCaps[role]?.maxTurns ?? (role === "implementer" ? model?.policy?.per_task_max_turns : null);
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : null;
 }
@@ -3323,12 +3337,13 @@ export function renderCurrentRun(model) {
 
   const usageParts = [];
   const price = priceCell(current);
+  if (price && price !== "-") usageParts.push(`${price} tokens`);
   const cap = capForRole(model, current.role);
-  if (price && price !== "-") usageParts.push(`${price}${cap ? ` of ${formatTokens(cap)} cap` : ""}`);
   const context = contextCell(current);
-  if (context && context !== "-") usageParts.push(`context ${context}`);
+  if (context && context !== "-") usageParts.push(`context ${context}${cap ? ` of ${formatTokens(cap)} cap` : ""}`);
   const turns = turnsCell(current);
-  if (turns && turns !== "-") usageParts.push(`${turns} turns`);
+  const turnsCap = turnsCapForRole(model, current.role);
+  if (turns && turns !== "-") usageParts.push(turnsCap ? `${turns} of ${turnsCap} turns` : `${turns} turns`);
   out.push(label("usage so far") + (usageParts.length ? usageParts.join(" · ") : "usage not recorded"));
   return out.join("\n");
 }

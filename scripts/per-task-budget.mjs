@@ -406,7 +406,8 @@ export function evaluateTaskBudget({adapterId, turns, maxTurns} = {}) {
 // cacheCreation counts as 0).
 export function growingTerm(usage) {
   if (!usage || typeof usage !== "object") return null;
-  const perTurn = Number(usage.maxSingleTurnContext);
+  if (usage.maxSingleTurnContext === null) return null;
+  const perTurn = usage.maxSingleTurnContext != null ? Number(usage.maxSingleTurnContext) : NaN;
   if (Number.isFinite(perTurn)) return perTurn;
   const cacheRead = Number(usage.cacheRead);
   const input = Number(usage.input);
@@ -588,6 +589,14 @@ export function resolveHandoffWrapupTokens(policy = {}, perTaskMaxTokens = PER_T
 // For implementer, also honors policy.per_task_max_turns / per_task_max_tokens as fallbacks.
 // wrapUpTokenThreshold from PER_ROLE_WRAPUP_TOKENS_DEFAULT or policy.caps.<role>.wrap_up_tokens_threshold.
 import {isFreeModel} from "./free-model.mjs";
+import {
+  AGY_WRITE_TOOLS,
+  AGY_READ_TOOLS,
+  AGY_COMMAND_TOOLS,
+  stepOf,
+  resultOf,
+  toolTarget,
+} from "./agy-events.mjs";
 export const FREE_MODEL_TURNS_CAP_DEFAULT = 45;
 // Backlog #101: policy.free_model_turns_cap (default 45; 0 or explicit null = off).
 export function resolveFreeModelTurnsCap(policy = {}) {
@@ -1336,7 +1345,7 @@ export function decodeBashFileReads(command, repoRoot) {
 // decoded edit/write tool calls (same adapter vocabulary as the digest).
 // Used to keep the fallback note's changes section session-only. Pure.
 export function sessionEditPaths(adapterId, events, repoRoot = "") {
-  if (adapterId !== "opencode" && adapterId !== "claude") return [];
+  if (adapterId !== "opencode" && adapterId !== "claude" && adapterId !== "antigravity" && adapterId !== "agy") return [];
   const prefixes = repoPrefixes(repoRoot);
   const rel = (raw) => digestPath(raw, prefixes);
   const out = [];
@@ -1359,13 +1368,26 @@ export function sessionEditPaths(adapterId, events, repoRoot = "") {
       const input = (part.state && typeof part.state === "object" && part.state.input
         && typeof part.state.input === "object") ? part.state.input : {};
       note(input.filePath ?? input.file_path ?? input.path ?? input.file);
-    } else if (event?.type === "assistant" && Array.isArray(event.message?.content)) {
-      for (const block of event.message.content) {
-        if (!block || typeof block !== "object" || block.type !== "tool_use") continue;
-        const name = String(block.name || "").toLowerCase();
-        if (name !== "edit" && name !== "write" && name !== "multiedit") continue;
-        const input = block.input && typeof block.input === "object" ? block.input : {};
-        note(input.file_path ?? input.path ?? input.file);
+    } else if (adapterId === "claude") {
+      if (event?.type === "assistant" && Array.isArray(event.message?.content)) {
+        for (const block of event.message.content) {
+          if (!block || typeof block !== "object" || block.type !== "tool_use") continue;
+          const name = String(block.name || "").toLowerCase();
+          if (name !== "edit" && name !== "write" && name !== "multiedit") continue;
+          const input = block.input && typeof block.input === "object" ? block.input : {};
+          note(input.file_path ?? input.path ?? input.file);
+        }
+      }
+    } else if (adapterId === "antigravity" || adapterId === "agy") {
+      const step = stepOf(event);
+      if (!step || String(step.step_type || "") !== "tool") continue;
+      const state = String(step.state || "").toUpperCase();
+      const info = step.tool_info && typeof step.tool_info === "object" ? step.tool_info : {};
+      const errored = state === "ERROR" || (state === "DONE" && info.error != null);
+      if (state !== "DONE" || errored) continue;
+      const toolName = String(step.tool_name || info.name || "").toLowerCase();
+      if (AGY_WRITE_TOOLS.has(toolName)) {
+        note(toolTarget(info));
       }
     }
   }
@@ -1373,7 +1395,7 @@ export function sessionEditPaths(adapterId, events, repoRoot = "") {
 }
 
 export function sessionWorkDigest(adapterId, events, {maxChars = HANDOFF_MAX_CHARS_DEFAULT, repoRoot = ""} = {}) {
-  if (adapterId !== "opencode" && adapterId !== "claude") return "";
+  if (adapterId !== "opencode" && adapterId !== "claude" && adapterId !== "antigravity" && adapterId !== "agy") return "";
   const prefixes = repoPrefixes(repoRoot);
   const root = String(repoRoot ?? "");
   const rel = (raw) => digestPath(raw, prefixes);
@@ -1462,7 +1484,7 @@ export function sessionWorkDigest(adapterId, events, {maxChars = HANDOFF_MAX_CHA
       } else if (tool === "glob") {
         noteSearch(input.pattern ?? input.query ?? input.text, rel(input.path ?? input.dir ?? input.directory ?? ""));
       }
-    } else {
+    } else if (adapterId === "claude") {
       if (event?.type === "assistant" && Array.isArray(event.message?.content)) {
         for (const block of event.message.content) {
           if (!block || typeof block !== "object") continue;
@@ -1482,6 +1504,61 @@ export function sessionWorkDigest(adapterId, events, {maxChars = HANDOFF_MAX_CHA
         }
       } else if (event?.type === "result" && typeof event.result === "string" && event.result.trim()) {
         lastText = event.result;
+      }
+    } else if (adapterId === "antigravity" || adapterId === "agy") {
+      const res = resultOf(event);
+      if (res && typeof res.response === "string" && res.response.trim()) {
+        lastText = res.response;
+      }
+      const step = stepOf(event);
+      if (!step) continue;
+      const stepType = String(step.step_type || "");
+      if (stepType === "agent_response") {
+        const txt = typeof step.response === "string" ? step.response : (typeof step.text === "string" ? step.text : (typeof step.text_delta === "string" ? step.text_delta : ""));
+        if (txt.trim()) lastText = txt;
+        continue;
+      }
+      if (stepType !== "tool") continue;
+      const state = String(step.state || "").toUpperCase();
+      if (state === "ACTIVE") continue;
+      const info = step.tool_info && typeof step.tool_info === "object" ? step.tool_info : {};
+      const errored = state === "ERROR" || (state === "DONE" && info.error != null);
+      const toolName = String(step.tool_name || info.name || "").toLowerCase();
+
+      if (AGY_COMMAND_TOOLS.has(toolName) || info.parameters?.CommandLine) {
+        const rawCmd = info.parameters?.CommandLine ?? info.parameters?.command ?? info.parameters?.cmd ?? "";
+        const cmd = String(rawCmd || "").trim();
+        noteCommand(cmd, errored ? "failed" : "ok");
+        if (!errored) {
+          for (const read of decodeBashFileReads(cmd, root)) noteDecodedRead(read);
+        }
+        continue;
+      }
+
+      if (errored) continue;
+
+      if (AGY_WRITE_TOOLS.has(toolName)) {
+        noteEdit(toolTarget(info));
+        continue;
+      }
+
+      if (AGY_READ_TOOLS.has(toolName)) {
+        const params = info.parameters && typeof info.parameters === "object" ? info.parameters : {};
+        if (toolName === "grep_search") {
+          noteSearch(params.query ?? params.pattern ?? params.regex ?? params.text, rel(toolTarget(info)));
+        } else {
+          const target = toolTarget(info);
+          if (Number.isFinite(Number(params.StartLine)) && Number.isFinite(Number(params.EndLine))) {
+            const from = Math.max(1, Math.trunc(Number(params.StartLine)));
+            const to = Math.max(from, Math.trunc(Number(params.EndLine)));
+            noteDecodedRead({path: target, from, to, wholeFile: false});
+          } else if (params.offset != null || params.limit != null) {
+            noteRead(target, params.offset, params.limit);
+          } else {
+            noteRead(target);
+          }
+        }
+        continue;
       }
     }
   }
@@ -1614,6 +1691,16 @@ function cutContextLastText(adapterId, events) {
       } else if (event?.type === "result" && typeof event.result === "string" && event.result.trim()) {
         last = event.result;
       }
+    } else if (adapterId === "antigravity" || adapterId === "agy") {
+      const res = resultOf(event);
+      if (res && typeof res.response === "string" && res.response.trim()) {
+        last = res.response;
+      }
+      const step = stepOf(event);
+      if (step && String(step.step_type || "") === "agent_response") {
+        const txt = typeof step.response === "string" ? step.response : (typeof step.text === "string" ? step.text : (typeof step.text_delta === "string" ? step.text_delta : ""));
+        if (txt.trim()) last = txt;
+      }
     }
   }
   return last;
@@ -1659,6 +1746,34 @@ function cutContextReads(adapterId, events, prefixes, repoRoot = "") {
             range: digestRange(input.offset, input.limit)});
         }
       }
+    } else if (adapterId === "antigravity" || adapterId === "agy") {
+      const step = stepOf(event);
+      if (!step || String(step.step_type || "") !== "tool") continue;
+      const state = String(step.state || "").toUpperCase();
+      const info = step.tool_info && typeof step.tool_info === "object" ? step.tool_info : {};
+      const errored = state === "ERROR" || (state === "DONE" && info.error != null);
+      if (state !== "DONE" || errored) continue;
+      const toolName = String(step.tool_name || info.name || "").toLowerCase();
+      if (AGY_COMMAND_TOOLS.has(toolName) || info.parameters?.CommandLine) {
+        const cmd = String(info.parameters?.CommandLine ?? info.parameters?.command ?? info.parameters?.cmd ?? "");
+        pushBash(cmd);
+        continue;
+      }
+      if (AGY_READ_TOOLS.has(toolName)) {
+        if (toolName === "grep_search") continue;
+        const p = digestPath(toolTarget(info), prefixes);
+        if (!p) continue;
+        const params = info.parameters && typeof info.parameters === "object" ? info.parameters : {};
+        let range = null;
+        if (Number.isFinite(Number(params.StartLine)) && Number.isFinite(Number(params.EndLine))) {
+          const from = Math.max(1, Math.trunc(Number(params.StartLine)));
+          const to = Math.max(from, Math.trunc(Number(params.EndLine)));
+          range = [from, to];
+        } else if (params.offset != null || params.limit != null) {
+          range = digestRange(params.offset, params.limit);
+        }
+        out.push({path: p, wholeFile: range === null, range});
+      }
     }
   }
   return out;
@@ -1695,7 +1810,7 @@ export function describeCutContext(cutArgs) {
     }
     const maxTurns = breachType === "turns" && Number.isInteger(breach?.limit) ? breach.limit : null;
     let growing = null;
-    if (usage && Number.isFinite(Number(usage.maxSingleTurnContext))) growing = Number(usage.maxSingleTurnContext);
+    if (usage && usage.maxSingleTurnContext != null && Number.isFinite(Number(usage.maxSingleTurnContext))) growing = Number(usage.maxSingleTurnContext);
     else if (breachType === "tokens" && Number.isFinite(Number(breach?.used))) growing = Number(breach.used);
     const maxTokens = breachType === "tokens" && Number.isInteger(breach?.limit) ? breach.limit : null;
     const reads = cutContextReads(adapterId, events, prefixes, String(repoRoot ?? ""));
@@ -1922,7 +2037,7 @@ export function buildOrchestratorFallbackNote(taskRef, events, adapterId, repoRo
   if (Array.isArray(sessionPaths)) {
     const sessionClean = sessionPaths.map((p) => String(p ?? "")).filter(Boolean);
     let editPaths = [];
-    if (adapterId === "opencode" || adapterId === "claude") {
+    if (adapterId === "opencode" || adapterId === "claude" || adapterId === "antigravity" || adapterId === "agy") {
       try { editPaths = sessionEditPaths(adapterId, events, String(repoRoot ?? "")); } catch { editPaths = []; }
     }
     if (sessionClean.length === 0) {
@@ -1939,7 +2054,7 @@ export function buildOrchestratorFallbackNote(taskRef, events, adapterId, repoRo
       const extra = editPaths.filter((p) => !sessionSet.has(norm(p))).map((p) => `${p} (edited — not tracked by git)`);
       diffBody = [...baseLines, ...extra].join("\n");
     }
-  } else if (adapterId === "opencode" || adapterId === "claude") {
+  } else if (adapterId === "opencode" || adapterId === "claude" || adapterId === "antigravity" || adapterId === "agy") {
     let changedPaths = [];
     try { changedPaths = sessionEditPaths(adapterId, events, String(repoRoot ?? "")); } catch { changedPaths = []; }
     if (changedPaths.length === 0) diffBody = "This session changed no files.";
@@ -2015,16 +2130,87 @@ export function handoffBudgetReminder(maxTurns) {
   return `Budget checkpoints: at turn ${turns.a} and again at turn ${turns.b} of ${n}, stop and overwrite the hand-off note (Done / Found / Next / Dead ends) before anything else — your session ends at turn ${n} and anything not in the note is lost.`;
 }
 
-// Backlog #15 part 2: the orchestrator fallback note must never destroy a
-// real (model-written) note left by an earlier session of the same task.
-// The fallback text stays intact and first; a previous MODEL note is kept
-// under this fixed heading. A previous note that is itself an orchestrator
-// fallback is not nested again: only its own "Previous note (written by the
-// model)" section (if any) is carried forward, so a real model note survives
-// any number of consecutive fallbacks. The total is bounded to `maxChars` by
-// trimming the PREVIOUS part (its beginning kept, `…(trimmed)` appended) —
-// never the fallback part.
+// Backlog #15 part 2 / Backlog #4: the orchestrator fallback note must
+// never destroy a real (model-written) note left by an earlier session of the
+// same task. When a run ends without its own fresh note AND its fallback note
+// has nothing to report (no changes and no digest), the existing hand-off
+// note is kept and one failure line is appended. When a run DID do work (has
+// changes or digest), the fallback text stays first and intact; a previous
+// MODEL note is kept under this fixed heading. A previous note that is
+// itself an orchestrator fallback is not nested again: only its own "Previous
+// note (written by the model)" section (if any) is carried forward, so a
+// real model note survives any number of consecutive fallbacks. The total is
+// bounded to `maxChars` by trimming the PREVIOUS part (its beginning kept,
+// `…(trimmed)` appended) — never the fallback part.
 export const HANDOFF_PREVIOUS_NOTE_HEADING = "## Previous note (written by the model)";
+
+export const FAILURE_APPEND_LINE_REGEX = /^- Run \S+ .* without changes; the note above is still current\./;
+
+export function formatEmptyRunFailureLine({runNumber, run_id, run, adapter, adapterId, model, failureClass, failure, reason, status} = {}) {
+  const n = runNumber ?? run_id ?? run ?? "?";
+  const a = adapterId ?? adapter ?? "";
+  const m = model ?? "";
+  const adapterModel = a && m ? `${a}/${m}` : (a || m || "unknown");
+  const f = failureClass ?? failure ?? reason ?? status ?? "unknown";
+  return `- Run ${n} (${adapterModel}) ended ${f} without changes; the note above is still current.`;
+}
+
+export function parseAppendedFailureLines(noteText) {
+  const text = String(noteText ?? "").trimEnd();
+  if (!text) return {baseText: "", failureLines: []};
+  const rawLines = text.split(/\r?\n/);
+  const failureLines = [];
+  let i = rawLines.length - 1;
+  while (i >= 0) {
+    const line = rawLines[i].trim();
+    if (FAILURE_APPEND_LINE_REGEX.test(line)) {
+      failureLines.unshift(line);
+      i--;
+    } else if (line === "" && failureLines.length > 0) {
+      i--;
+    } else {
+      break;
+    }
+  }
+  const baseText = rawLines.slice(0, i + 1).join("\n").trimEnd();
+  return {baseText, failureLines};
+}
+
+export function appendFailureLineToNote(noteText, line, bound) {
+  const max = Number.isInteger(bound) && bound > 0 ? bound : HANDOFF_NOTE_MAX_CHARS_DEFAULT;
+  const {baseText, failureLines} = parseAppendedFailureLines(noteText);
+  const newLine = String(line ?? "").trim();
+  const allFailureLines = newLine ? [...failureLines, newLine] : [...failureLines];
+
+  const build = (lines) => {
+    if (!baseText) return lines.join("\n");
+    if (lines.length === 0) return baseText;
+    return `${baseText}\n\n${lines.join("\n")}`;
+  };
+
+  let candidate = build(allFailureLines);
+  if (candidate.length <= max) return candidate;
+
+  // Drop oldest appended lines first
+  while (allFailureLines.length > 1 && candidate.length > max) {
+    allFailureLines.shift();
+    candidate = build(allFailureLines);
+  }
+
+  if (candidate.length <= max) return candidate;
+
+  if (allFailureLines.length === 1) {
+    const single = allFailureLines[0];
+    if (single.length >= max) return single.slice(0, max);
+    const room = max - single.length - 2;
+    if (room > 0) {
+      return `${baseText.slice(0, room).trimEnd()}\n\n${single}`;
+    }
+    return single.slice(0, max);
+  }
+
+  return candidate.slice(0, max);
+}
 
 function firstLineOfNote(text) {
   return String(text ?? "").split(/\r?\n/, 1)[0].trim();
@@ -2045,11 +2231,51 @@ function previousModelNoteSection(text) {
   return body.slice(at + HANDOFF_PREVIOUS_NOTE_HEADING.length).replace(/^\s*\n/, "").trim();
 }
 
-export function mergeFallbackWithPreviousNote(fallbackText, previousText, maxChars) {
+export function fallbackNoteHasNothingToReport(fallbackText) {
+  const text = String(fallbackText ?? "");
+  if (!isOrchestratorFallbackText(text)) return false;
+
+  const mChanges = text.match(/## Changes made in this session\s*\n+```[a-z0-9_-]*\n([\s\S]*?)\n```/);
+  const changes = mChanges ? mChanges[1].trim() : "";
+  const hasChanges = changes.length > 0
+    && changes !== "This session changed no files."
+    && changes !== "(unavailable: git diff --stat failed or was empty)";
+  if (hasChanges) return false;
+
+  const heading = "## Session work digest";
+  const at = text.indexOf(heading);
+  let digest = "";
+  if (at >= 0) {
+    const sub = text.slice(at + heading.length);
+    const tailIdx = sub.indexOf("\nNext session: continue the task");
+    const prevNoteIdx = sub.indexOf(HANDOFF_PREVIOUS_NOTE_HEADING);
+    let endIdx = sub.length;
+    if (tailIdx >= 0) endIdx = Math.min(endIdx, tailIdx);
+    if (prevNoteIdx >= 0) endIdx = Math.min(endIdx, prevNoteIdx);
+    digest = sub.slice(0, endIdx).trim();
+  }
+  const hasDigest = digest.length > 0 && !digest.startsWith("(none");
+  if (hasDigest) return false;
+
+  return true;
+}
+
+export function mergeFallbackWithPreviousNote(fallbackText, previousText, maxChars, options = {}) {
   const bound = Number.isInteger(maxChars) && maxChars > 0 ? maxChars : HANDOFF_NOTE_MAX_CHARS_DEFAULT;
   const fallback = String(fallbackText ?? "");
   const prev = String(previousText ?? "");
   const trimmedFallback = fallback.length > bound ? fallback.slice(0, bound) : fallback;
+
+  if (!prev.trim()) return trimmedFallback;
+
+  const hasFailureContext = Boolean(options?.failureClass || options?.emptyRun || options?.runNumber || options?.line || options?.adapter || options?.model);
+  const isEmptyRun = options?.emptyRun ?? (options?.hasWork !== undefined ? !options.hasWork : fallbackNoteHasNothingToReport(fallback));
+
+  if (hasFailureContext && isEmptyRun) {
+    const line = options?.line || formatEmptyRunFailureLine(options);
+    return appendFailureLineToNote(prev, line, bound);
+  }
+
   let modelNote = "";
   if (prev.trim()) modelNote = isOrchestratorFallbackText(prev) ? previousModelNoteSection(prev) : prev.trim();
   if (!modelNote) return trimmedFallback;
@@ -2216,7 +2442,7 @@ export function handleRoleBackstopFiring(state, scope, relayResult = {}) {
     generation: readBackstopFirings(state, scope).length + 1,
     totalRawTokens: capped.used,
     turns: Number.isInteger(usage?.turns) ? usage.turns : null,
-    maxSingleTurnContext: Number.isFinite(Number(usage?.maxSingleTurnContext)) ? Number(usage.maxSingleTurnContext) : null,
+    maxSingleTurnContext: (usage?.maxSingleTurnContext != null && Number.isFinite(Number(usage.maxSingleTurnContext))) ? Number(usage.maxSingleTurnContext) : null,
   });
   const decision = evaluateBackstopEscalation(firings);
   return {escalate: decision.escalate, firings, last: firings[firings.length - 1] || {}};

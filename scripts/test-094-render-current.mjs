@@ -151,7 +151,7 @@ const POLICY = {
   has("status line", "status:  RUNNING · pid 81234 (alive)");
   has("started line", "started: 2026-09-29 01:41:55 · elapsed 00:06:35");
   has("last activity line", "last activity: 2026-09-29 01:48:22 (8s ago)");
-  has("usage line", "usage so far: ~52.0K of 500K cap · context ~27.3K · 9 turns");
+  has("usage line", "usage so far: ~52.0K tokens · context ~27.3K of 500K cap · 9 turns");
 
   has("live header", "=== LIVE PROGRESS (last 10 actions) ===");
   has("live PREP", "2026-09-29 01:41:55  PREP    role=implementer · phase=2 · TASK=T2.3 · attempt=2 · pre-run snapshot started");

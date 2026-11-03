@@ -3,10 +3,8 @@ import path from "node:path";
 import {spawnAgentSync, resolveAgentBinary, resolveCodexNativeBinary} from "./agent-process.mjs";
 import {equivalentEventPath, eventReferencesPath} from "./event-paths.mjs";
 // agy stream-json event helpers (decode/observe/accumulate) plus the per-run
-// permissions allow-rule writer. Imported for driver dispatch only; the
-// reverse import (AGY_SETTINGS_RELATIVE_PATH) is a cycle resolved by function
-// hoisting — no module-level execution in either file touches it.
-import {decodeAgyEvents, observeAgyEvents, accumulateAgyUsage, agyRunModelPatch, writeAgyAllowRule} from "./agy-events.mjs";
+// permissions allow-rule writer. Imported for driver dispatch.
+import {decodeAgyEvents, observeAgyEvents, accumulateAgyUsage, agyRunModelPatch, writeAgyAllowRule, AGY_SETTINGS_RELATIVE_PATH} from "./agy-events.mjs";
 import {resolveRunModel} from "./model-extract.mjs";
 import {updateRunModel} from "./run-observability.mjs";
 import {FREE_QUOTA_REASON, PROVIDER_BALANCE_REASON, OPENCODE_TITLE_MODEL_LINE_RE} from "./idle-hang-watchdog.mjs";
@@ -495,7 +493,7 @@ function autoRejectWarningDetails(tool, input) {
 // docs: persistent user settings live at ~/.gemini/antigravity-cli/settings.json
 // (sparse JSON; only non-default values are persisted). Relative to $HOME so
 // tests and the per-run allow-rule writer can join it without hardcoding $HOME.
-export const AGY_SETTINGS_RELATIVE_PATH = ".gemini/antigravity-cli/settings.json";
+export {AGY_SETTINGS_RELATIVE_PATH};
 
 // Frames raw relay prompt text as one stream-json stdin line for agy:
 // {"event":"user","message":{"content":"<text>"}} (verified live: init +
@@ -551,7 +549,7 @@ function agyInvocation(request) {
   // denied_actions (-> PERMISSION_DENIED, tested in scripts/test-agy-wire.mjs).
   const settingsPath = ["write", "scratch"].includes(request.mode)
     && request.scratchDir && fs.existsSync(request.scratchDir)
-    ? writeAgyAllowRule(request.scratchDir, Array.isArray(request.allowRules) ? request.allowRules : [])
+    ? writeAgyAllowRule(request.scratchDir, Array.isArray(request.allowRules) ? request.allowRules : [], {homeDir: request.homeDir})
     : null;
   if (settingsPath) args.push("--settings", settingsPath);
   return {binary: request.binary, args, settingsPath};
@@ -918,7 +916,8 @@ function decodeJsonLines(stdout, stderr) {
 
 function observeCodexEvents(events, probe = {}) {
   const observations = [];
-  for (const event of events) {
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
     const item = event?.item || event;
     const itemType = String(item?.type || event?.type || "");
     const trustedToolEvent = /command_execution|file_change|mcp_tool_call|tool_call/i.test(itemType);
@@ -951,6 +950,7 @@ function observeCodexEvents(events, probe = {}) {
     }
     if (/command_execution/i.test(itemType)) {
       observations.push(observation("command_attempted", event));
+      if (toolFailed(event, item)) observations.push(observation("command_failed", event, {exit: item?.exit_code}));
       if (eventReferencesPath(command, probe.timeoutScriptPath, probe.root) && commandStarted(event, item)) {
         observations.push(observation("timeout_child_command_started", event));
       }
@@ -959,7 +959,7 @@ function observeCodexEvents(events, probe = {}) {
     if (/navigate_page/i.test(toolName)) observations.push(observation("browser_navigate", event));
     if (/take_snapshot/i.test(toolName)) observations.push(observation("browser_snapshot", event));
     if (/(?:^|\W)click(?:$|\W)/i.test(toolName)) observations.push(observation("browser_click", event));
-    if (denied) observations.push(observation("permission_denied", event));
+    if (denied && terminalDenialCodex(events, index)) observations.push(observation("permission_denied", event));
   }
   return observations;
 }
@@ -983,12 +983,31 @@ function commandSucceeded(event, item) {
   return completed && item?.status === "completed" && Number(item?.exit_code) === 0;
 }
 
+function codexToolSucceeded(event) {
+  const item = event?.item || event;
+  const itemType = String(item?.type || event?.type || "");
+  if (!/command_execution|file_change|mcp_tool_call|tool_call/i.test(itemType)) return false;
+  const status = String(item?.status || "").toLowerCase();
+  if (status !== "completed") return false;
+  return item?.exit_code == null || Number(item.exit_code) === 0;
+}
+
+function terminalDenialCodex(events, index) {
+  const collected = [];
+  for (let cursor = index + 1; cursor < events.length; cursor += 1) {
+    if (codexToolSucceeded(events[cursor])) return false;
+    collectText(events[cursor], collected);
+  }
+  return !collected.some(text => text.includes(SENTINEL_TOKEN));
+}
+
 function commandStarted(event, item) {
   return event?.type === "item.started" || item?.status === "in_progress";
 }
 
 function toolFailed(event, item) {
-  return event?.type === "item.completed" && (item?.status === "failed" || (item?.exit_code != null && Number(item.exit_code) !== 0));
+  const completed = event?.type === "item.completed" || item?.status === "completed" || item?.status === "failed";
+  return completed && (item?.status === "failed" || (item?.exit_code != null && Number(item.exit_code) !== 0));
 }
 
 function trustedGitGuardDenial(event, item, command, probe) {
@@ -1019,7 +1038,14 @@ const PERMISSION_DENIAL_TEXT = /permission denied|insufficient permissions|not p
 // outcome field, not text scraped from its output.
 const EXPLICIT_DENIAL_STATUS = /^(?:denied|declined|rejected|blocked)$/i;
 
+function isBashExecPermissionError(item) {
+  if (Number(item?.exit_code) !== 126) return false;
+  const output = `${item?.error || ""}\n${item?.output || ""}\n${item?.aggregated_output || ""}`;
+  return /:\s*Permission denied/i.test(output);
+}
+
 function permissionDenied(item, itemType) {
+  if (isBashExecPermissionError(item)) return false;
   const status = String(item?.status || "").trim();
   if (EXPLICIT_DENIAL_STATUS.test(status)) return true;
   if (itemType === "stderr") return PERMISSION_DENIAL_TEXT.test(item?.text || "");
@@ -1080,18 +1106,18 @@ function priceWeightedUsage({input, cacheCreation, cacheRead, output}) {
 // Per-invocation token-usage accumulation, keyed by adapter id since the raw
 // event shape is adapter-specific (mirrors accumulateUsage's own dispatch
 // pattern for observe()). Returns null whenever the event stream carries no
-// usage signal at all -- for a driverless adapter, for codex (which decodes no
-// per-turn usage event), or for a stream that never emitted one -- so an
-// absent measurement is never mistaken for a free (zero-cost) invocation. A
-// non-null return always carries the full breakdown (input, cacheCreation,
-// cacheRead, output), the turn count, and the derived price-weighted figure
-// together; the breakdown is the point of this function, not the total,
+// usage signal at all -- for a driverless adapter or for a stream that never
+// emitted one -- so an absent measurement is never mistaken for a free (zero-cost)
+// invocation. A non-null return always carries the full breakdown (input,
+// cacheCreation, cacheRead, output), the turn count, and the derived price-weighted
+// figure together; the breakdown is the point of this function, not the total,
 // because per-task dispatch (this task list's reason for existing) changes
 // the MIX of these four, not just their sum.
 export function accumulateUsage(adapterId, events, options = {}) {
   if (adapterId === "opencode") return accumulateOpenCodeUsage(events, options);
   if (adapterId === "claude") return accumulateClaudeUsage(events);
   if (adapterId === "antigravity") return accumulateAgyUsage(events);
+  if (adapterId === "codex") return accumulateCodexUsage(events);
   return null;
 }
 
@@ -1261,6 +1287,38 @@ function accumulateClaudeUsage(events) {
     }
   }
   usage = {input: usage.input, cacheCreation: usage.cacheCreation, cacheRead: usage.cacheRead, output: usage.output, turns: usage.turns, maxSingleTurnContext};
+  return {...usage, priceWeighted: priceWeightedUsage(usage)};
+}
+
+export function accumulateCodexUsage(events) {
+  if (!Array.isArray(events)) return null;
+  let input = 0, cacheCreation = 0, cacheRead = 0, output = 0, turns = 0;
+  let seen = false;
+  for (const event of events) {
+    if (!event || typeof event !== "object") continue;
+    if (event.type === "turn.completed") {
+      seen = true;
+      const u = event.usage;
+      if (u && typeof u === "object") {
+        const rawInput = Number(u.input_tokens) || 0;
+        const cached = Number(u.cached_input_tokens) || 0;
+        input += Math.max(0, rawInput - cached);
+        cacheRead += cached;
+        cacheCreation += Number(u.cache_write_input_tokens) || 0;
+        // Codex turn.completed.usage.output_tokens already includes reasoning_output_tokens (OpenAI Responses API).
+        output += Number(u.output_tokens) || 0;
+      }
+    }
+    if (event.type === "item.completed") {
+      const item = event.item || event;
+      const itemType = String(item?.type || "");
+      if (/^(?:command_execution|file_change|mcp_tool_call|agent_message)$/i.test(itemType)) {
+        turns += 1;
+      }
+    }
+  }
+  if (!seen) return null;
+  const usage = {input, cacheCreation, cacheRead, output, turns, maxSingleTurnContext: null};
   return {...usage, priceWeighted: priceWeightedUsage(usage)};
 }
 

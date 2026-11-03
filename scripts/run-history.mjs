@@ -406,6 +406,7 @@ export function modelCellText(run) {
 export function contextCellText(run) {
   const usage = run.usage;
   if (!usage || typeof usage !== "object") return "-";
+  if (usage.maxSingleTurnContext === null) return "-";
   const cacheRead = Number(usage.cacheRead);
   const input = Number(usage.input);
   if (!Number.isFinite(cacheRead) || !Number.isFinite(input)) return "-";

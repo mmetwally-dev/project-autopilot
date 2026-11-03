@@ -18,8 +18,9 @@
 // (antigravity.google/docs/permissions?tab=cli):
 // {"permissions":{"allow":["command(git)","write_file(src/)", ...]}}.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import {AGY_SETTINGS_RELATIVE_PATH} from "./adapter-drivers.mjs";
+export const AGY_SETTINGS_RELATIVE_PATH = ".gemini/antigravity-cli/settings.json";
 import {equivalentEventPath, eventReferencesPath} from "./event-paths.mjs";
 import {resolveRunModel} from "./model-extract.mjs";
 
@@ -40,18 +41,26 @@ function observation(type, event, details = {}) {
   return {type, source: "cli_event", ...details, event};
 }
 
-function stepOf(event) {
+export function stepOf(event) {
   return event?.step_update && typeof event.step_update === "object" ? event.step_update : null;
 }
 
-function resultOf(event) {
+export function resultOf(event) {
   return event?.result && typeof event.result === "object" ? event.result : null;
 }
 
 // Tool-name classification over agy's tool namespace (seen live in init.tools).
-const AGY_WRITE_TOOLS = new Set(["write_to_file", "replace_file_content", "multi_replace_file_content", "notebook_edit", "sed_file"]);
-const AGY_READ_TOOLS = new Set(["view_file", "read_resource", "read_url_content", "grep_search", "list_dir", "list_resources"]);
-const AGY_COMMAND_TOOLS = new Set(["run_command", "send_command_input"]);
+export const AGY_WRITE_TOOLS = new Set([
+  "write_to_file", "write_file", "replace_file_content", "multi_replace_file_content",
+  "notebook_edit", "sed_file", "edit_file"
+]);
+export const AGY_READ_TOOLS = new Set([
+  "view_file", "read_file", "read_resource", "read_url_content",
+  "grep_search", "list_dir", "list_resources"
+]);
+export const AGY_COMMAND_TOOLS = new Set([
+  "run_command", "send_command_input"
+]);
 
 function toolText(info) {
   const values = [];
@@ -66,9 +75,9 @@ function toolText(info) {
   return values.join("\n");
 }
 
-function toolTarget(info) {
+export function toolTarget(info) {
   const params = info?.parameters && typeof info.parameters === "object" ? info.parameters : {};
-  for (const key of ["TargetFile", "filePath", "file_path", "path", "File"]) {
+  for (const key of ["TargetFile", "filePath", "file_path", "path", "File", "Path", "AbsolutePath", "file", "target_file"]) {
     if (params[key] != null && String(params[key]) !== "") return String(params[key]);
   }
   return "";
@@ -200,8 +209,9 @@ export function observeAgyEvents(events, probe = {}) {
 
 // Per-run token-usage accumulation over agy usage events. One turn per
 // agent_response step_update (distinct step_index — ACTIVE text_delta
-// fragments must not each count), or the terminal result's num_turns when a
-// result event is present. thinking_tokens are billed as output (same folding
+// fragments must not each count); when a terminal result is present, turns
+// preserves the step count (using num_turns only if no steps were seen, or the
+// max of both). thinking_tokens are billed as output (same folding
 // as the opencode accumulator); agy has no cache-write signal so
 // cacheCreation is always 0. Returns null when the stream carries no agy
 // usage signal at all — an absent measurement is never a zero-cost one (this
@@ -234,10 +244,14 @@ export function accumulateAgyUsage(events) {
   if (terminal) {
     // Terminal result usage is cumulative over the session (per the docs) —
     // authoritative, never added on top of the per-step sums above.
-    const turns = Number(terminal.num_turns);
+    // Distinct agent_response steps count turns; terminal.num_turns is used
+    // when no steps were seen or to ensure turns is not lower than num_turns.
+    const rawTurns = Number(terminal.num_turns);
+    const termTurns = Number.isFinite(rawTurns) && rawTurns > 0 ? rawTurns : 0;
+    const turns = seenSteps.size > 0 ? Math.max(seenSteps.size, termTurns) : termTurns;
     const usage = {
       ...fromUsage(terminal.usage),
-      turns: Number.isFinite(turns) && turns > 0 ? turns : seenSteps.size,
+      turns,
       maxSingleTurnContext: seenSteps.size
         ? maxSingleTurnContext
         : contextOf(terminal.usage)
@@ -275,86 +289,82 @@ export function agyRunModelPatch(events, configuredModel = null) {
   return {configuredModel: configuredModel ?? null, resolvedModel, modelMismatch};
 }
 
+function resolveHomeDir(options) {
+  if (typeof options === "string" && options.length > 0) return options;
+  if (options && typeof options === "object" && typeof options.homeDir === "string" && options.homeDir.length > 0) {
+    return options.homeDir;
+  }
+  if (process.env.AGY_TEST_HOME && process.env.AGY_TEST_HOME.length > 0) {
+    return process.env.AGY_TEST_HOME;
+  }
+  if (process.env.AGY_HOME && process.env.AGY_HOME.length > 0) {
+    return process.env.AGY_HOME;
+  }
+  return os.homedir();
+}
+
+function readGlobalPermissions(homeDir) {
+  try {
+    if (!homeDir || typeof homeDir !== "string") return null;
+    const globalPath = path.join(homeDir, AGY_SETTINGS_RELATIVE_PATH);
+    if (!fs.existsSync(globalPath)) return null;
+    const raw = fs.readFileSync(globalPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    if (!parsed.permissions || typeof parsed.permissions !== "object" || Array.isArray(parsed.permissions)) return null;
+    return parsed.permissions;
+  } catch {
+    return null;
+  }
+}
+
 // Per-run permissions allow-rule writer: emits a scratch-dir settings file at
 // <scratchDir>/.gemini/antigravity-cli/settings.json (the documented settings
 // path joined without hardcoding $HOME, via AGY_SETTINGS_RELATIVE_PATH), so a
 // run can point at it (e.g. by redirecting HOME) without ever touching the
-// user's global settings. Default rules allow writes under the scratch dir;
-// callers pass extra rules (e.g. command(...) grants) explicitly. Returns the
-// written file path. Never --dangerously-skip-permissions: this is scoped
-// allow-listing only.
-export function writeAgyAllowRule(scratchDir, extraRules = []) {
+// user's global settings. Merges the user's global permissions (allow rules
+// appended and deduplicated; deny rules and other permission lists copied
+// unchanged) so user grants/denials are preserved. Returns the written file path.
+// Never --dangerously-skip-permissions: this is scoped allow-listing only.
+export function writeAgyAllowRule(scratchDir, extraRules = [], options = {}) {
   if (!scratchDir || String(scratchDir) === "") throw new Error("writeAgyAllowRule requires a scratchDir.");
   const settingsPath = path.join(String(scratchDir), AGY_SETTINGS_RELATIVE_PATH);
   const scratchNorm = String(scratchDir).replace(/\/+$/, "");
-  const allow = [`write_file(${scratchNorm}/)`, ...extraRules];
+  const ourRules = [`write_file(${scratchNorm}/)`, ...(Array.isArray(extraRules) ? extraRules : [])];
+
+  const homeDir = resolveHomeDir(options);
+  const globalPermissions = readGlobalPermissions(homeDir);
+
+  const userAllow = Array.isArray(globalPermissions?.allow) ? globalPermissions.allow : [];
+  const allow = [...new Set([...ourRules, ...userAllow])];
+
+  const permissions = {allow};
+  if (globalPermissions) {
+    for (const [key, value] of Object.entries(globalPermissions)) {
+      if (key === "allow") continue;
+      if (key === "deny" || Array.isArray(value)) {
+        permissions[key] = Array.isArray(value) ? [...value] : value;
+      }
+    }
+  }
+
   fs.mkdirSync(path.dirname(settingsPath), {recursive: true});
-  fs.writeFileSync(settingsPath, `${JSON.stringify({permissions: {allow}}, null, 2)}\n`, "utf8");
+  fs.writeFileSync(settingsPath, `${JSON.stringify({permissions}, null, 2)}\n`, "utf8");
   return settingsPath;
 }
 
-// Backlog #7: command(...) grants for an agy WRITE-mode run. Rule syntax is
-// `command(<command prefix by words>)` with no wildcard: `command(git status)`
-// allows `git status --short`. Without a matching rule headless agy
-// auto-denies the command (PERMISSION_DENIED). Never commit/push/reset/checkout:
-// Autopilot's git guard forbids them. Extend the lists below to grant more.
-export const AGY_READ_COMMANDS = Object.freeze([
-  "ls", "cat", "head", "tail", "wc", "nl", "grep", "rg", "find", "sed", "awk", "sort", "uniq",
-  "diff", "file", "stat", "pwd", "which",
-  "git status", "git diff", "git log", "git show", "git ls-files", "git grep", "git rev-parse", "git blame"
-]);
-export const AGY_IMPLEMENTER_COMMANDS = Object.freeze(["npx", "npm", "pnpm", "yarn", "node", "tsc", "git add"]);
-export const AGY_SPECKIT_COMMANDS = Object.freeze(["pwsh"]);
-
-// Leading words of a gate command that name the program (and subcommand for
-// runners like `npx vitest run ...` -> "npx vitest"). Skips env assignments.
-function gateCommandPrefix(command) {
-  const words = String(command ?? "").trim().split(/\s+/).filter((w) => w !== "" && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
-  if (words.length === 0) return null;
-  const runners = new Set(["npx", "npm", "pnpm", "yarn", "bunx", "bun", "python", "python3", "dotnet", "cargo", "go", "git"]);
-  const take = runners.has(words[0]) && words.length > 1 && !words[1].startsWith("-") ? 2 : 1;
-  return words.slice(0, take).join(" ");
-}
-
+// Write roles get command(*), the same policy as opencode --auto /
+// claude --allowedTools Bash / codex --sandbox workspace-write; agy's other
+// checks stay; never --dangerously-skip-permissions.
 export function agyAllowRulesForRole(roleName, config = {}, {speckit = false, repo} = {}) {
-  const commands = [...AGY_READ_COMMANDS, "node"];
-  const speckitOn = speckit === true || (speckit !== false && repo != null && fs.existsSync(path.join(String(repo), ".specify")));
-  if (speckitOn) {
-    commands.push(...AGY_SPECKIT_COMMANDS);
-    if (repo != null) {
-      const bashDir = path.join(String(repo), ".specify", "scripts", "bash");
-      try {
-        if (fs.existsSync(bashDir) && fs.statSync(bashDir).isDirectory()) {
-          for (const entry of fs.readdirSync(bashDir)) {
-            const full = path.join(bashDir, entry);
-            let isFile = false;
-            try { isFile = fs.statSync(full).isFile(); } catch { isFile = false; }
-            if (!isFile) continue;
-            const name = String(entry).replace(/\\/g, "/");
-            commands.push(`.specify/scripts/bash/${name}`);
-            commands.push(`bash .specify/scripts/bash/${name}`);
-            commands.push(`./.specify/scripts/bash/${name}`);
-          }
-        }
-      } catch {}
-    }
-  }
-  if (roleName === "implementer") {
-    commands.push(...AGY_IMPLEMENTER_COMMANDS);
-    const gates = [...(config?.tests?.gate_commands ?? []), ...(config?.gates?.commands ?? [])];
-    for (const gate of gates) {
-      const prefix = gateCommandPrefix(gate);
-      if (prefix) commands.push(prefix);
-    }
-  }
-  return [...new Set(commands)].map((command) => `command(${command})`);
+  return ["command(*)"];
 }
 
 // Backlog #7: extra argv for the production relay. An agy WRITE role gets
 // `--settings <file>`, a per-run file under the run's own dir; read-only runs
 // and other adapters get nothing (read-only containment is unchanged).
-export function agyRelayExtraArgs({adapter, readOnly, roleName, config, runDir, repo}) {
+export function agyRelayExtraArgs({adapter, readOnly, roleName, config, runDir, repo, homeDir}) {
   if (adapter !== "antigravity" || readOnly) return [];
   const rules = agyAllowRulesForRole(roleName, config, {speckit: fs.existsSync(path.join(String(repo ?? ""), ".specify")), repo});
-  return ["--settings", writeAgyAllowRule(path.join(String(runDir), "agy"), rules)];
+  return ["--settings", writeAgyAllowRule(path.join(String(runDir), "agy"), rules, {homeDir})];
 }

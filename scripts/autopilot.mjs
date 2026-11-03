@@ -3465,6 +3465,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     mission?`MISSION=${mission}`:null,
     "You are a delegated worker. The orchestrator owns Git history: never run git commit or git push, and never create git worktrees, branches, stashes or tags — the git guard blocks them and the mission stops. To see a committed version use `git show HEAD:<path>` or `git diff`.",
     "Run every command in the foreground and wait for its output in the same turn. Never start background jobs (&, nohup, setsid, run_in_background), never poll with sleep/ps/pgrep loops: your session ends when you end your turn.",
+    role.adapter==="antigravity" && !readOnly ? "Work in few turns: issue independent reads and searches as parallel tool calls in one response, or combine them in one command (e.g. sed -n 'a,bp;c,dp' file, grep -n -e A -e B file1 file2). When revising after a review, open the cited file:line locations first and make those edits before any wider exploration." : null,
     roleName==="implementer"?"Some tests read source files as text and anchor on exact function signatures/calls; when you change a signature, run the tests that grep for it (grep -rl '<old text>' scripts/test-*.mjs) and keep them passing.":null,
     "If a git diff shows whole-file churn, re-run it EOL-normalized (git diff --ignore-cr-at-eol or git -c core.autocrlf=input diff) and trust the normalized stat.",
     readOnly
@@ -4476,7 +4477,12 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       try{
         let previousNoteText=null;
         try{ previousNoteText=fs.readFileSync(path.join(repo,noteRel),"utf8"); }catch{ previousNoteText=null; }
-        fallbackNote=mergeFallbackWithPreviousNote(fallbackNote,previousNoteText,resolveHandoffNoteMaxChars(c.policy));
+        fallbackNote=mergeFallbackWithPreviousNote(fallbackNote,previousNoteText,resolveHandoffNoteMaxChars(c.policy),{
+          runNumber:id,
+          adapter:role.adapter,
+          model:role.model||configuredModel||null,
+          failureClass:capBreach.trigger||capBreach.type||"turn_capped"
+        });
       }catch{}
       try{
         fs.mkdirSync(path.dirname(path.join(repo,noteRel)),{recursive:true});
@@ -4501,22 +4507,32 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     try{ if(persistState) saveState(s); }catch{}
     try{ refreshWatchReport(s); }catch{}
   }
-  // Backlog #116: a failed implementer run that already did work leaves the
-  // orchestrator hand-off note for the relaunch (same generation: no
-  // continuation allowance is touched). Never overwrites a fresh note.
+  // Backlog #116: failed implementer/planner run leaves or updates hand-off note.
+  // Backlog #4: empty failed run appends failure line; if no note, writes nothing.
   let failureHandoffText="", failureHandoffQuotes="";
   try{
-    if((roleName==="implementer"||roleName==="planner") && !isWrapUp && !result.capped && result.status!=="completed" && mission && taskRef
-       && failedRunDidWork({adapterId:role.adapter,touchedFiles:result.touchedFiles,events})){
-      if(!handoffNoteFreshnessForWrapUp(mission,taskRef)?.fresh){
+    if((roleName==="implementer"||roleName==="planner") && !isWrapUp && !result.capped && result.status!=="completed" && mission && taskRef){
+      const didWork=failedRunDidWork({adapterId:role.adapter,touchedFiles:result.touchedFiles,events});
+      const noteRel=handoffNoteRelPath(mission,taskRef);
+      let previousNoteText=null;
+      try{ previousNoteText=fs.readFileSync(path.join(repo,noteRel),"utf8"); }catch{ previousNoteText=null; }
+      const hasPreviousNote=Boolean(previousNoteText && previousNoteText.trim());
+      if((didWork || hasPreviousNote) && !handoffNoteFreshnessForWrapUp(mission,taskRef)?.fresh){
         // Backlog #15 part 3b: this session's own changes only.
         let sessionPaths=[];
         try{ sessionPaths=touchedFilesBetween(before,after,cwd); }catch{ sessionPaths=[]; }
         let diffStat="";
         try{ diffStat=sessionPaths.length?changedFilesStat(cwd,{paths:sessionPaths}):""; }catch{}
-        const note=buildOrchestratorFallbackNote(taskRef,events,role.adapter,repo,diffStat,null,sessionPaths)
+        let note=buildOrchestratorFallbackNote(taskRef,events,role.adapter,repo,diffStat,null,sessionPaths)
           .replace("(orchestrator fallback)\n\nThis session was capped before it wrote a fresh hand-off note, so the","(orchestrator fallback, failed run)\n\nThis session FAILED before it wrote a fresh hand-off note, so the");
-        const noteRel=handoffNoteRelPath(mission,taskRef);
+        const failureClass=result?.failure?.class||result?.failure?.reason||result?.error?.code||result?.status||"failed";
+        note=mergeFallbackWithPreviousNote(note,previousNoteText,resolveHandoffNoteMaxChars(c.policy),{
+          runNumber:id,
+          adapter:role.adapter,
+          model:role.model||configuredModel||null,
+          failureClass,
+          hasWork:didWork
+        });
         fs.mkdirSync(path.dirname(path.join(repo,noteRel)),{recursive:true});
         fs.writeFileSync(path.join(repo,noteRel),note);
       }
