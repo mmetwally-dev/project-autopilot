@@ -4,7 +4,9 @@
 // planner revision brief carries the cumulative findings of EVERY earlier round
 // so a fix for one finding does not reopen another. Pure text/state helpers.
 import { normalizeFindings } from "./review-feedback.mjs";
-import { normalizePreviousStatuses } from "./code-review-rounds.mjs";
+import { normalizePreviousStatuses, dedupeEarlierRounds, EARLIER_ROUNDS_RECHECK_LINE } from "./code-review-rounds.mjs";
+
+export { dedupeEarlierRounds, EARLIER_ROUNDS_RECHECK_LINE };
 
 const STATE_KEY = "planReviewHistory";
 const NOTES_KEY = "planReviewNotes";
@@ -292,9 +294,12 @@ export function planReviewerConfirmationLines() {
 // is already quoted as the feedback that must be addressed).
 export function plannerEarlierRoundsText(state, key, converge = true) {
   if (converge === false) return "";
-  const rounds = slot(state, key).slice(0, -1);
+  const allRounds = slot(state, key);
+  const rounds = dedupeEarlierRounds(allRounds);
   if (!rounds.length) return "";
-  return `Findings from ALL earlier review rounds (already addressed once — keep them fixed; your fixes for the current findings must not reopen any of them):\n${render(rounds)}`;
+  const rendered = render(rounds);
+  if (!rendered) return "";
+  return `Findings from ALL earlier review rounds (already addressed once — keep them fixed; your fixes for the current findings must not reopen any of them):\n${rendered}\n${EARLIER_ROUNDS_RECHECK_LINE}`;
 }
 
 // Backlog #5: demote [MEDIUM] and [LOW] findings to notes.

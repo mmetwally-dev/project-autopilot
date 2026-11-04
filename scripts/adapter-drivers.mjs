@@ -1312,12 +1312,18 @@ export function accumulateCodexUsage(events) {
     if (event.type === "item.completed") {
       const item = event.item || event;
       const itemType = String(item?.type || "");
-      if (/^(?:command_execution|file_change|mcp_tool_call|agent_message)$/i.test(itemType)) {
+      if (/^(?:command_execution|file_change|mcp_tool_call)$/i.test(itemType)) {
         turns += 1;
       }
     }
   }
-  if (!seen) return null;
+  if (!seen) {
+    if (turns > 0) {
+      const usage = {input: 0, cacheCreation: 0, cacheRead: 0, output: 0, turns, maxSingleTurnContext: null, usagePartial: true};
+      return {...usage, priceWeighted: priceWeightedUsage(usage)};
+    }
+    return null;
+  }
   const usage = {input, cacheCreation, cacheRead, output, turns, maxSingleTurnContext: null};
   return {...usage, priceWeighted: priceWeightedUsage(usage)};
 }
@@ -1343,6 +1349,47 @@ function resultEventText(candidate) {
   if (!candidate || typeof candidate !== "object") return null;
   if (candidate.type === "result" && typeof candidate.result === "string") return candidate.result;
   return null;
+}
+
+export function finalVerdictPrinted(eventsOrOutput, maybeOutput = "") {
+  const texts = [];
+  if (Array.isArray(eventsOrOutput)) {
+    for (const ev of eventsOrOutput) {
+      if (!ev || typeof ev !== "object") continue;
+      if (typeof ev.text === "string") texts.push(ev.text);
+      if (typeof ev.item?.text === "string") texts.push(ev.item.text);
+      if (typeof ev.part?.text === "string") texts.push(ev.part.text);
+      if (typeof ev.result === "string") texts.push(ev.result);
+      if (typeof ev.response === "string") texts.push(ev.response);
+      if (typeof ev.result?.response === "string") texts.push(ev.result.response);
+      if (ev.type === "assistant" && Array.isArray(ev.message?.content)) {
+        for (const block of ev.message.content) {
+          if (typeof block?.text === "string") texts.push(block.text);
+        }
+      }
+    }
+  } else if (typeof eventsOrOutput === "string") {
+    texts.push(eventsOrOutput);
+  }
+  if (typeof maybeOutput === "string" && maybeOutput) {
+    texts.push(maybeOutput);
+  }
+  for (const text of texts) {
+    if (hasFinalVerdictMarker(text)) return true;
+  }
+  return false;
+}
+
+function hasFinalVerdictMarker(text) {
+  if (typeof text !== "string") return false;
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trimStart();
+    if (/^AUTOPILOT_REVIEW\s*[:=]/.test(trimmed)) return true;
+    if (/^AUTOPILOT_TASK_RESULT\s*[:=]/.test(trimmed)) return true;
+  }
+  if (/(?:^|[\r\n"'])\s*AUTOPILOT_REVIEW\s*[:=]/.test(text)) return true;
+  if (/(?:^|[\r\n"'])\s*AUTOPILOT_TASK_RESULT\s*[:=]/.test(text)) return true;
+  return false;
 }
 
 function collectText(candidate, collected) {

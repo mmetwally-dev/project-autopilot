@@ -27,6 +27,9 @@ const throttle = new Map();
 // unpersisted, which is correct because status.json is re-read from disk.
 const lastUsagePersist = new Map();
 
+// Backlog #5: deduplicate agy tool actions so progress.log records each tool step once.
+const seenAgyActions = new Map();
+
 export function sanitizeSnippet(chunk, max = 600) {
   let s = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk ?? "");
   s = s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");      // strip ANSI CSI escapes
@@ -104,15 +107,23 @@ function actionFromEvent(obj) {
       }
     }
   }
+  let agyStep = null;
   const step = obj.step_update && typeof obj.step_update === "object" ? obj.step_update : null;
-  if (!tool && step && String(step.step_type || "") === "tool") {
-    tool = String(step.tool_name || step.tool_info?.name || "");
-    input = step.tool_info?.parameters ?? step.tool_info?.input ?? null;
+  if (step && String(step.step_type || "") === "tool") {
+    if (!tool) {
+      tool = String(step.tool_name || step.tool_info?.name || "");
+      input = step.tool_info?.parameters ?? step.tool_info?.input ?? null;
+    }
+    agyStep = {
+      conversationId: String(step.conversation_id ?? obj.conversation_id ?? ""),
+      stepIndex: step.step_index ?? null,
+      state: step.state ? String(step.state) : null
+    };
   }
   if (!tool) return null;
   const kind = tool.toLowerCase();
   const text = (READ_TOOLS.has(kind) && readRangeText(input)) || actionTarget(input);
-  return { kind, text };
+  return { kind, text, agyStep };
 }
 
 // Find the first real adapter action inside a raw chunk, BEFORE the ACTIVITY
@@ -153,6 +164,7 @@ function updateStatus(dir, patch) {
 }
 
 export function initRun(dir, meta = {}) {
+  seenAgyActions.delete(dir);
   fs.mkdirSync(dir, { recursive: true });
   const at = localIso();
   const status = {
@@ -267,10 +279,31 @@ export function observe(dir, { stream = "stdout", bytes = 0, minIntervalMs = 100
   // Backlog #6a: a chunk carrying a real tool action writes its OWN progress
   // line (tool + command/file, extracted before the ACTIVITY snippet is
   // truncated) immediately, bypassing the 1-per-second throttle.
+  // Backlog #5: agy emits step_update events for the same step_index with state
+  // ACTIVE and then DONE (and ERROR). Deduplicate per run dir: emit the ACTION
+  // only once per (conversation_id, step_index) on the first event seen.
+  // We keep it to one ACTION line per tool step (first event seen); subsequent
+  // events for that step are skipped so tool calls are never listed twice.
   const action = extractAction(last);
   if (action) {
-    const detail = action.text ? ` | ${sanitizeSnippet(action.text, 200)}` : "";
-    appendProgress(dir, `ACTION | TOOL=${action.kind}${detail}`);
+    let shouldEmit = true;
+    if (action.agyStep && action.agyStep.stepIndex != null) {
+      const key = `${action.agyStep.conversationId}:${action.agyStep.stepIndex}`;
+      let dirMap = seenAgyActions.get(dir);
+      if (!dirMap) {
+        dirMap = new Map();
+        seenAgyActions.set(dir, dirMap);
+      }
+      if (dirMap.has(key)) {
+        shouldEmit = false;
+      } else {
+        dirMap.set(key, action.agyStep.state);
+      }
+    }
+    if (shouldEmit) {
+      const detail = action.text ? ` | ${sanitizeSnippet(action.text, 200)}` : "";
+      appendProgress(dir, `ACTION | TOOL=${action.kind}${detail}`);
+    }
   }
   const now = Date.now();
   const prev = throttle.get(dir) || { lastWrite: 0 };
@@ -376,6 +409,7 @@ export function finalizeRun(dir, { status, exitCode, decision, startedAt, usage 
   });
   throttle.delete(dir);
   lastUsagePersist.delete(dir);
+  seenAgyActions.delete(dir);
   // Mission 094 Phase 3 task 3.2: finalize changed this run's status, so
   // refresh the compact watch-summary cache (best-effort, never breaks a run).
   updateSummaryForRunDir(dir);

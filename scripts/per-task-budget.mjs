@@ -406,6 +406,7 @@ export function evaluateTaskBudget({adapterId, turns, maxTurns} = {}) {
 // cacheCreation counts as 0).
 export function growingTerm(usage) {
   if (!usage || typeof usage !== "object") return null;
+  if (usage.usagePartial) return null;
   if (usage.maxSingleTurnContext === null) return null;
   const perTurn = usage.maxSingleTurnContext != null ? Number(usage.maxSingleTurnContext) : NaN;
   if (Number.isFinite(perTurn)) return perTurn;
@@ -2317,6 +2318,7 @@ function backstopKey(scope) {
 // missing/non-finite input, cacheRead, or output means unmeasurable -> null.
 export function rawTotalTokens(usage) {
   if (!usage || typeof usage !== "object") return null;
+  if (usage.usagePartial) return null;
   const input = Number(usage.input);
   const cacheRead = Number(usage.cacheRead);
   const output = Number(usage.output);

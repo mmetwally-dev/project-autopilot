@@ -69,8 +69,10 @@ try {
   const events = readObservedEvents(repo);
 
   // Check a: output contains "after already returning its final FAIL verdict; accepting it instead of continuing."
-  check("capped FAIL verdict accepted and logged",
-    output.includes("after already returning its final FAIL verdict; accepting it instead of continuing."),
+  // The live cap no longer fires once the final verdict was printed: the
+  // FAIL verdict is used directly (no cap line, no reviewer continuation).
+  check("FAIL verdict printed before the cap is used without a cap",
+    !/plan review(?:er)? hit the turns cap/i.test(output) && !output.includes("continuing as session"),
     output.slice(-900));
 
   // Check b: output does NOT contain "INTERNAL_CONTRACT_ERROR" and state.phase is not "escalated"

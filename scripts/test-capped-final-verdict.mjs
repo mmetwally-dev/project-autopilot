@@ -93,15 +93,17 @@ try {
   check("capped verdict: the reviewer emitted PASS before the cap",
     reviewerEvents.length === 1 && reviewerEvents[0].decision === "PASS",
     reviewerEvents.map((e) => e.decision));
-  check("capped verdict: the completed verdict is accepted and logged",
-    output.includes("Standalone plan review hit the turns cap")
-      && output.includes("after already returning its final PASS verdict; accepting it instead of continuing."),
+  // The live cap no longer fires once the final verdict was printed, so the
+  // run completes with its verdict instead of being capped.
+  check("capped verdict: the completed verdict is accepted without a cap",
+    !output.includes("Standalone plan review hit the turns cap")
+      && !output.includes("plan reviewer hit the turns cap"),
     output.slice(-900));
   check("capped verdict: no continuation session was started for the reviewer",
     !output.includes("Plan reviewer hit the turns cap") && !output.includes("continuing as session"),
     output.slice(-900));
-  check("capped verdict: the persisted run still records the cap and its PASS verdict",
-    reviewerResults.length === 1 && reviewerResults[0].capped?.type === "turns"
+  check("capped verdict: the persisted run records its PASS verdict and no cap",
+    reviewerResults.length === 1 && !reviewerResults[0].capped
       && reviewerResults[0].verdict?.decision === "PASS",
     reviewerResults.map((r) => ({capped: r.capped, decision: r.verdict?.decision})));
   check("capped verdict: no planning reviewer continuation budget is left spent",

@@ -56,7 +56,7 @@ check("breakdown: input is sum of (input_tokens - cached_input_tokens)", usage?.
 check("breakdown: cacheRead is sum of cached_input_tokens", usage?.cacheRead === 2300, usage?.cacheRead);
 check("breakdown: cacheCreation is sum of cache_write_input_tokens", usage?.cacheCreation === 150, usage?.cacheCreation);
 check("breakdown: output is sum of output_tokens (already includes reasoning_output_tokens)", usage?.output === 320, usage?.output);
-check("turns: counts completed tool items plus completed agent_message items (4 + 2 = 6)", usage?.turns === 6, usage?.turns);
+check("turns: counts completed tool items only, not agent_message items (4)", usage?.turns === 4, usage?.turns);
 check("maxSingleTurnContext: reports null for codex", usage?.maxSingleTurnContext === null, usage?.maxSingleTurnContext);
 
 const expectedPriced =
@@ -69,14 +69,20 @@ check("priceWeighted: matches USAGE_PRICE_WEIGHTS formula", usage?.priceWeighted
 const wiredUsage = accumulateUsage("codex", eventsWithUsage);
 check("accumulateUsage wired to codex matches accumulateCodexUsage", JSON.stringify(wiredUsage) === JSON.stringify(usage));
 
-// 2. No turn.completed -> null (contract unchanged)
+// 2. No turn.completed -> partial usage if completed tool items present, null if neither
 const itemsOnlyEvents = [
   { type: "item.completed", item: { type: "command_execution", command: "step-1" } },
   { type: "item.completed", item: { type: "agent_message", text: "no usage here" } },
 ];
-check("accumulateUsage: no turn.completed returns null", accumulateUsage("codex", itemsOnlyEvents) === null);
+const partial = accumulateCodexUsage(itemsOnlyEvents);
+check("accumulateCodexUsage: completed command without turn.completed returns partial usage", partial !== null && partial.turns === 1 && partial.usagePartial === true);
+const noToolEvents = [
+  { type: "item.completed", item: { type: "agent_message", text: "no usage here" } },
+];
 check("accumulateUsage: empty events returns null", accumulateUsage("codex", []) === null);
-check("accumulateCodexUsage: no turn.completed returns null", accumulateCodexUsage(itemsOnlyEvents) === null);
+check("accumulateUsage: agent_message only without tool items or turn.completed returns null", accumulateUsage("codex", noToolEvents) === null);
+check("accumulateCodexUsage: empty events returns null", accumulateCodexUsage([]) === null);
+check("accumulateCodexUsage: agent_message only returns null", accumulateCodexUsage(noToolEvents) === null);
 
 // 3. Cap monitor behavior: skips context cap when maxSingleTurnContext is null, enforces turn cap
 check("growingTerm returns null when maxSingleTurnContext is null", growingTerm(usage) === null);
@@ -86,8 +92,8 @@ check("evaluateTokenCeiling is unenforceable when growingTerm is null", ceiling.
 const withinTurnCap = checkCapBreach({ usage, perTaskMaxTurns: 10, perTaskMaxTokens: 100 });
 check("checkCapBreach skips context cap when maxSingleTurnContext is null (returns null)", withinTurnCap === null);
 
-const overTurnCap = checkCapBreach({ usage, perTaskMaxTurns: 5, perTaskMaxTokens: 100 });
-check("checkCapBreach enforces turn cap (6 > 5)", overTurnCap?.type === "turns" && overTurnCap?.used === 6 && overTurnCap?.limit === 5);
+const overTurnCap = checkCapBreach({ usage, perTaskMaxTurns: 3, perTaskMaxTokens: 100 });
+check("checkCapBreach enforces turn cap (4 > 3)", overTurnCap?.type === "turns" && overTurnCap?.used === 4 && overTurnCap?.limit === 3);
 
 // 4. WATCH-REPORT rendering for codex run
 const codexRun = {
@@ -101,7 +107,7 @@ const codexRun = {
 };
 
 check("contextCell renders '-' for codex run with null maxSingleTurnContext", contextCell(codexRun) === "-");
-check("turnsCell renders TURNS '6'", turnsCell(codexRun) === "6");
+check("turnsCell renders TURNS '4'", turnsCell(codexRun) === "4");
 check("priceCell renders TOKENS compact price '2.7K'", priceCell(codexRun) === "2.7K");
 
 const reportModel = buildReportModel({
@@ -121,8 +127,8 @@ const renderedPlanning = renderPlanningStage(reportModel);
 const rowLine = renderedPlanning.split("\n").find((line) => line.includes("02-plan_reviewer"));
 check("rendered planning stage row exists", Boolean(rowLine), renderedPlanning);
 
-// Check table columns: row shows TURNS (6), TOKENS (2.7K), CONTEXT (-)
-check("planning row displays TURNS '6'", /\b6\b/.test(rowLine), rowLine);
+// Check table columns: row shows TURNS (4), TOKENS (2.7K), CONTEXT (-)
+check("planning row displays TURNS '4'", /\b4\b/.test(rowLine), rowLine);
 check("planning row displays TOKENS '2.7K'", rowLine.includes("2.7K"), rowLine);
 check("planning row displays CONTEXT '-'", rowLine.includes("-"), rowLine);
 
@@ -206,7 +212,7 @@ const updatedAndCompletedEvents = [
   },
 ];
 const dedupeUsage = accumulateCodexUsage(updatedAndCompletedEvents);
-check("dedupe: item.updated with status completed and item.completed counted once per item (4 completed items = 4 turns)", dedupeUsage?.turns === 4, dedupeUsage?.turns);
+check("dedupe: item.updated with status completed and item.completed counted once per item (3 completed tool items = 3 turns)", dedupeUsage?.turns === 3, dedupeUsage?.turns);
 check("dedupe: output is 50", dedupeUsage?.output === 50, dedupeUsage?.output);
 check("dedupe: input is 400", dedupeUsage?.input === 400, dedupeUsage?.input);
 check("dedupe: cacheRead is 100", dedupeUsage?.cacheRead === 100, dedupeUsage?.cacheRead);

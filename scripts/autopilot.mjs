@@ -37,6 +37,7 @@ export {openCodeSandboxModelWarnings as openCodeSandboxModelWarningsForTests};
 // Exported for offline tests of the live reset-request application path, which
 // otherwise only runs inside a live mission.
 export {applyPendingBudgetReset as applyPendingBudgetResetForTests};
+export { stageFilesChangedSinceReview, stageFilesChangedLine, recordReviewFailSnapshot, clearReviewFailSnapshot, speckitStageFilePaths, speckitGateNote, standalonePlanFeedbackNote, standaloneSpecFeedbackNote } from "./revision-files-changed.mjs";
 // F2b #23b: test-callable handler that records an orchestrator_exit event
 // without re-raising the signal. Accepts (signal, repo, state) or an options
 // object. Never throws.
@@ -62,13 +63,14 @@ import {decideEscalationName} from "./escalation-naming.mjs";
 import {envelopeDenialFailure,envelopeDenialDetail,recordEnvelopeDenial} from "./envelope-denial.mjs";
 import {deriveGsdUnitResetRecord, applyCarriedGsdReset} from "./gsd-unit-reset.mjs";
 import {resolvePlanningReviewAttempt as resolvePlanningReviewAttemptWired, escalateIfRateLimited} from "./planning-review-wiring.mjs";
+import { modelBriefLines } from "./model-briefs.mjs";
 import {evaluateStandaloneReview, createStandaloneCheckpoint, artifactDigest as planningReviewArtifactDigest,
   STANDALONE_PLANNER_POSITION, STANDALONE_REVIEWER_POSITION,
   evaluateSpeckitGateReview, createSpeckitCheckpoint, manifestForGate, isReviewerPosition,
   SPECKIT_INITIAL_REVIEW, SPECKIT_PLANNER_REVISION, SPECKIT_POST_REVISION_REVIEW} from "./planning-review-checkpoint.mjs";
 import {preflightConfig, preflightPrimaryModels, primaryModelPreflightMessage, opencodeCliDefaultWarnings, opencodeCliDefaultWarningMessage} from "./preflight.mjs";
 import {spawnRelayChild} from "./subprocess-relay.mjs";
-import {adapterDriver, finalAgentText, sessionIdFromEvents, accumulateUsage, recordRunModel, runModelPatch, applyClaudeReadOnlyScratchAllow} from "./adapter-drivers.mjs";
+import {adapterDriver, finalAgentText, sessionIdFromEvents, accumulateUsage, recordRunModel, runModelPatch, applyClaudeReadOnlyScratchAllow, finalVerdictPrinted} from "./adapter-drivers.mjs";
 import {agyRelayExtraArgs} from "./agy-events.mjs";
 import {mergeTaskFacts,mergeTaskLineFacts,browserVerifierNote} from "./task-requirements.mjs";
 import {buildRoleRequirements, requirementFailure} from "./role-requirements.mjs";
@@ -103,6 +105,7 @@ import {buildTaskPrompt, taskDisplayRef, reviewTaskRef, allPhaseTaskRef, readOnl
 import {stableTaskIds} from "./role-progress-ids.mjs";
 import {prepareTaskInvocation, commitTaskResult, evaluateCrashResume} from "./role-progress-commit.mjs";
 import {attributionMap, changedPaths as attributedChangedPaths, detectWorkAhead} from "./task-attribution.mjs";
+import { stageFilesChangedSinceReview, stageFilesChangedLine, recordReviewFailSnapshot, clearReviewFailSnapshot, speckitStageFilePaths, speckitGateNote, standalonePlanFeedbackNote, standaloneSpecFeedbackNote, gsdStageFiles } from "./revision-files-changed.mjs";
 import {parseTaskResultContract} from "./task-result-contract.mjs";
 import {taskSizingRuleText, taskSizeReviewText, resolveTaskSizeTargetTurns, resolveMaxPhaseTasks, resolveMinPhaseTasks, resolvePerTaskLimits, resolvePerRoleLimits, checkCapBreach, capUnitLabel, growingTerm, evaluateCapGraceWindow, checkWrapupTrigger, sessionStoreRelDir, sessionStoreSandboxSubpath, consumeContinuation, clearTaskContinuation, recordRolloverDeadEnd, readRolloverDeadEnds, clearRolloverDeadEnds, deadEndTail, sessionWorkDigest, resolveHandoffMaxChars, resolveHandoffNoteMaxChars, resolveHandoffWrapupTokens, handoffNoteRelPath, continuationBudgetKey, CONTINUATION_BUDGET_KEY_PREFIX, resolveContinuationAllowance, RELAY_TIMEOUT_DEFAULT_MS, HANDOFF_WRAPUP_TOKENS_DEFAULT, PER_ROLE_WRAPUP_TOKENS_DEFAULT, WRAPUP_MAX_TURNS, WRAPUP_TIMEOUT_MS, SESSION_STORE_WARN_BYTES, recordGenerationProgress, resolveNoProgressGenerations, clearNoProgress, noProgressDisplayLabel, handoffNoteCitedExcerpts, resolveIdleHangMs, resolveFirstOutputMs, resolveMaxSilenceMs, isHandoffNoteFresh, buildOrchestratorFallbackNote, scratchHandoffNotePath, SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, pickFresherHandoffNote, handoffBudgetReminder, mergeFallbackWithPreviousNote, resolveBackstopRawTokens, evaluateBackstopBreach, recordBackstopFiring, readBackstopFirings, clearBackstopFirings, backstopLedgerKey, evaluateBackstopEscalation, handleRoleBackstopFiring, resolveSessionNumber} from "./per-task-budget.mjs";
 import {createIdleWatch, noteIdleOutput, noteIdleStdoutChunk, noteIdleStderrText, evaluateIdleWatch, formatIdleHangMessage, formatRateLimitedMessage, adapterMarkerFor, extractSessionIdFromChunk, noteIdleSessionId, IDLE_HANG_KILL_GRACE_MS, FREE_QUOTA_REASON, PROVIDER_BALANCE_REASON} from "./idle-hang-watchdog.mjs";
@@ -1057,7 +1060,7 @@ function stopCommand(args=[]){
     // materialised cannot invent one.
     const missionDir = getMissionWatchDir(s);
     try{ if (missionDir && fs.existsSync(missionDir)) appendWatchEvent(missionDir, { type: "operator", reason: "stop", scope: "mission", live: false }); }catch{}
-    try{ refreshWatchReport(s); }catch{ /* best-effort: a watch write must never break a run */ }
+    try{ refreshWatchReport(s, { ownerAlive: false }); }catch{ /* best-effort: a watch write must never break a run */ }
     return 0;
   }
   const pid=found.pid;
@@ -1097,7 +1100,7 @@ function stopCommand(args=[]){
   // would freeze the final report at RUNNING.
   const missionDir = getMissionWatchDir(s);
   try{ if (missionDir) appendWatchEvent(missionDir, { type: "operator", reason: "stop", scope: "mission", live: true }); }catch{}
-  try{ refreshWatchReport(s); }catch{ /* best-effort: a watch write must never break a run */ }
+  try{ refreshWatchReport(s, { ownerAlive: false }); }catch{ /* best-effort: a watch write must never break a run */ }
   console.log(`The mission is saved — \`ap run\` (no message) resumes where it stopped.${marked?` Marked ${marked} dead run(s) INTERRUPTED.`:""}${survivors.killed?` Verified killed ${survivors.killed} surviving adapter run(s).`:""}${survivors.skipped?` Skipped ${survivors.skipped} stale PID(s).`:""}`);
   return 0;
 }
@@ -2165,14 +2168,16 @@ function maybeApplyPendingContinuationReset(s,contScope){
 // are throttled to 1/s; stream and start refreshes are throttled, finish always runs.
 // watch write must never break a run.
 let lastWatchRefresh=0;
-function refreshWatchReport(s){
-  try{ writeWatchReportFile(repo,missionFor(repo,s)); }catch{}
+function refreshWatchReport(s, opts = {}){
+  // While the orchestrator is shutting down it must not report itself alive.
+  const o=(shuttingDown && opts.ownerAlive===undefined)?{...opts,ownerAlive:false}:opts;
+  try{ writeWatchReportFile(repo,missionFor(repo,s), o); }catch{}
 }
-function throttledWatchRefresh(s){
+function throttledWatchRefresh(s, opts = {}){
   const t=Date.now();
   if(t-lastWatchRefresh<1000) return;
   lastWatchRefresh=t;
-  refreshWatchReport(s);
+  refreshWatchReport(s, opts);
 }
 // Test-only instrumentation: when AUTOPILOT_TEST_REFRESH_TRACE=<file> is set,
 // each watch-refresh trigger below appends one tag line; no effect when unset.
@@ -2180,7 +2185,7 @@ function watchRefreshTrace(tag){
   const f=process.env.AUTOPILOT_TEST_REFRESH_TRACE;
   if(f) try{ fs.appendFileSync(f,`${tag}\n`); }catch{}
 }
-function refreshWatchReportTagged(s,tag){ watchRefreshTrace(tag); refreshWatchReport(s); }
+function refreshWatchReportTagged(s,tag, opts = {}){ watchRefreshTrace(tag); refreshWatchReport(s, opts); }
 refreshHook = (s,tag="hook") => { try { refreshWatchReportTagged(s,tag); } catch {} };
 // Backlog 003#31: a killed mission never flushed final run/report state —
 // refreshWatchReport() only fires from the live process, so a SIGTERM/SIGINT
@@ -2246,7 +2251,7 @@ function installInterruptFlush(){
       const md = activeRelayState ? getMissionWatchDir(activeRelayState) : null;
       if (md) appendOrchestratorExitEvent(md, signal);
     }catch{}
-    try{ if(activeRelayState) refreshWatchReport(activeRelayState); }catch{}
+    try{ if(activeRelayState) refreshWatchReport(activeRelayState, { ownerAlive: false }); }catch{}
     try{ removeOwnerPid(repo,{ifPid:process.pid}); }catch{}
     process.removeListener("SIGTERM",onSigterm);
     process.removeListener("SIGINT",onSigint);
@@ -3463,9 +3468,10 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   const rawRelayTaskText=[
     `ROLE=${roleName}`,`REPOSITORY=${promptRepository}`,
     mission?`MISSION=${mission}`:null,
+    (typeof modelBriefLines === "function" ? modelBriefLines({ model: role?.model, roleName }) : []).join("\n") || null,
     "You are a delegated worker. The orchestrator owns Git history: never run git commit or git push, and never create git worktrees, branches, stashes or tags — the git guard blocks them and the mission stops. To see a committed version use `git show HEAD:<path>` or `git diff`.",
     "Run every command in the foreground and wait for its output in the same turn. Never start background jobs (&, nohup, setsid, run_in_background), never poll with sleep/ps/pgrep loops: your session ends when you end your turn.",
-    role.adapter==="antigravity" && !readOnly ? "Work in few turns: issue independent reads and searches as parallel tool calls in one response, or combine them in one command (e.g. sed -n 'a,bp;c,dp' file, grep -n -e A -e B file1 file2). When revising after a review, open the cited file:line locations first and make those edits before any wider exploration." : null,
+    ((roleName==="planner" || roleName==="implementer") && !readOnly && ((typeof relayTask==="string" && (relayTask.includes("REJECTED the previous attempt") || relayTask.includes("This is a REVISION round") || relayTask.includes("Reviewer feedback from the previous attempt that MUST be addressed") || relayTask.includes("reviewer findings that MUST be addressed") || relayTask.includes("Plan reviewer feedback that MUST be addressed") || relayTask.includes("review FAIL (fix round"))) || (Number.isInteger(planRevision)&&planRevision>0))) ? "Revision: make the cited edits, update the hand-off note, then end your turn. Do not re-run git status/git log or re-read files you just edited to double-check. If a cited location already contains the required fix, say so for that finding and do not edit or explore it further." : null,
     roleName==="implementer"?"Some tests read source files as text and anchor on exact function signatures/calls; when you change a signature, run the tests that grep for it (grep -rl '<old text>' scripts/test-*.mjs) and keep them passing.":null,
     "If a git diff shows whole-file churn, re-run it EOL-normalized (git diff --ignore-cr-at-eol or git -c core.autocrlf=input diff) and trust the normalized stat.",
     readOnly
@@ -4015,6 +4021,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     // Best-effort watch refresh on the same tick; a watch write must never
     // break a run.
     if(updateRunUsage(dir,usage)){ try{ refreshWatchReport(s); }catch{} }
+    if(finalVerdictPrinted(capEvents,capStdout)) return;
     // Cap enforcement stays implementer-only: a breach kill (SIGTERM, then
     // SIGKILL) and result.capped must never touch any other role, which has
     // no continuation handling to catch it. The wrap-up turn (isWrapUp) is
@@ -4388,6 +4395,8 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     // per-task loop can route the rollover to the backstop firing ledger
     // instead of the continuation allowance.
     if(capBreach.backstop) result.capped.backstop=true;
+    result.processStatus="capped";
+    if(result.failure?.class==="PROCESS_EXIT_NONZERO") result.failure=null;
     try{ const __rawTokens=growingTerm(capBreach.usage); observe(dir,{stream:"stdout",bytes:0,minIntervalMs:0,last:`CAP_BREACH | TYPE=${capBreach.type} | USED=${capBreach.used} | LIMIT=${capBreach.limit}${capBreach.wrapUp?" | WRAP_UP=true":""} | RAW_TOKENS=${__rawTokens ?? "-"} (raw maxSingleTurnContext)`}); }catch{}
   }
   // Backlog #26 Step B (TASK-34) + mission 045: orchestrator-forced hand-off
@@ -4929,7 +4938,36 @@ function acceptCappedFinalVerdict(subject,result){
   if(result.review.decision==="FAIL") result.failure=verdictFailure(result.role,{status:"available",decision:"FAIL",findings:result.review.findings||[]});
   return true;
 }
-function handleCappedPlanningResult({c,s,framework,role,result,subject,touchedFiles}){
+function acceptCappedPlannerRevision({subject,result,touchedFiles,isRevision,candidateArtifacts}){
+  if(!result?.capped || !isRevision) return null;
+  if(result.capped.backstop===true || result.capped.type==="backstop") return null;
+  const touched=Array.isArray(touchedFiles)?touchedFiles:[];
+  if(!touched.length) return null;
+  let matchedFile=null;
+  for(const tf of touched){
+    const normTf=normalizeRel(tf);
+    for(const cand of candidateArtifacts){
+      if(!cand) continue;
+      const normCand=normalizeRel(cand);
+      if(normTf===normCand || normTf.endsWith("/"+path.basename(normCand)) || path.basename(normTf)===path.basename(normCand)){
+        if(normCand.includes("/") && !normTf.endsWith(normCand) && !normTf.includes(path.dirname(normCand))){
+          continue;
+        }
+        matchedFile=tf;
+        break;
+      }
+    }
+    if(matchedFile) break;
+  }
+  if(!matchedFile) return null;
+  const type=result.capped.type||"unknown";
+  console.log(`${subject} hit the ${type} cap after editing ${matchedFile}; sending the revision to review instead of another session.`);
+  result.status="completed";
+  result.cappedRevisionAccepted=true;
+  delete result.capped;
+  return matchedFile;
+}
+function handleCappedPlanningResult({c,s,framework,role,result,subject,touchedFiles,step,stage,planRevision}){
   const {taskRef,contScope}=planningScopeParts(framework,role);
   const mission=s.mission||null;
   if(result.capped.backstop===true||result.capped.type==="backstop"){
@@ -4946,6 +4984,28 @@ function handleCappedPlanningResult({c,s,framework,role,result,subject,touchedFi
     return;
   }
   clearBackstopFirings(s,contScope);
+  if(role==="planner"){
+    let isRevision = false;
+    let candidateArtifacts = [];
+    if(framework==="speckit"){
+      const featureDir = s.speckitFeatureDir;
+      const stageFile = step==="specify" ? "spec.md" : (step==="plan" ? "plan.md" : "tasks.md");
+      candidateArtifacts = [
+        featureDir ? `specs/${featureDir}/${stageFile}` : null,
+        `specs/<feature>/${stageFile}`,
+        stageFile
+      ].filter(Boolean);
+      isRevision = Number(planRevision) > 0 || (s.speckitGateCheckpoint?.substage === SPECKIT_PLANNER_REVISION) || (loadReviewFeedback(s, speckitStageFeedbackKey(step || "tasks")).length > 0);
+    } else if(framework==="gsd"){
+      isRevision = Number(planRevision) > 0 || Number(s.gsdPlanningReview?.revision) > 0;
+      if(stage==="plan") candidateArtifacts = ["PLAN.md"];
+      else if(stage==="research") candidateArtifacts = ["RESEARCH.md"];
+      else if(stage==="discuss") candidateArtifacts = ["CONTEXT.md","DISCUSS.md"];
+      else candidateArtifacts = [".planning"];
+    }
+    const acceptedFile = acceptCappedPlannerRevision({subject, result, touchedFiles, isRevision, candidateArtifacts});
+    if(acceptedFile) return true;
+  }
   maybeApplyPendingContinuationReset(s,contScope);
   const cont=handlePlanningContinuation(s,role,result,contScope,c.policy,'capped');
   if(!cont.allowed){
@@ -5659,12 +5719,6 @@ async function runPlanningPhase(c, step, request, s, planRevision=null){
   // deterministic postcondition/boundary validation — this one carries the
   // review verdict, and without it a revision is asked to fix an unnamed
   // problem.
-  const gateFindings=feedbackText(loadReviewFeedback(s,speckitStageFeedbackKey(step)));
-  const gateEarlierRounds=plannerEarlierRoundsText(s,speckitStageFeedbackKey(step),c.workflow?.plan_review_convergence!==false);
-  const gateNotes=planReviewNotesText(s,speckitStageFeedbackKey(step));
-  const gateNote=gateFindings
-    ? `\n\nThe plan reviewer REJECTED the previous attempt at this stage. Address every finding; do not repeat the same output:\n${gateFindings}${gateEarlierRounds ? `\n\n${gateEarlierRounds}` : ""}${gateNotes ? `\n\n${gateNotes}` : ""}`
-    : "";
   // Phase 9 task 9.1: absolute sandbox-visible SpecKit artifact paths cited
   // in the prompt itself, so PLANNER_PATHS_LINE's "read the exact paths
   // above" resolves to real paths (not a remembered number or directory).
@@ -5673,6 +5727,20 @@ async function runPlanningPhase(c, step, request, s, planRevision=null){
   const speckitPlanAbs=path.join(repo,"specs",speckitFeatureName,"plan.md");
   const speckitTasksAbs=path.join(repo,"specs",speckitFeatureName,"tasks.md");
   const speckitPathsLine=`SpecKit artifact paths (absolute, sandbox-visible): spec: ${speckitSpecAbs}; plan: ${speckitPlanAbs}; tasks: ${speckitTasksAbs}.`;
+  const gateStageFiles=[
+    (step==="specify" || step==="spec") ? speckitSpecAbs : (step==="plan" ? speckitPlanAbs : speckitTasksAbs)
+  ];
+  const gateStageChanged=stageFilesChangedSinceReview(
+    s.reviewFeedback?.[speckitStageFeedbackKey(step)]?.stageFileHashes || s.reviewStageSnapshots?.[speckitStageFeedbackKey(step)],
+    gateStageFiles
+  );
+  const gateChangedLine=stageFilesChangedLine(gateStageChanged);
+  const gateFindings=feedbackText(loadReviewFeedback(s,speckitStageFeedbackKey(step)));
+  const gateEarlierRounds=plannerEarlierRoundsText(s,speckitStageFeedbackKey(step),c.workflow?.plan_review_convergence!==false);
+  const gateNotes=planReviewNotesText(s,speckitStageFeedbackKey(step));
+  const gateNote=gateFindings
+    ? `\n\n${gateChangedLine ? `${gateChangedLine}\n\n` : ""}The plan reviewer REJECTED the previous attempt at this stage. Address every finding; do not repeat the same output:\n${gateFindings}${gateEarlierRounds ? `\n\n${gateEarlierRounds}` : ""}${gateNotes ? `\n\n${gateNotes}` : ""}`
+    : "";
   let finalR=null;
   for(;;){
     const {taskRef,deadEndsText,noteText}=planningContinuationText(s,"speckit","planner");
@@ -5692,7 +5760,10 @@ ${request}`;
     // an unrelated prior session, not this one.
     const r=await relay("planner",task,c,s,{resume:false,capEnabled:true,taskRef,planRevision});
     if(r.capped){
-      handleCappedPlanningResult({c,s,framework:"speckit",role:"planner",result:r,subject:`SpecKit planner ${step}`,touchedFiles:r.touchedFiles||[]});
+      if(handleCappedPlanningResult({c,s,framework:"speckit",role:"planner",result:r,subject:`SpecKit planner ${step}`,touchedFiles:r.touchedFiles||[],step,planRevision})){
+        finalR=r;
+        break;
+      }
       continue;
     }
     clearBackstopFirings(s,planningScopeParts("speckit","planner").contScope);
@@ -6116,6 +6187,11 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
       const _plannerEff = effectiveRoleModelFor(s, c, 'planner');
       const _plannerPat = _plannerEff ? (agents[_plannerEff.adapter]?.free_model_pattern ?? null) : null;
       const plannerBudgetReminder = handoffBudgetReminder(resolvePerRoleLimits('planner', c.policy, _plannerEff ? { adapter: _plannerEff.adapter, model: _plannerEff.model, free_model_pattern: _plannerPat } : {}).perTaskMaxTurns);
+      const specStageChanged = stageFilesChangedSinceReview(
+        s.reviewFeedback?.[STANDALONE_SPEC_FEEDBACK_KEY]?.stageFileHashes || s.reviewStageSnapshots?.[STANDALONE_SPEC_FEEDBACK_KEY],
+        [specFile]
+      );
+      const specChangedLine = stageFilesChangedLine(specStageChanged);
       const prompt = [
         "Write the feature specification for this request — do not write PLAN.md or TASKS.md in this stage.",
         `Write the feature specification for this request to exactly: ${specFile}`,
@@ -6131,9 +6207,14 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
         plannerHandoffNoteText,
         `Project request/context: ${request}`,
         `Keep a hand-off note at ${handoffNoteRelPath(mission, 'standalone-spec-planner')}. OVERWRITE it (never append) at each milestone — after every important finding, before writing SPEC.md/CODEMAP.md — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${plannerBudgetReminder ? ` ${plannerBudgetReminder}` : ""}`,
-        feedback ? `Spec reviewer feedback that MUST be addressed:\n${feedback}` : ""
+        feedback ? `${specChangedLine ? `${specChangedLine}\n\n` : ""}Spec reviewer feedback that MUST be addressed:\n${feedback}` : ""
       ].filter(Boolean).join("\n\n");
+      const specMtimeBefore = fs.existsSync(specFile) ? fs.statSync(specFile).mtimeMs : 0;
+      const codemapMtimeBefore = fs.existsSync(codemapFile) ? fs.statSync(codemapFile).mtimeMs : 0;
       const planner = await relayAsync("planner", prompt, c, s, { resume: false, capEnabled: true, taskRef: 'standalone-spec-planner', planRevision: revision });
+      const specTouched = [...(planner.touchedFiles || [])];
+      if (fs.existsSync(specFile) && fs.statSync(specFile).mtimeMs > specMtimeBefore) specTouched.push(specFile);
+      if (fs.existsSync(codemapFile) && fs.statSync(codemapFile).mtimeMs > codemapMtimeBefore) specTouched.push(codemapFile);
       // Mirrors the plan loop's planner cap/incomplete handling with the spec planner scope.
       if (planner.capped) {
         const contScope = 'task:standalone:spec:planner';
@@ -6151,15 +6232,26 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
           continue;
         }
         clearBackstopFirings(s, contScope);
-        maybeApplyPendingContinuationReset(s, contScope);
-        const cont = handlePlanningContinuation(s, 'planner', planner, 'task:standalone:spec:planner', c.policy, 'capped');
-        if (!cont.allowed) {
-          recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner' });
-          die(`Standalone spec planner did not converge after ${cont.used} capped generations (${planner.capped.type} cap ${planner.capped.used}/${planner.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+        const isRevision = Number(revision) > 0 || loadReviewFeedback(s, STANDALONE_SPEC_FEEDBACK_KEY).length > 0 || !!feedback;
+        const candidateArtifacts = [specFile, path.relative(repo, specFile), normalizeRel(path.relative(repo, specFile)), "SPEC.md"].filter(Boolean);
+        const acceptedFile = acceptCappedPlannerRevision({
+          subject: "Standalone spec planner",
+          result: planner,
+          touchedFiles: specTouched,
+          isRevision,
+          candidateArtifacts
+        });
+        if (!acceptedFile) {
+          maybeApplyPendingContinuationReset(s, contScope);
+          const cont = handlePlanningContinuation(s, 'planner', planner, 'task:standalone:spec:planner', c.policy, 'capped');
+          if (!cont.allowed) {
+            recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner' });
+            die(`Standalone spec planner did not converge after ${cont.used} capped generations (${planner.capped.type} cap ${planner.capped.used}/${planner.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+          }
+          stopOnNoProgress(s, c, { framework: "standalone", contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner', touchedFiles: planningNoProgressTouchedFiles(specFile, codemapFile, contScope, s), checkpoint: s[CHECKPOINT_STATE_KEY], step: "standalone_planning_no_progress" });
+          console.log(`Standalone spec planner hit the ${planner.capped.type} cap (${planner.capped.used}/${planner.capped.limit} ${capUnitLabel(planner.capped.type)}); continuing as session ${cont.used + 1} of ${cont.limit + 1}.`);
+          continue;
         }
-        stopOnNoProgress(s, c, { framework: "standalone", contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner', touchedFiles: planningNoProgressTouchedFiles(specFile, codemapFile, contScope, s), checkpoint: s[CHECKPOINT_STATE_KEY], step: "standalone_planning_no_progress" });
-        console.log(`Standalone spec planner hit the ${planner.capped.type} cap (${planner.capped.used}/${planner.capped.limit} ${capUnitLabel(planner.capped.type)}); continuing as session ${cont.used + 1} of ${cont.limit + 1}.`);
-        continue;
       }
       clearBackstopFirings(s, 'task:standalone:spec:planner');
       if (parsePlanningIncompleteSignal(planner.finalMessage ?? planner)) {
@@ -6292,6 +6384,7 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
       if (reviewResult.status === "completed" && reviewResult.review?.decision === "PASS") {
         s.standaloneSpecReview = { approved: true, notes: Array.isArray(reviewResult.review?.notes) ? reviewResult.review.notes : [] };
         clearReviewFeedback(s, STANDALONE_SPEC_FEEDBACK_KEY);
+        clearReviewFailSnapshot(s, STANDALONE_SPEC_FEEDBACK_KEY);
         saveState(s);
         return;
       }
@@ -6299,6 +6392,7 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
     }
     revision++;
     const specFindings = saveReviewFeedback(s, STANDALONE_SPEC_FEEDBACK_KEY, rawFindings);
+    recordReviewFailSnapshot(s, STANDALONE_SPEC_FEEDBACK_KEY, [specFile], repo);
     feedback = feedbackText(specFindings) || "Spec reviewer returned FAIL without findings.";
     position = "planner";
     s.standaloneSpecReview = { revision, position };
@@ -6308,6 +6402,7 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
       console.log(`[autopilot] spec review: revision limit reached — ${specFindings.length} open finding(s) handed to the plan stage.`);
       s.standaloneSpecReview = { approved: true, notes: [], openFindings: specFindings };
       clearReviewFeedback(s, STANDALONE_SPEC_FEEDBACK_KEY);
+      clearReviewFailSnapshot(s, STANDALONE_SPEC_FEEDBACK_KEY);
       saveState(s);
       return;
     }
@@ -6456,6 +6551,11 @@ async function runStandalonePlanning(c,s,request,opts={}){
     const _plannerEff=effectiveRoleModelFor(s,c,'planner');
     const _plannerPat=_plannerEff? (agents[_plannerEff.adapter]?.free_model_pattern ?? null) : null;
     const plannerBudgetReminder=handoffBudgetReminder(resolvePerRoleLimits('planner',c.policy,_plannerEff?{adapter:_plannerEff.adapter,model:_plannerEff.model,free_model_pattern:_plannerPat}:{}).perTaskMaxTurns);
+    const planStageChanged = stageFilesChangedSinceReview(
+      s.reviewFeedback?.[STANDALONE_PLAN_FEEDBACK_KEY]?.stageFileHashes || s.reviewStageSnapshots?.[STANDALONE_PLAN_FEEDBACK_KEY],
+      [file, tasksFile]
+    );
+    const planChangedLine = stageFilesChangedLine(planStageChanged);
     const prompt=feedback?[
       "Create or continue an implementation plan for this project without relying on SpecKit or GSD.",
       `Write the narrative plan to exactly: ${file}`,
@@ -6484,7 +6584,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       `Keep a hand-off note at ${handoffNoteRelPath(mission, 'standalone-planning-planner')}. OVERWRITE it (never append) at each milestone — after every important finding, before writing PLAN.md/TASKS.md — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${plannerBudgetReminder ? ` ${plannerBudgetReminder}` : ""}`,
       planReviewNotesText(s,STANDALONE_PLAN_FEEDBACK_KEY),
       plannerEarlierRoundsText(s,STANDALONE_PLAN_FEEDBACK_KEY,c.workflow?.plan_review_convergence!==false),
-      `Plan reviewer feedback that MUST be addressed:\n${feedback}`
+      `${planChangedLine ? `${planChangedLine}\n\n` : ""}Plan reviewer feedback that MUST be addressed:\n${feedback}`
     ].filter(Boolean).join("\n\n"):[
       "Create or continue an implementation plan for this project without relying on SpecKit or GSD.",
       `Write the narrative plan to exactly: ${file}`,
@@ -6514,7 +6614,12 @@ async function runStandalonePlanning(c,s,request,opts={}){
     // (tool calls, old PLAN.md reads, old review findings) across every
     // revision for no benefit, which is exactly what caused one mission's
     // planner session to reach 1.26M cached input tokens.
+    const tasksMtimeBefore = fs.existsSync(tasksFile) ? fs.statSync(tasksFile).mtimeMs : 0;
+    const planMtimeBefore = fs.existsSync(file) ? fs.statSync(file).mtimeMs : 0;
     const planner=await relayAsync("planner",prompt,c,s,{resume:false,capEnabled:true,taskRef:'standalone-planning-planner',planRevision:revision});
+    const standaloneTouched = [...(planner.touchedFiles || [])];
+    if (fs.existsSync(tasksFile) && fs.statSync(tasksFile).mtimeMs > tasksMtimeBefore) standaloneTouched.push(tasksFile);
+    if (fs.existsSync(file) && fs.statSync(file).mtimeMs > planMtimeBefore) standaloneTouched.push(file);
     if(planner.capped){
       // Mission 031 Phase 6 task 6.2: a standalone planner cap breach is
       // a continuation event, never a failure. Consume one continuation
@@ -6544,21 +6649,32 @@ async function runStandalonePlanning(c,s,request,opts={}){
       // consecutive-firing count resets (PLAN: two CONSECUTIVE firings
       // escalate — an interleaving ordinary generation breaks the streak).
       clearBackstopFirings(s,contScope);
-      // Backlog #27: a queued `ap reset --scope <continuation>` applies at
-      // this decision, before the next generation is consumed.
-      maybeApplyPendingContinuationReset(s,contScope);
-      const cont=handlePlanningContinuation(s,'planner',planner,'task:standalone:planning:planner',c.policy,'capped');
-      if(!cont.allowed){
-        recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:'standalone-planning-planner'});
-        die(`Standalone planning did not converge after ${cont.used} capped generations (${planner.capped.type} cap ${planner.capped.used}/${planner.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+      const isRevision = Number(revision) > 0 || loadReviewFeedback(s, STANDALONE_PLAN_FEEDBACK_KEY).length > 0 || !!feedback;
+      const candidateArtifacts = [tasksFile, file, path.relative(repo, tasksFile), path.relative(repo, file), normalizeRel(path.relative(repo, tasksFile)), normalizeRel(path.relative(repo, file)), "TASKS.md", "PLAN.md"].filter(Boolean);
+      const acceptedFile = acceptCappedPlannerRevision({
+        subject: "Planner",
+        result: planner,
+        touchedFiles: standaloneTouched,
+        isRevision,
+        candidateArtifacts
+      });
+      if(!acceptedFile){
+        // Backlog #27: a queued `ap reset --scope <continuation>` applies at
+        // this decision, before the next generation is consumed.
+        maybeApplyPendingContinuationReset(s,contScope);
+        const cont=handlePlanningContinuation(s,'planner',planner,'task:standalone:planning:planner',c.policy,'capped');
+        if(!cont.allowed){
+          recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:'standalone-planning-planner'});
+          die(`Standalone planning did not converge after ${cont.used} capped generations (${planner.capped.type} cap ${planner.capped.used}/${planner.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+        }
+        // Mission 031 Phase 6 task 6b.2: no-progress stop for the planner —
+        // role-appropriate progress signal is PLAN.md/TASKS.md change (mtime +
+        // size + content hash via planningNoProgressTouchedFiles), never
+        // touchedFiles. Runs after the continuation check.
+        stopOnNoProgress(s,c,{framework:"standalone",contScope,taskId:null,missionName:mission,taskRef:'standalone-planning-planner',touchedFiles:planningNoProgressTouchedFiles(file,tasksFile,contScope,s),checkpoint:s[CHECKPOINT_STATE_KEY],step:"standalone_planning_no_progress"});
+        console.log(`Planner hit the ${planner.capped.type} cap (${planner.capped.used}/${planner.capped.limit} ${capUnitLabel(planner.capped.type)}); continuing as session ${cont.used+1} of ${cont.limit+1}.`);
+        continue;
       }
-      // Mission 031 Phase 6 task 6b.2: no-progress stop for the planner —
-      // role-appropriate progress signal is PLAN.md/TASKS.md change (mtime +
-      // size + content hash via planningNoProgressTouchedFiles), never
-      // touchedFiles. Runs after the continuation check.
-      stopOnNoProgress(s,c,{framework:"standalone",contScope,taskId:null,missionName:mission,taskRef:'standalone-planning-planner',touchedFiles:planningNoProgressTouchedFiles(file,tasksFile,contScope,s),checkpoint:s[CHECKPOINT_STATE_KEY],step:"standalone_planning_no_progress"});
-      console.log(`Planner hit the ${planner.capped.type} cap (${planner.capped.used}/${planner.capped.limit} ${capUnitLabel(planner.capped.type)}); continuing as session ${cont.used+1} of ${cont.limit+1}.`);
-      continue;
     }
     // Backlog #59 part (a): the planner run ended WITHOUT a backstop firing
     // (normal completion, or the voluntary incomplete stop below) — reset
@@ -6685,6 +6801,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       if(confirming) clearPlanReviewConfirmation(s,STANDALONE_PLAN_FEEDBACK_KEY);
       revision++;
       const planFindings=saveReviewFeedback(s,STANDALONE_PLAN_FEEDBACK_KEY,denied);
+      recordReviewFailSnapshot(s,STANDALONE_PLAN_FEEDBACK_KEY,[file,tasksFile],repo);
       recordPlanReviewRound(s,STANDALONE_PLAN_FEEDBACK_KEY,planFindings,[],{reviewer:false});
       feedback=feedbackText(planFindings)||"Plan reviewer returned FAIL without findings.";
       findingCount=planFindings.length;
@@ -6869,6 +6986,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       recordPlanPassNotes(s,STANDALONE_PLAN_FEEDBACK_KEY,reviewResult.review?.notes);
       clearPlanReviewConfirmation(s,STANDALONE_PLAN_FEEDBACK_KEY);
       clearReviewFeedback(s,STANDALONE_PLAN_FEEDBACK_KEY);
+      clearReviewFailSnapshot(s,STANDALONE_PLAN_FEEDBACK_KEY);
       clearPlanReviewHistory(s,STANDALONE_PLAN_FEEDBACK_KEY);
       clearPlanReviewRevisions(s,STANDALONE_PLAN_FEEDBACK_KEY);
       clearFindingTasks(s,STANDALONE_PLAN_FEEDBACK_KEY);
@@ -6884,6 +7002,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
     if(confirming) clearPlanReviewConfirmation(s,STANDALONE_PLAN_FEEDBACK_KEY);
     revision++;
     const planFindings=saveReviewFeedback(s,STANDALONE_PLAN_FEEDBACK_KEY,reviewResult.review?.findings||[]);
+    recordReviewFailSnapshot(s,STANDALONE_PLAN_FEEDBACK_KEY,[file,tasksFile],repo);
     recordPlanReviewNotes(s,STANDALONE_PLAN_FEEDBACK_KEY,reviewResult.review?.notes);
     recordPlanReviewRound(s,STANDALONE_PLAN_FEEDBACK_KEY,planFindings,reviewResult.review?.previous);noteEscalationTrigger(s,c,"planner",STANDALONE_PLAN_FEEDBACK_KEY,"plan_reviewer",reviewResult.review?.previous);
     feedback=feedbackText(planFindings) || "Plan reviewer returned FAIL without findings.";
@@ -7195,6 +7314,7 @@ Return PASS or FAIL with findings.`;
             // Persist the findings against the stage about to be revised, so
             // runPlanningPhase() quotes them and a resume mid-revision has them.
             saveReviewFeedback(s,speckitStageFeedbackKey(gateStage),rr.review?.findings||[]);
+            recordReviewFailSnapshot(s,speckitStageFeedbackKey(gateStage),speckitStageFilePaths(repo,s,gateStage),repo);
             if(rr.deterministic!==true) recordPlanReviewNotes(s,speckitStageFeedbackKey(gateStage),rr.review?.notes);
             recordPlanReviewRound(s,speckitStageFeedbackKey(gateStage),rr.review?.findings||[],rr.review?.previous,{reviewer:rr.deterministic!==true});noteEscalationTrigger(s,c,"planner",speckitStageFeedbackKey(gateStage),"plan_reviewer",rr.review?.previous);
             // The confirmation round is over: its FAIL is now ordinary feedback.
@@ -7250,6 +7370,7 @@ Return PASS or FAIL with findings.`;
           const reFindings=rr.review?.findings||[];
           console.log(revisionAllowed?`  FAIL — revising ${label}`:`  FAIL — ${label} (plan revision budget is ${maxPlanRevisions>0?"spent":"0"})`);
           saveReviewFeedback(s,speckitStageFeedbackKey(gateStage),reFindings);
+          recordReviewFailSnapshot(s,speckitStageFeedbackKey(gateStage),speckitStageFilePaths(repo,s,gateStage),repo);
           if(rr.deterministic!==true) recordPlanReviewNotes(s,speckitStageFeedbackKey(gateStage),rr.review?.notes);
           recordPlanReviewRound(s,speckitStageFeedbackKey(gateStage),reFindings,rr.review?.previous,{reviewer:rr.deterministic!==true});noteEscalationTrigger(s,c,"planner",speckitStageFeedbackKey(gateStage),"plan_reviewer",rr.review?.previous);
           clearPlanReviewConfirmation(s,gateKey);
@@ -7312,6 +7433,7 @@ Return PASS or FAIL with findings.`;
       // next Planner to run this stage would be told the reviewer had
       // REJECTED an attempt that has since been accepted.
       clearReviewFeedback(s,speckitStageFeedbackKey(gateStage));
+      clearReviewFailSnapshot(s,speckitStageFeedbackKey(gateStage));
       clearPlanReviewHistory(s,speckitStageFeedbackKey(gateStage));
       delete s.planningEarlierStageEdits;
       clearFindingTasks(s,speckitStageFeedbackKey(gateStage));
@@ -7396,7 +7518,10 @@ async function gsdPlanningStage(c,s,{stage,phase,request,resume=false,planRevisi
     ].filter(Boolean).join("\n\n");
     const r=await relayAsync("planner",prompt,c,s,{readOnly:false,resume,capEnabled:true,taskRef,planRevision});
     if(r.capped){
-      handleCappedPlanningResult({c,s,framework:"gsd",role:"planner",result:r,subject:`GSD planner ${stage}`,touchedFiles:r.touchedFiles||[]});
+      if(handleCappedPlanningResult({c,s,framework:"gsd",role:"planner",result:r,subject:`GSD planner ${stage}`,touchedFiles:r.touchedFiles||[],stage,planRevision})){
+        finalR=r;
+        break;
+      }
       continue;
     }
     clearBackstopFirings(s,contScope);
@@ -7522,12 +7647,18 @@ async function runGsdPlanning(c,s,request){
           revision++;
           lastFindings=gsdDenied.map(f=>`${f.location}: ${f.problem} — ${f.correction}`).join("\n");
           s.gsdPlanningReview={stage,phase,revision,findings:gsdDenied};
+          recordReviewFailSnapshot(s,checkpointKey,gsdStageFiles(repo,phase,stage,c),repo);
           s.step=`gsd-${stage}-revision-${revision}`; saveState(s);
           if(revision>=stageMaxRevisions){
             s.phase="escalated";s.step=`gsd-${stage}-review-failed`;saveState(s);
             die(`GSD planning stage ${stage} failed review after ${stageMaxRevisions} revision(s).`);
           }
-          request=`${request}\n\nGSD ${stage} reviewer findings that MUST be addressed on the next revision:\n${lastFindings}`;
+          const gsdDeniedChanged=stageFilesChangedSinceReview(
+            s.reviewFeedback?.[checkpointKey]?.stageFileHashes || s.reviewStageSnapshots?.[checkpointKey] || s.gsdPlanningReview?.stageFileHashes,
+            gsdStageFiles(repo,phase,stage,c)
+          );
+          const gsdDeniedChangedLine=stageFilesChangedLine(gsdDeniedChanged);
+          request=`${request}\n\n${gsdDeniedChangedLine?`${gsdDeniedChangedLine}\n\n`:""}GSD ${stage} reviewer findings that MUST be addressed on the next revision:\n${lastFindings}`;
           continue;
         }
       }
@@ -7546,6 +7677,7 @@ async function runGsdPlanning(c,s,request){
       lastFindings=(rr.review?.findings||[]).join("\n") || "Reviewer returned FAIL without findings.";
       recordPlanReviewNotes(s,notesKey,rr.review?.notes);
       s.gsdPlanningReview={stage,phase,revision,findings:rr.review?.findings||[]};
+      recordReviewFailSnapshot(s,checkpointKey,gsdStageFiles(repo,phase,stage,c),repo);
       s.step=`gsd-${stage}-revision-${revision}`; saveState(s);
       if(revision>=stageMaxRevisions){
         s.phase="escalated";s.step=`gsd-${stage}-review-failed`;saveState(s);
@@ -7553,7 +7685,12 @@ async function runGsdPlanning(c,s,request){
       }
       // The next loop re-runs the same native GSD planning stage with the review feedback in context.
       const notesText=planReviewNotesText(s,notesKey);
-      request=`${request}\n\nGSD ${stage} reviewer findings that MUST be addressed on the next revision:\n${lastFindings}${notesText?`\n\n${notesText}`:""}`;
+      const gsdChanged=stageFilesChangedSinceReview(
+        s.reviewFeedback?.[checkpointKey]?.stageFileHashes || s.reviewStageSnapshots?.[checkpointKey] || s.gsdPlanningReview?.stageFileHashes,
+        gsdStageFiles(repo,phase,stage,c)
+      );
+      const gsdChangedLine=stageFilesChangedLine(gsdChanged);
+      request=`${request}\n\n${gsdChangedLine?`${gsdChangedLine}\n\n`:""}GSD ${stage} reviewer findings that MUST be addressed on the next revision:\n${lastFindings}${notesText?`\n\n${notesText}`:""}`;
     }
   }
 
@@ -7619,6 +7756,7 @@ async function runGsdPlanning(c,s,request){
         finalFindings=(finalReview.review?.findings||[]).join("\n") || "Reviewer returned FAIL without findings.";
         recordPlanReviewNotes(s,finalNotesKey,finalReview.review?.notes);
         s.gsdPlanningReview={stage:"plan-check",phase,revision:finalRevision,findings:finalReview.review?.findings||[]};
+        recordReviewFailSnapshot(s,finalNotesKey,gsdStageFiles(repo,phase,"plan",c),repo);
         s.step=`gsd-plan-check-revision-${finalRevision}`; saveState(s);
         if(finalRevision>=finalMaxRevisions){
           s.phase="escalated";s.step="gsd-plan-final-review";saveState(s);
@@ -7628,7 +7766,12 @@ async function runGsdPlanning(c,s,request){
         // remains: re-run the native plan stage with the findings, then review
         // the saved plans again (never a one-shot escalation).
         const notesText=planReviewNotesText(s,finalNotesKey);
-        const reviseRequest=`${request}\n\nGSD plan-check reviewer findings that MUST be addressed on the next revision:\n${finalFindings}${notesText?`\n\n${notesText}`:""}`;
+        const gsdFinalChanged=stageFilesChangedSinceReview(
+          s.reviewFeedback?.[finalNotesKey]?.stageFileHashes || s.reviewStageSnapshots?.[finalNotesKey] || s.gsdPlanningReview?.stageFileHashes,
+          gsdStageFiles(repo,phase,"plan",c)
+        );
+        const gsdFinalChangedLine=stageFilesChangedLine(gsdFinalChanged);
+        const reviseRequest=`${request}\n\n${gsdFinalChangedLine?`${gsdFinalChangedLine}\n\n`:""}GSD plan-check reviewer findings that MUST be addressed on the next revision:\n${finalFindings}${notesText?`\n\n${notesText}`:""}`;
         await gsdPlanningStage(c,s,{stage:"plan",phase,request:reviseRequest,resume:false,planRevision:finalRevision});
       }
     }

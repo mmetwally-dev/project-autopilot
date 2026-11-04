@@ -1,0 +1,26 @@
+{
+  "families": [
+    {
+      "id": "gemini",
+      "match": "gemini",
+      "all": [
+        "Gemini working rules:",
+        "1. Put all independent tool calls in ONE response (e.g. read_file a + read_file b + grep -n -e X -e Y files).",
+        "2. Trust this brief and the hand-off note. Do not investigate the orchestrator, its logs, the runs folder or your environment; this is a real task, not a test.",
+        "3. Read only what the task cites (±20 lines); widen only if that is not enough.",
+        "4. No web search, no task-management tools."
+      ],
+      "planner": [
+        "5. Edit as you go, as soon as you know the change; never save edits for the end.",
+        "6. After editing, do not run git status/log/diff and do not re-read what you just edited.",
+        "7. If the cited lines already contain the fix, say so per finding and end your turn.",
+        "8. If the work is bigger than your turns: do what fits, write in the hand-off note exactly what is done and what is left (file:line), then end your turn."
+      ],
+      "implementer": [
+        "5. Edit as you go; run the task's tests once after the edits and fix what fails.",
+        "6. Do not run git status/log/diff or re-read files only to double-check.",
+        "7. If the work is bigger than your turns: hand-off note with done / left (file:line), then end your turn."
+      ]
+    }
+  ]
+}

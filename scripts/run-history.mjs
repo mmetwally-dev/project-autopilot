@@ -602,7 +602,7 @@ export function appendNoE2eNoteToReport(repo, file) {
   } catch { return false; }
 }
 
-export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAlive, phases, policy, events, now, skill, gateLog } = {}) {
+export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAlive, phases, policy, events, now, skill, gateLog, ownerAlive: explicitOwnerAlive } = {}) {
   const d = now ? new Date(now) : new Date();
   const p = (n) => String(n).padStart(2, "0");
   let stamp;
@@ -622,7 +622,8 @@ export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAl
   // every run dir's logs). Falls back to a from-scratch rebuild via peekSummary.
   const summary = peekSummary(repo, mission);
   const summaryRuns = Array.isArray(summary?.runs) ? summary.runs : [];
-  const annotated = annotateOwnerLiveness(repo, summaryRuns, { isOwnerAlive });
+  const ownerProbe = explicitOwnerAlive === false ? () => false : (explicitOwnerAlive === true ? () => true : isOwnerAlive);
+  const annotated = annotateOwnerLiveness(repo, summaryRuns, { isOwnerAlive: ownerProbe });
   // Display-level reconciliation only: the recorded status stays verbatim on
   // disk (readers and the recovery layer see it raw), but the report rows show
   // the label displayStatusLabel computes — a dead-owner/dead-pid "running" run
@@ -670,9 +671,11 @@ export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAl
   if (state?.gitGuardWarning) {
     eventList.push({ type: "warn", at: null, text: "a git command was blocked and changed nothing; mission continued (warning, not a policy violation)." });
   }
-  let ownerAlive = undefined;
-  const withFlag = Array.isArray(runs) ? runs.find((r) => typeof r?.ownerAlive === "boolean") : null;
-  if (withFlag) ownerAlive = withFlag.ownerAlive === true;
+  let ownerAlive = explicitOwnerAlive;
+  if (ownerAlive === undefined) {
+    const withFlag = Array.isArray(runs) ? runs.find((r) => typeof r?.ownerAlive === "boolean") : null;
+    if (withFlag) ownerAlive = withFlag.ownerAlive === true;
+  }
   // The open orchestrator gate's log tail is where live test-file progress is
   // written (backlog #35h); a gate_start without a later gate_result is open.
   let openGatePhase = null;
@@ -712,7 +715,7 @@ export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAl
 // block so the aligned columns keep their monospace layout in a Markdown
 // preview. Atomic via temp file + rename so a reader never sees a
 // half-written report. Returns the file path written.
-export function writeWatchReportFile(repo, mission, { tail = 40, outFile } = {}) {
+export function writeWatchReportFile(repo, mission, { tail = 40, outFile, ...opts } = {}) {
   const file = outFile || (mission
     ? path.join(repo, ".autopilot", "missions", String(mission), "WATCH-REPORT.md")
     : path.join(repo, ".autopilot", "WATCH-REPORT.md"));
@@ -727,6 +730,7 @@ export function writeWatchReportFile(repo, mission, { tail = 40, outFile } = {})
     tail,
     phases: missionPhases,
     policy: config && typeof config.policy === "object" ? config.policy : {},
+    ...opts,
   });
   const body = /\.md$/i.test(file) ? `\`\`\`\n${text}\n\`\`\`\n` : `${text}\n`;
   fs.mkdirSync(path.dirname(file), { recursive: true });

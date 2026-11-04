@@ -82,7 +82,23 @@ export function buildInvocationRecord({role, adapterId, adapter, args, verificat
   };
 }
 
-export function buildRuntimeResult({roleName, role, adapterId, adapter, processResult, output, invocation, startedAt, finishedAt, sessionId, touchedFiles, policy, contract, verdict, failure, observations, usage}) {
+export function buildRuntimeResult({roleName, role, adapterId, adapter, processResult, output, invocation, startedAt, finishedAt, sessionId, touchedFiles, policy, contract, verdict, failure, observations, usage, capped, events}) {
+  const isCapped = Boolean(capped || processResult?.capped);
+  const hasSignal = Boolean(processResult?.signal);
+  const hasEvents = (Array.isArray(observations) && observations.length > 0)
+    || (Array.isArray(events) && events.length > 0)
+    || (Array.isArray(processResult?.events) && processResult.events.length > 0);
+  const effectiveProcessStatus = isCapped
+    ? "capped"
+    : processResult?.timedOut
+      ? "timed_out"
+      : processResult?.status === 0
+        ? "completed"
+        : processResult?.status == null
+          ? ((hasSignal || hasEvents) ? "failed" : "failed_start")
+          : "failed";
+  const effectiveFailure = (isCapped && failure?.class === "PROCESS_EXIT_NONZERO") ? null : (failure || null);
+
   return {
     schema: RESULT_CONTRACT,
     resultContract: RESULT_CONTRACT,
@@ -91,10 +107,10 @@ export function buildRuntimeResult({roleName, role, adapterId, adapter, processR
     adapter: adapterId,
     status: processResult?.status === 0 && !policy?.violation ? "completed" : "failed",
     process: {exitCode: processResult?.status ?? null, signal: processResult?.signal ?? null, error: processResult?.error || null},
-    processStatus: processResult?.timedOut ? "timed_out" : processResult?.status === 0 ? "completed" : processResult?.status == null ? "failed_start" : "failed",
+    processStatus: effectiveProcessStatus,
     contract: contract || {status: "not_required", error: null},
     verdict: verdict || {status: "not_applicable", decision: null, findings: []},
-    failure: failure || null,
+    failure: effectiveFailure,
     observations: Array.isArray(observations) ? observations : [],
     // An absent measurement (driverless adapter, or an adapter whose
     // observer does not decode a per-turn usage event) is recorded as

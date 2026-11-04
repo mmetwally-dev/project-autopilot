@@ -777,7 +777,7 @@ function escalatedButResumed(state, runs, ownerAlive, isAlive) {
   });
 }
 
-export function classifyStatus(state, { operatorEvents = [], runs = [], ownerAlive, isAlive } = {}) {
+export function classifyStatus(state, { operatorEvents = [], runs = [], ownerAlive, isAlive, gates = [] } = {}) {
   const phase = String(state?.phase || "");
   const mission = state?.mission ?? null;
   const info = { status: "RUNNING", at: null, reason: null, failureClass: null, cause: null, humanRequired: false, stopLine: null, orchestratorNotRunning: false, planningOnlyDone: false };
@@ -847,14 +847,37 @@ export function classifyStatus(state, { operatorEvents = [], runs = [], ownerAli
       info.orchestratorNotRunning = true;
       info.at = null;
     } else {
-      const last = operatorEvents[operatorEvents.length - 1];
-      if (last && last.reason === "stop") {
-        const stopTime = Date.parse(last.at ?? "");
+      // Latest stop wins over later non-run events (e.g. an operator reset);
+      // a later "resume" event cancels it.
+      let latestStop = null;
+      for (let i = (Array.isArray(operatorEvents) ? operatorEvents.length - 1 : -1); i >= 0; i--) {
+        const reason = operatorEvents[i]?.reason;
+        if (reason === "resume") break;
+        if (reason === "stop") {
+          latestStop = operatorEvents[i];
+          break;
+        }
+      }
+      const isRunLive = (r) => {
+        if (String(r?.status || "").toLowerCase() !== "running") return false;
+        if (typeof isAlive === "function") return isAlive(r?.pid) === true;
+        return true;
+      };
+      const hasLiveRun = (Array.isArray(runs) && runs.some(isRunLive)) || (Array.isArray(gates) && gates.some((g) => g?.status === "running"));
+
+      if (latestStop) {
+        const stopTime = Date.parse(latestStop.at ?? "");
         const resumed = Array.isArray(runs) && runs.some((r) => {
           const started = Date.parse(r?.started_at ?? r?.startedAt ?? "");
-          return Number.isFinite(started) && Number.isFinite(stopTime) && started > stopTime;
+          if (Number.isFinite(started) && Number.isFinite(stopTime)) {
+            return started > stopTime;
+          }
+          return isRunLive(r);
         });
-        if (!resumed) { info.status = "STOPPED"; info.at = last.at ?? null; }
+        if (!resumed) {
+          info.status = "STOPPED";
+          info.at = latestStop.at ?? null;
+        }
       }
     }
   }
@@ -1488,8 +1511,8 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
     if (withFlag) resolvedOwnerAlive = withFlag.ownerAlive === true;
   }
   const operatorEvents = buildOperatorEvents(eventList);
-  const statusInfo = classifyStatus(state, { operatorEvents, runs: enrichedRuns, ownerAlive: resolvedOwnerAlive, isAlive });
   const gates = buildGateEntries(eventList);
+  const statusInfo = classifyStatus(state, { operatorEvents, runs: enrichedRuns, ownerAlive: resolvedOwnerAlive, isAlive, gates });
   const gateCommand = gates.map((g) => g.command).filter(Boolean).pop() ?? null;
   const operatorResetBudgetDomains = operatorResetDomains(eventList);
 
@@ -1763,6 +1786,7 @@ export function runEndAt(run) {
 }
 
 function runPrice(run) {
+  if (run?.usage?.usagePartial) return 0;
   const value = run?.usage?.priceWeighted;
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
@@ -1791,6 +1815,7 @@ function stageSpanClock(runs) {
 
 // PRICE cell: compact price-weighted tokens, `~`-prefixed while running.
 export function priceCell(run) {
+  if (run?.usage?.usagePartial) return "-";
   const value = run?.usage?.priceWeighted;
   if (typeof value !== "number" || !Number.isFinite(value)) return "-";
   const text = formatCellTokens(value);
@@ -1802,6 +1827,7 @@ export function priceCell(run) {
 export function contextCell(run) {
   const usage = run?.usage;
   if (!usage || typeof usage !== "object") return "-";
+  if (usage.usagePartial) return "-";
   if (usage.maxSingleTurnContext === null) return "-";
   let value = null;
   for (const key of ["peakContext", "maxSingleTurnContext"]) {
@@ -2645,6 +2671,7 @@ export function renderPipelineState(model, { stamp = null } = {}) {
 // Rule 15: a run row at ≥70% of its role's `policy.caps.<role>` cap gets
 // `⚠ high usage (<used> of <cap> cap)`. Never fabricated when no cap exists.
 function highUsageText(run, model) {
+  if (run?.usage?.usagePartial) return null;
   const caps = model?.policy?.caps && typeof model.policy.caps === "object" ? model.policy.caps : {};
   const cap = caps[roleOf(run)] || {};
   const limit = Number(cap.max_tokens ?? cap.maxTokens);

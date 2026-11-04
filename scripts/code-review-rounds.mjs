@@ -76,10 +76,72 @@ export function codeReviewerRoundLines(state, key) {
   return [CODE_REVIEW_VERIFY_LINE, `Previous findings from all earlier review rounds (verify each):\n${render(rounds)}`];
 }
 
+export const EARLIER_ROUNDS_RECHECK_LINE =
+  "Do not re-check these unless your edit touches their lines.";
+
+export function normalizeFindingKey(f) {
+  if (!f) return "";
+  if (typeof f === "object" && !Array.isArray(f)) {
+    const loc = String(f.location ?? f.file ?? f.path ?? "").replace(/\s+/g, " ").trim();
+    const text = String(f.text ?? f.problem ?? f.issue ?? f.message ?? f.finding ?? "").replace(/\s+/g, " ").trim();
+    let combined = "";
+    if (loc && text) {
+      combined = text.startsWith(loc) ? text : `${loc}: ${text}`;
+    } else {
+      combined = loc || text;
+    }
+    const s = combined.replace(/\s+/g, " ").trim();
+    const markerIdx = s.indexOf("Required correction:");
+    if (markerIdx !== -1) {
+      const head = s.slice(0, markerIdx).trim();
+      if (head) return head;
+    }
+    return s;
+  }
+  const s = String(f).replace(/\s+/g, " ").trim();
+  const markerIdx = s.indexOf("Required correction:");
+  if (markerIdx !== -1) {
+    const head = s.slice(0, markerIdx).trim();
+    if (head) return head;
+  }
+  return s;
+}
+
+export function dedupeEarlierRounds(allRounds) {
+  if (!Array.isArray(allRounds) || allRounds.length <= 1) return [];
+  const latestRound = allRounds[allRounds.length - 1];
+  const earlierRounds = allRounds.slice(0, -1);
+  const latestFindings = Array.isArray(latestRound?.findings) ? latestRound.findings : [];
+  const seen = new Set();
+  for (const f of latestFindings) {
+    const key = normalizeFindingKey(f);
+    if (key) seen.add(key);
+  }
+  const kept = [];
+  for (let i = earlierRounds.length - 1; i >= 0; i--) {
+    const r = earlierRounds[i];
+    const rawFindings = Array.isArray(r?.findings) ? r.findings : [];
+    const keptFindings = [];
+    for (const f of rawFindings) {
+      const key = normalizeFindingKey(f);
+      if (key && seen.has(key)) continue;
+      if (key) seen.add(key);
+      keptFindings.push(f);
+    }
+    if (keptFindings.length > 0) {
+      kept.unshift({ ...r, findings: keptFindings });
+    }
+  }
+  return kept;
+}
+
 // Implementer fix brief: findings of all rounds BEFORE the latest (the latest
 // is already quoted as the feedback to address).
 export function implementerEarlierRoundsText(state, key) {
-  const rounds = slot(state, key).slice(0, -1);
+  const allRounds = slot(state, key);
+  const rounds = dedupeEarlierRounds(allRounds);
   if (!rounds.length) return "";
-  return `Findings from ALL earlier code-review rounds (already addressed once — keep them fixed; your fixes for the current findings must not reopen any of them):\n${render(rounds)}`;
+  const rendered = render(rounds);
+  if (!rendered) return "";
+  return `Findings from ALL earlier code-review rounds (already addressed once — keep them fixed; your fixes for the current findings must not reopen any of them):\n${rendered}\n${EARLIER_ROUNDS_RECHECK_LINE}`;
 }
