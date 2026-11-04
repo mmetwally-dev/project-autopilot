@@ -11,7 +11,11 @@ export function failedRunDidWork({adapterId, touchedFiles, events} = {}) {
   if (Array.isArray(touchedFiles) && touchedFiles.length > 0) return true;
   let turns = null;
   try { turns = countTurns(adapterId, events); } catch { turns = null; }
-  return Number(turns) >= 1;
+  if (Number(turns) >= 1) return true;
+  if (adapterId === "codex" && Array.isArray(events)) {
+    return events.some(e => e?.type === "item.completed" || e?.type === "turn.completed");
+  }
+  return false;
 }
 
 export function stripFailureHandoff(task) {

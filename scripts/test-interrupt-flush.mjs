@@ -26,7 +26,7 @@ check("markInterrupted imported from run-recovery", /markInterrupted/.test(src) 
 check("active run dir tracked in runRelay", /activeRunDir\s*=\s*dir/.test(src));
 check("active relay state tracked in runRelay", /activeRelayState\s*=\s*s/.test(src));
 check("exactly one process.on('exit') hook that only refreshes",
-  (src.match(/process\.on\s*\(\s*["']exit["']/g) || []).length === 1 && /process\.on\s*\(\s*["']exit["']\s*,\s*\(\s*\)\s*=>\s*\{\s*if\s*\(\s*activeRelayState\s*\)\s*refreshWatchReport\s*\(\s*activeRelayState\s*\)\s*;\s*\}\s*\)/.test(src));
+  (src.match(/process\.on\s*\(\s*["']exit["']/g) || []).length === 1 && /process\.on\s*\(\s*["']exit["']\s*,\s*\(\s*\)\s*=>\s*\{\s*(?:shuttingDown\s*=\s*true\s*;\s*)?if\s*\(\s*activeRelayState\s*\)\s*refreshWatchReport\s*\(\s*activeRelayState\s*\)\s*;\s*\}\s*\)/.test(src));
 
 if (failures) {
   console.error(`${failures} interrupt-flush check(s) failed.`);

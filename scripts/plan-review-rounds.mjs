@@ -3,14 +3,16 @@
 // only when the revision introduced them or they would break execution, and the
 // planner revision brief carries the cumulative findings of EVERY earlier round
 // so a fix for one finding does not reopen another. Pure text/state helpers.
+import crypto from "node:crypto";
 import { normalizeFindings } from "./review-feedback.mjs";
-import { normalizePreviousStatuses, dedupeEarlierRounds, EARLIER_ROUNDS_RECHECK_LINE } from "./code-review-rounds.mjs";
+import { normalizePreviousStatuses, dedupeEarlierRounds, EARLIER_ROUNDS_RECHECK_LINE, scopeReviewRounds } from "./code-review-rounds.mjs";
 
-export { dedupeEarlierRounds, EARLIER_ROUNDS_RECHECK_LINE };
+export { dedupeEarlierRounds, EARLIER_ROUNDS_RECHECK_LINE, scopeReviewRounds };
 
 const STATE_KEY = "planReviewHistory";
 const NOTES_KEY = "planReviewNotes";
 const PASS_NOTES_KEY = "planPassNotes";
+const TASK_HASHES_KEY = "planReviewTaskHashes";
 const MAX_CUMULATIVE_CHARS = 16000;
 
 // The operator's severity split (backlog #8): only a problem that would make
@@ -37,6 +39,45 @@ export const PLAN_REVIEW_FULL_LINE =
 // line anchors or wording nits.
 export const PLAN_REVIEW_CONFIRMATION_LINE =
   `This is a confirmation full review after a scoped re-review PASS: no previous findings are listed, so review the whole plan again from scratch, across all categories you check, not one batch at a time. ${PLAN_REVIEW_SEVERITY_LINE}`;
+
+export const REVIEW_CONTINUATION_LINE =
+  "This session continues a review that was stopped by the turn cap: start from the hand-off note above, do not repeat the reads or commands it lists, carry over the findings it records, and review only what is left.";
+
+export const PLAN_REVIEW_CONFIRMATION_CONTINUATION_LINE =
+  `This is a confirmation full review after a scoped re-review PASS: ${REVIEW_CONTINUATION_LINE} ${PLAN_REVIEW_SEVERITY_LINE}`;
+
+export function hasReviewContinuationSignal(text) {
+  return typeof text === "string" && text.includes("Prior reviewer handoff note (continuation context");
+}
+
+export function replaceReviewContinuationWording(text) {
+  if (typeof text !== "string") return text;
+  let out = text;
+  out = out.replace(
+    /No previous findings are listed, so review the whole artifact again from scratch; do not limit this to earlier findings or recent changes\./g,
+    REVIEW_CONTINUATION_LINE
+  );
+  out = out.replace(
+    /no previous findings are listed, so review the whole plan again from scratch, across all categories you check, not one batch at a time\./g,
+    REVIEW_CONTINUATION_LINE
+  );
+  out = out.replace(
+    /Review the whole plan again from scratch\./g,
+    REVIEW_CONTINUATION_LINE
+  );
+  while (out.includes(`${REVIEW_CONTINUATION_LINE}\n${REVIEW_CONTINUATION_LINE}`)) {
+    out = out.replace(`${REVIEW_CONTINUATION_LINE}\n${REVIEW_CONTINUATION_LINE}`, REVIEW_CONTINUATION_LINE);
+  }
+  while (out.includes(`${REVIEW_CONTINUATION_LINE} ${REVIEW_CONTINUATION_LINE}`)) {
+    out = out.replace(`${REVIEW_CONTINUATION_LINE} ${REVIEW_CONTINUATION_LINE}`, REVIEW_CONTINUATION_LINE);
+  }
+  return out;
+}
+
+export function formatReviewBriefForContinuation(text) {
+  if (!hasReviewContinuationSignal(text)) return text;
+  return replaceReviewContinuationWording(text);
+}
 
 // Backlog #8: SpecKit-analyze-style cross-check for the standalone plan
 // review when SPEC.md is on; used only in full review rounds.
@@ -112,6 +153,25 @@ export function clearPlanReviewHistory(state, key) {
     if (!Object.keys(state[REVIEWER_ROUNDS_KEY]).length) delete state[REVIEWER_ROUNDS_KEY];
   }
   clearPlanReviewNotes(state, key);
+  clearPlanReviewTaskHashes(state, key);
+}
+
+export function recordPlanReviewTaskHashes(state, key, hashes) {
+  if (!state || typeof state !== "object" || !key || !hashes || typeof hashes !== "object") return;
+  if (!state[TASK_HASHES_KEY] || typeof state[TASK_HASHES_KEY] !== "object") state[TASK_HASHES_KEY] = {};
+  state[TASK_HASHES_KEY][key] = { ...hashes };
+}
+
+export function getPlanReviewTaskHashes(state, key) {
+  const map = state?.[TASK_HASHES_KEY]?.[key];
+  return map && typeof map === "object" ? { ...map } : {};
+}
+
+
+export function clearPlanReviewTaskHashes(state, key) {
+  if (!state?.[TASK_HASHES_KEY] || typeof state[TASK_HASHES_KEY] !== "object") return;
+  if (key) delete state[TASK_HASHES_KEY][key]; else delete state[TASK_HASHES_KEY];
+  if (state[TASK_HASHES_KEY] && !Object.keys(state[TASK_HASHES_KEY]).length) delete state[TASK_HASHES_KEY];
 }
 
 // Minor notes from the latest plan-review verdict (backlog #8). Bounded and
@@ -262,32 +322,41 @@ export function clearPlanReviewRevisions(state, key) {
   if (state[REVISIONS_KEY] && !Object.keys(state[REVISIONS_KEY]).length) delete state[REVISIONS_KEY];
 }
 
-function render(rounds) {
+function render(rounds, extraLen = 0) {
   const blocks = rounds.map(r => `Round ${r.round}:\n${(Array.isArray(r.findings) ? r.findings : []).map((f, i) => `${i + 1}. ${f}`).join("\n")}`);
   // Bounded: drop the oldest rounds first.
-  while (blocks.length > 1 && blocks.join("\n\n").length > MAX_CUMULATIVE_CHARS) blocks.shift();
+  while (blocks.length > 1 && (blocks.join("\n\n").length + extraLen) > MAX_CUMULATIVE_CHARS) blocks.shift();
   return blocks.join("\n\n");
 }
 
 // Reviewer brief lines for the NEXT review (rounds already recorded = previous).
 // With convergence disabled every round is a full-plan re-review.
-export function planReviewerRoundLines(state, key, converge = true) {
+export function planReviewerRoundLines(state, key, converge = true, taskSizeLine = null) {
   if (converge === false) return [PLAN_REVIEW_FULL_LINE];
   // The next review is the confirmation full review: no previous findings.
-  if (planReviewConfirmationPending(state, key)) return planReviewerConfirmationLines();
+  if (planReviewConfirmationPending(state, key)) return planReviewerConfirmationLines(false, taskSizeLine);
   const rounds = slot(state, key);
   // History exists but the plan reviewer has never run (only deterministic
   // denylist rejections): this next call IS the first full review, so give it
   // the exhaustive first-round brief rather than a scoped verification brief.
   if (!rounds.length || planReviewReviewerRoundCount(state, key) === 0) return [PLAN_REVIEW_EXHAUSTIVE_LINE];
-  return [PLAN_REVIEW_VERIFY_LINE, `Previous findings from all earlier review rounds (verify each):\n${render(rounds)}`];
+  if (rounds.length === 1) {
+    return [PLAN_REVIEW_VERIFY_LINE, `Previous findings from all earlier review rounds (verify each):\n${render(rounds)}`];
+  }
+  const { rounds: scoped, fixedLine = "" } = scopeReviewRounds(rounds);
+  const fixedLen = fixedLine ? fixedLine.length + 2 : 0;
+  const rendered = render(scoped, fixedLen);
+  const body = [fixedLine, rendered].filter(Boolean).join("\n\n");
+  return [PLAN_REVIEW_VERIFY_LINE, `Previous findings from all earlier review rounds (verify each):\n${body}`];
 }
 
 // The confirmation round's reviewer brief: a fresh exhaustive full review with
 // NO previous findings listed. Never call planReviewerRoundLines() for it, or
 // it would become another scoped verification round.
-export function planReviewerConfirmationLines() {
-  return [PLAN_REVIEW_CONFIRMATION_LINE];
+export function planReviewerConfirmationLines(isContinuation = false, taskSizeLine = null) {
+  const lines = [isContinuation ? PLAN_REVIEW_CONFIRMATION_CONTINUATION_LINE : PLAN_REVIEW_CONFIRMATION_LINE];
+  if (taskSizeLine && typeof taskSizeLine === "string") lines.push(taskSizeLine);
+  return lines;
 }
 
 // Planner revision brief: findings of all rounds BEFORE the latest (the latest
@@ -325,6 +394,157 @@ export function demoteLowSeverityFindings(review) {
       kept.push(f);
     }
   }
+  const next = { ...review, findings: kept };
+  if (movedList.length > 0) {
+    const existingNotes = Array.isArray(review.notes) ? review.notes : [];
+    next.notes = [...existingNotes, ...movedList];
+  } else if (Array.isArray(review.notes)) {
+    next.notes = [...review.notes];
+  }
+  if (next.decision === "FAIL" && kept.length === 0 && movedList.length > 0) {
+    next.decision = "PASS";
+  }
+  return { review: next, moved: movedList.length };
+}
+
+// Backlog #8: parse task blocks from tasks.md into taskId -> hash map.
+// A task block runs from its task line until the next task line or heading.
+export function parseTaskBlocks(tasksText) {
+  if (typeof tasksText !== "string") return {};
+  const lines = tasksText.split(/\r?\n/);
+  const hashes = {};
+  let currentTaskId = null;
+  let currentBlockLines = [];
+  let inFence = false;
+
+  function commit() {
+    if (currentTaskId && currentBlockLines.length) {
+      const blockText = currentBlockLines.join("\n").replace(/\r\n/g, "\n").trim();
+      const hash = crypto.createHash("sha256").update(blockText).digest("hex").slice(0, 16);
+      hashes[currentTaskId] = hash;
+    }
+    currentTaskId = null;
+    currentBlockLines = [];
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      if (currentTaskId) currentBlockLines.push(line);
+      continue;
+    }
+    if (inFence) {
+      if (currentTaskId) currentBlockLines.push(line);
+      continue;
+    }
+    if (/^\s*#{1,6}\s+/.test(line)) {
+      commit();
+      continue;
+    }
+    const m = line.match(/^\s*-\s*\[\s*[xX ]?\s*\]\s+(.*)$/);
+    if (m) {
+      commit();
+      const rest = m[1].trim();
+      const idMatch = rest.match(/^(?:(T\d+(?:\.[a-zA-Z0-9]+)?|\*{0,2}\d+\.\d+\*{0,2}|T\d+[a-zA-Z0-9_.-]*))\b/i);
+      if (idMatch) {
+        currentTaskId = idMatch[1].replace(/^\*{0,2}|\*{0,2}$/g, "");
+      }
+      currentBlockLines = [line];
+      continue;
+    }
+    if (currentTaskId) {
+      currentBlockLines.push(line);
+    }
+  }
+  commit();
+  return hashes;
+}
+
+
+// Backlog #8: tasks in newHashes that are absent or changed compared to oldHashes.
+export function changedTaskIds(oldHashes = {}, newHashes = {}) {
+  const old = oldHashes && typeof oldHashes === "object" ? oldHashes : {};
+  const curr = newHashes && typeof newHashes === "object" ? newHashes : {};
+  const changed = [];
+  for (const id of Object.keys(curr)) {
+    if (!Object.prototype.hasOwnProperty.call(old, id) || old[id] !== curr[id]) {
+      changed.push(id);
+    }
+  }
+  return changed;
+}
+
+// Backlog #8: confirmation line text scoping task-size review to changed tasks.
+export function taskSizeConfirmationLine(changedIds) {
+  const idsList = Array.isArray(changedIds) && changedIds.length > 0
+    ? changedIds.join(", ")
+    : "none";
+  return `Task-size rule in this confirmation review: raise a [RULE: task size] finding only for tasks changed since the last full review: ${idsList}. Put a size concern about any other task in notes.`;
+}
+
+// Extract cited task IDs: from object "tasks" array if present, else Tn ids from text.
+export function extractCitedTaskIds(f) {
+  if (f && typeof f === "object" && Array.isArray(f.tasks) && f.tasks.length > 0) {
+    return f.tasks.map(id => String(id).trim()).filter(Boolean);
+  }
+  let text = "";
+  if (typeof f === "string") {
+    text = f;
+  } else if (f && typeof f === "object") {
+    const p = typeof f.problem === "string" ? f.problem.trim() : (f.problem != null ? String(f.problem).trim() : "");
+    const loc = typeof f.location === "string" ? f.location.trim() : (f.location != null ? String(f.location).trim() : "");
+    text = p || loc;
+  }
+  const matches = String(text).match(/\bT\d+(?:\.[a-zA-Z0-9]+)?\b/gi);
+  return matches ? [...matches] : [];
+}
+
+// Backlog #8: demote [RULE: task size] findings to notes if all cited IDs are unchanged.
+export function demoteUnchangedTaskSizeFindings(review, changedIds) {
+  if (!review || typeof review !== "object" || !Array.isArray(review.findings)) {
+    return { review, moved: 0 };
+  }
+  const changedNormSet = new Set((Array.isArray(changedIds) ? changedIds : []).map(id => String(id).trim().toUpperCase()));
+  const kept = [];
+  const movedList = [];
+
+  for (const f of review.findings) {
+    let text = "";
+    if (typeof f === "string") {
+      text = f;
+    } else if (f && typeof f === "object") {
+      const p = typeof f.problem === "string" ? f.problem.trim() : (f.problem != null ? String(f.problem).trim() : "");
+      const loc = typeof f.location === "string" ? f.location.trim() : (f.location != null ? String(f.location).trim() : "");
+      text = p || loc;
+    }
+    const trimmed = String(text).trim().toLowerCase();
+    const isSize = trimmed.startsWith("[rule: task size]") || trimmed.startsWith("[rule: task-size]");
+    if (!isSize) {
+      kept.push(f);
+      continue;
+    }
+    const cited = extractCitedTaskIds(f);
+    if (!cited.length) {
+      // Finding cites no id -> stays
+      kept.push(f);
+      continue;
+    }
+    const anyChanged = cited.some(id => {
+      const upper = String(id).trim().toUpperCase();
+      if (changedNormSet.has(upper)) return true;
+      if (upper.startsWith("T") && changedNormSet.has(upper.slice(1))) return true;
+      if (!upper.startsWith("T") && changedNormSet.has("T" + upper)) return true;
+      return false;
+    });
+
+    if (!anyChanged) {
+      movedList.push(f);
+    } else {
+      kept.push(f);
+    }
+  }
+
   const next = { ...review, findings: kept };
   if (movedList.length > 0) {
     const existingNotes = Array.isArray(review.notes) ? review.notes : [];

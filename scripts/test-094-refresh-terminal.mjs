@@ -34,7 +34,7 @@ check("refreshHook wraps refreshWatchReport",
 check("finalize path refreshes after finalizeRun",
   /finalizeRun\s*\([^;]*\);\s*refreshWatchReportTagged\s*\(\s*s\s*,\s*"finalize"\s*\)/.test(src));
 check("process.on('exit') hook refreshes the report",
-  /process\.on\s*\(\s*["']exit["']\s*,\s*\(\s*\)\s*=>\s*\{\s*if\s*\(\s*activeRelayState\s*\)\s*refreshWatchReport\s*\(\s*activeRelayState\s*\)/.test(src));
+  /process\.on\s*\(\s*["']exit["']\s*,\s*\(\s*\)\s*=>\s*\{\s*(?:shuttingDown\s*=\s*true\s*;\s*)?if\s*\(\s*activeRelayState\s*\)\s*refreshWatchReport\s*\(\s*activeRelayState\s*\)/.test(src));
 
 // ── Behavioral checks (fixture harness) ───────────────────────────────────
 // AUTOPILOT_TEST_REFRESH_TRACE=<file> makes the orchestrator append a tag per

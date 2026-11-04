@@ -57,7 +57,7 @@ export function taskSizingRuleText(target = TASK_SIZE_TARGET_TURNS_DEFAULT) {
 // Reviewer wording: FAIL the concrete size rule by counting changes/files in
 // the task line (no turn estimate needed), with a concrete split proposed.
 export function taskSizeReviewText(target = TASK_SIZE_TARGET_TURNS_DEFAULT) {
-  return `FAIL a task that breaks the concrete size rule: count the distinct changes and the files to edit named in the task line — more than 3 distinct changes or more than 2 files to edit (its test file excluded) is oversized, and the line must name the exact file path(s) it edits. Cite the task id and propose the concrete split into additional tasks. Do not FAIL a task whose line carries the annotation \`${TASK_SIZE_ANNOTATION} — <reason>\` (accept it). About ${target} implementer turns is only a background figure — never FAIL a task on a turn estimate alone, and never FAIL a small task for being small.`;
+  return `FAIL a task that breaks the concrete size rule: count the distinct changes and the files to edit named in the task line — more than 3 distinct changes or more than 2 files to edit (its test file excluded) is oversized, and the line must name the exact file path(s) it edits. Cite the task id and propose the concrete split into additional tasks. Do not FAIL a task whose line carries the annotation \`${TASK_SIZE_ANNOTATION} — <reason>\` (accept it). About ${target} implementer turns is only a background figure — never FAIL a task on a turn estimate alone, and never FAIL a small task for being small. Check the size of EVERY task in this one review and list every oversized task now; do not stop after the first few.`;
 }
 // Hard backstop for ONE role call (not a mission timeout): a call that runs
 // past this is killed and resumed/failed. 200 minutes leaves room for the
@@ -1310,7 +1310,7 @@ function decodeBashSegment(segment, repoRoot) {
       const p = fileFor(token);
       if (p) out.push(bashRead(p, null, null, true));
     }
-  } else if (command === "grep") {
+  } else if (command === "grep" || command === "rg") {
     let recursive = false;
     const positional = [];
     for (let i = 1; i < tokens.length; i += 1) {
@@ -1342,11 +1342,34 @@ export function decodeBashFileReads(command, repoRoot) {
   }
 }
 
+// Strip the outer /bin/bash -lc '...' or /bin/bash -c "..." wrapper Codex emits.
+function stripCodexBashWrapper(cmd) {
+  let s = String(cmd ?? "").trim();
+  const bashMatch = s.match(/^\/bin\/(?:ba)?sh\s+-[a-zA-Z]*c\s+/);
+  if (bashMatch) s = s.slice(bashMatch[0].length).trim();
+  if (s.startsWith('\\"') && s.endsWith('\\"')) {
+    s = s.slice(2, -2).trim();
+  } else if (s.startsWith("\\'") && s.endsWith("\\'")) {
+    s = s.slice(2, -2).trim();
+  } else if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
+}
+
+function getCodexFileChangePaths(item) {
+  if (Array.isArray(item?.changes)) {
+    return item.changes.map((c) => c?.path || c?.file || c?.file_path || c?.filePath).filter(Boolean);
+  }
+  const single = item?.path || item?.file || item?.file_path || item?.filePath;
+  return single ? [single] : [];
+}
+
 // Backlog #15 part 3b: the paths THIS session edited/wrote according to its
 // decoded edit/write tool calls (same adapter vocabulary as the digest).
 // Used to keep the fallback note's changes section session-only. Pure.
 export function sessionEditPaths(adapterId, events, repoRoot = "") {
-  if (adapterId !== "opencode" && adapterId !== "claude" && adapterId !== "antigravity" && adapterId !== "agy") return [];
+  if (adapterId !== "opencode" && adapterId !== "claude" && adapterId !== "antigravity" && adapterId !== "agy" && adapterId !== "codex") return [];
   const prefixes = repoPrefixes(repoRoot);
   const rel = (raw) => digestPath(raw, prefixes);
   const out = [];
@@ -1390,13 +1413,21 @@ export function sessionEditPaths(adapterId, events, repoRoot = "") {
       if (AGY_WRITE_TOOLS.has(toolName)) {
         note(toolTarget(info));
       }
+    } else if (adapterId === "codex") {
+      if (event?.type === "item.completed") {
+        const item = event?.item || event;
+        const itemType = String(item?.type || "");
+        if (itemType === "file_change" || itemType === "patch") {
+          for (const p of getCodexFileChangePaths(item)) note(p);
+        }
+      }
     }
   }
   return out;
 }
 
 export function sessionWorkDigest(adapterId, events, {maxChars = HANDOFF_MAX_CHARS_DEFAULT, repoRoot = ""} = {}) {
-  if (adapterId !== "opencode" && adapterId !== "claude" && adapterId !== "antigravity" && adapterId !== "agy") return "";
+  if (adapterId !== "opencode" && adapterId !== "claude" && adapterId !== "antigravity" && adapterId !== "agy" && adapterId !== "codex") return "";
   const prefixes = repoPrefixes(repoRoot);
   const root = String(repoRoot ?? "");
   const rel = (raw) => digestPath(raw, prefixes);
@@ -1561,6 +1592,23 @@ export function sessionWorkDigest(adapterId, events, {maxChars = HANDOFF_MAX_CHA
         }
         continue;
       }
+    } else if (adapterId === "codex") {
+      if (event?.type === "item.completed") {
+        const item = event?.item || event;
+        const itemType = String(item?.type || "");
+        if (itemType === "agent_message" && typeof item.text === "string" && item.text.trim()) {
+          lastText = item.text;
+        } else if (itemType === "command_execution") {
+          const rawCmd = item.command ?? item.input ?? "";
+          const innerCmd = stripCodexBashWrapper(rawCmd);
+          const exit = item.exit_code != null && Number.isFinite(Number(item.exit_code)) ? Number(item.exit_code) : null;
+          const status = exit !== null ? (exit === 0 ? "ok" : "failed") : (item.status === "failed" ? "failed" : item.status === "completed" ? "ok" : "");
+          noteCommand(innerCmd, status);
+          for (const read of decodeBashFileReads(innerCmd, root)) noteDecodedRead(read);
+        } else if (itemType === "file_change" || itemType === "patch") {
+          for (const p of getCodexFileChangePaths(item)) noteEdit(p);
+        }
+      }
     }
   }
 
@@ -1702,17 +1750,26 @@ function cutContextLastText(adapterId, events) {
         const txt = typeof step.response === "string" ? step.response : (typeof step.text === "string" ? step.text : (typeof step.text_delta === "string" ? step.text_delta : ""));
         if (txt.trim()) last = txt;
       }
+    } else if (adapterId === "codex") {
+      if (event?.type === "item.completed") {
+        const item = event?.item || event;
+        const itemType = String(item?.type || "");
+        if (itemType === "agent_message" && typeof item.text === "string" && item.text.trim()) {
+          last = item.text;
+        }
+      }
     }
   }
   return last;
 }
 
-function cutContextReads(adapterId, events, prefixes, repoRoot = "") {
+export function cutContextReads(adapterId, events, prefixes = [], repoRoot = "") {
+  const pfx = Array.isArray(prefixes) && prefixes.length ? prefixes : repoPrefixes(repoRoot);
   const out = [];
   const list = Array.isArray(events) ? events : [];
   const pushBash = (command) => {
     for (const read of decodeBashFileReads(command, repoRoot)) {
-      const p = digestPath(read.path, prefixes);
+      const p = digestPath(read.path, pfx);
       if (!p) continue;
       out.push({path: p, wholeFile: read.wholeFile === true,
         range: Number.isInteger(read.from) && Number.isInteger(read.to) ? [read.from, read.to] : null});
@@ -1774,6 +1831,16 @@ function cutContextReads(adapterId, events, prefixes, repoRoot = "") {
           range = digestRange(params.offset, params.limit);
         }
         out.push({path: p, wholeFile: range === null, range});
+      }
+    } else if (adapterId === "codex") {
+      if (event?.type === "item.completed") {
+        const item = event?.item || event;
+        const itemType = String(item?.type || "");
+        if (itemType === "command_execution") {
+          const rawCmd = item.command ?? item.input ?? "";
+          const innerCmd = stripCodexBashWrapper(rawCmd);
+          pushBash(innerCmd);
+        }
       }
     }
   }
@@ -2038,7 +2105,7 @@ export function buildOrchestratorFallbackNote(taskRef, events, adapterId, repoRo
   if (Array.isArray(sessionPaths)) {
     const sessionClean = sessionPaths.map((p) => String(p ?? "")).filter(Boolean);
     let editPaths = [];
-    if (adapterId === "opencode" || adapterId === "claude" || adapterId === "antigravity" || adapterId === "agy") {
+    if (adapterId === "opencode" || adapterId === "claude" || adapterId === "antigravity" || adapterId === "agy" || adapterId === "codex") {
       try { editPaths = sessionEditPaths(adapterId, events, String(repoRoot ?? "")); } catch { editPaths = []; }
     }
     if (sessionClean.length === 0) {
@@ -2055,7 +2122,7 @@ export function buildOrchestratorFallbackNote(taskRef, events, adapterId, repoRo
       const extra = editPaths.filter((p) => !sessionSet.has(norm(p))).map((p) => `${p} (edited — not tracked by git)`);
       diffBody = [...baseLines, ...extra].join("\n");
     }
-  } else if (adapterId === "opencode" || adapterId === "claude" || adapterId === "antigravity" || adapterId === "agy") {
+  } else if (adapterId === "opencode" || adapterId === "claude" || adapterId === "antigravity" || adapterId === "agy" || adapterId === "codex") {
     let changedPaths = [];
     try { changedPaths = sessionEditPaths(adapterId, events, String(repoRoot ?? "")); } catch { changedPaths = []; }
     if (changedPaths.length === 0) diffBody = "This session changed no files.";

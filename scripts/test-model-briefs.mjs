@@ -15,17 +15,23 @@ function check(name, condition, detail) {
 
 const RULE_1 = "1. Put all independent tool calls in ONE response (e.g. read_file a + read_file b + grep -n -e X -e Y files).";
 const RULE_4 = "4. No web search, no task-management tools.";
-const PLANNER_5 = "5. Edit as you go, as soon as you know the change; never save edits for the end.";
-const PLANNER_8 = "8. If the work is bigger than your turns: do what fits, write in the hand-off note exactly what is done and what is left (file:line), then end your turn.";
-const IMPLEMENTER_5 = "5. Edit as you go; run the task's tests once after the edits and fix what fails.";
-const IMPLEMENTER_7 = "7. If the work is bigger than your turns: hand-off note with done / left (file:line), then end your turn.";
+const RULE_5 = "5. Gather before you act: read every cited location and run every lookup you need in 1-2 responses (one grep -n -e A -e B for several IDs), not one per response.";
+const RULE_6 = "6. Do not re-read lines you already read in this session unless they changed (you edited them) or you need lines outside what you read; then read only the missing or changed part.";
+const RULE_7 = "7. Search with grep -n or rg, not git grep: new files are not tracked by git yet, so git grep misses them.";
+const BATCH_EDIT_RULE = "9. Make independent edits together in ONE response when they touch different places (different files or non-overlapping lines). An edit that depends on, or overlaps, an earlier edit goes in the next response.";
+const PLANNER_8 = "8. Edit as you go, as soon as you know the change; never save edits for the end.";
+const PLANNER_10 = "10. After editing, do not run git status/log/diff and do not re-read what you just edited only to double-check, and do not write checker scripts.";
+const PLANNER_12 = "12. If the work is bigger than your turns: do what fits, write in the hand-off note exactly what is done and what is left (file:line), then end your turn.";
+const IMPLEMENTER_8 = "8. Edit as you go; run the task's tests once after the edits and fix what fails.";
+const IMPLEMENTER_10 = "10. Do not run git status/log/diff or re-read files only to double-check, and do not write checker scripts.";
+const IMPLEMENTER_11 = "11. If the work is bigger than your turns: hand-off note with done / left (file:line), then end your turn.";
 
-// 1. Gemini planner on antigravity -> has rules 1-8 lines
+// 1. Gemini planner on antigravity -> has rules 1-12 lines (header + rules 1-7 + planner 8-12)
 const agyPlannerLines = modelBriefLines({ model: "gemini-2.5-pro", roleName: "planner" });
 check(
-  "gemini planner on antigravity has 9 total lines (header + rules 1-8)",
-  agyPlannerLines.length === 9,
-  agyPlannerLines
+  "gemini planner on antigravity has 13 total lines (header + rules 1-12)",
+  agyPlannerLines.length === 13,
+  agyPlannerLines.length
 );
 check(
   "gemini planner on antigravity starts with Gemini working rules header",
@@ -43,8 +49,18 @@ check(
   agyPlannerLines
 );
 check(
-  "gemini planner on antigravity contains planner rule 5",
-  agyPlannerLines.includes(PLANNER_5),
+  "gemini planner on antigravity contains rule 5",
+  agyPlannerLines.includes(RULE_5),
+  agyPlannerLines
+);
+check(
+  "gemini planner on antigravity contains rule 6",
+  agyPlannerLines.includes(RULE_6),
+  agyPlannerLines
+);
+check(
+  "gemini planner on antigravity contains rule 7",
+  agyPlannerLines.includes(RULE_7),
   agyPlannerLines
 );
 check(
@@ -53,17 +69,32 @@ check(
   agyPlannerLines
 );
 check(
-  "gemini planner on antigravity does not contain implementer rule 5",
-  !agyPlannerLines.includes(IMPLEMENTER_5),
+  "gemini planner on antigravity contains edit-batching rule 9",
+  agyPlannerLines.includes(BATCH_EDIT_RULE),
+  agyPlannerLines
+);
+check(
+  "gemini planner on antigravity contains planner rule 10",
+  agyPlannerLines.includes(PLANNER_10),
+  agyPlannerLines
+);
+check(
+  "gemini planner on antigravity contains planner rule 12",
+  agyPlannerLines.includes(PLANNER_12),
+  agyPlannerLines
+);
+check(
+  "gemini planner on antigravity does not contain implementer rule 8",
+  !agyPlannerLines.includes(IMPLEMENTER_8),
   agyPlannerLines
 );
 
-// 2. Gemini implementer -> rules 1-4 + implementer 5-7, not planner 5-8
+// 2. Gemini implementer -> rules 1-7 + implementer 8-11, not planner 8-12
 const agyImplementerLines = modelBriefLines({ model: "gemini-2.5-flash", roleName: "implementer" });
 check(
-  "gemini implementer has 8 total lines (header + rules 1-4 + implementer 5-7)",
-  agyImplementerLines.length === 8,
-  agyImplementerLines
+  "gemini implementer has 12 total lines (header + rules 1-7 + implementer 8-11)",
+  agyImplementerLines.length === 12,
+  agyImplementerLines.length
 );
 check(
   "gemini implementer contains rule 1",
@@ -76,18 +107,38 @@ check(
   agyImplementerLines
 );
 check(
-  "gemini implementer contains implementer rule 5",
-  agyImplementerLines.includes(IMPLEMENTER_5),
+  "gemini implementer contains rule 5",
+  agyImplementerLines.includes(RULE_5),
   agyImplementerLines
 );
 check(
-  "gemini implementer contains implementer rule 7",
-  agyImplementerLines.includes(IMPLEMENTER_7),
+  "gemini implementer contains rule 6",
+  agyImplementerLines.includes(RULE_6),
   agyImplementerLines
 );
 check(
-  "gemini implementer does not contain planner rule 5",
-  !agyImplementerLines.includes(PLANNER_5),
+  "gemini implementer contains rule 7",
+  agyImplementerLines.includes(RULE_7),
+  agyImplementerLines
+);
+check(
+  "gemini implementer contains implementer rule 8",
+  agyImplementerLines.includes(IMPLEMENTER_8),
+  agyImplementerLines
+);
+check(
+  "gemini implementer contains edit-batching rule 9",
+  agyImplementerLines.includes(BATCH_EDIT_RULE),
+  agyImplementerLines
+);
+check(
+  "gemini implementer contains implementer rule 10",
+  agyImplementerLines.includes(IMPLEMENTER_10),
+  agyImplementerLines
+);
+check(
+  "gemini implementer contains implementer rule 11",
+  agyImplementerLines.includes(IMPLEMENTER_11),
   agyImplementerLines
 );
 check(
@@ -95,14 +146,19 @@ check(
   !agyImplementerLines.includes(PLANNER_8),
   agyImplementerLines
 );
+check(
+  "gemini implementer does not contain planner rule 12",
+  !agyImplementerLines.includes(PLANNER_12),
+  agyImplementerLines
+);
 
-// 3. Gemini plan_reviewer / code_reviewer / verifier -> only rules 1-4
+// 3. Gemini plan_reviewer / code_reviewer / verifier -> only rules 1-7, no edit-batching line
 for (const reviewerRole of ["plan_reviewer", "code_reviewer", "verifier"]) {
   const reviewLines = modelBriefLines({ model: "gemini-2.5-pro", roleName: reviewerRole });
   check(
-    `gemini ${reviewerRole} has exactly 5 lines (header + rules 1-4)`,
-    reviewLines.length === 5,
-    reviewLines
+    `gemini ${reviewerRole} has exactly 8 lines (header + rules 1-7)`,
+    reviewLines.length === 8,
+    reviewLines.length
   );
   check(
     `gemini ${reviewerRole} contains rule 1`,
@@ -115,13 +171,33 @@ for (const reviewerRole of ["plan_reviewer", "code_reviewer", "verifier"]) {
     reviewLines
   );
   check(
-    `gemini ${reviewerRole} does not contain planner rule 5`,
-    !reviewLines.includes(PLANNER_5),
+    `gemini ${reviewerRole} contains rule 5`,
+    reviewLines.includes(RULE_5),
     reviewLines
   );
   check(
-    `gemini ${reviewerRole} does not contain implementer rule 5`,
-    !reviewLines.includes(IMPLEMENTER_5),
+    `gemini ${reviewerRole} contains rule 6`,
+    reviewLines.includes(RULE_6),
+    reviewLines
+  );
+  check(
+    `gemini ${reviewerRole} contains rule 7`,
+    reviewLines.includes(RULE_7),
+    reviewLines
+  );
+  check(
+    `gemini ${reviewerRole} does not contain edit-batching rule`,
+    !reviewLines.includes(BATCH_EDIT_RULE),
+    reviewLines
+  );
+  check(
+    `gemini ${reviewerRole} does not contain planner rule 8`,
+    !reviewLines.includes(PLANNER_8),
+    reviewLines
+  );
+  check(
+    `gemini ${reviewerRole} does not contain implementer rule 8`,
+    !reviewLines.includes(IMPLEMENTER_8),
     reviewLines
   );
 }
@@ -129,21 +205,36 @@ for (const reviewerRole of ["plan_reviewer", "code_reviewer", "verifier"]) {
 // 4. Gemini model on opencode (e.g. "opencode/gemini-x") -> block present
 const opencodeGeminiLines = modelBriefLines({ model: "opencode/gemini-x", roleName: "planner" });
 check(
-  "gemini model on opencode has block present with 9 lines",
-  opencodeGeminiLines.length === 9,
-  opencodeGeminiLines
+  "gemini model on opencode has block present with 13 lines",
+  opencodeGeminiLines.length === 13,
+  opencodeGeminiLines.length
 );
 check(
   "gemini model on opencode includes rule 1",
   opencodeGeminiLines.includes(RULE_1),
   opencodeGeminiLines
 );
+check(
+  "gemini model on opencode includes rule 7",
+  opencodeGeminiLines.includes(RULE_7),
+  opencodeGeminiLines
+);
+check(
+  "gemini model on opencode includes edit-batching rule",
+  opencodeGeminiLines.includes(BATCH_EDIT_RULE),
+  opencodeGeminiLines
+);
 
 // Case insensitivity check (e.g. GEMINI-2.5-PRO)
 const upperGeminiLines = modelBriefLines({ model: "GEMINI-2.5-PRO", roleName: "implementer" });
 check(
-  "case-insensitive model match GEMINI-2.5-PRO has block present",
-  upperGeminiLines.length === 8,
+  "case-insensitive model match GEMINI-2.5-PRO has block present with 12 lines",
+  upperGeminiLines.length === 12,
+  upperGeminiLines.length
+);
+check(
+  "case-insensitive model match GEMINI-2.5-PRO includes edit-batching rule",
+  upperGeminiLines.includes(BATCH_EDIT_RULE),
   upperGeminiLines
 );
 
@@ -153,7 +244,7 @@ for (const nonGeminiModel of ["claude-3-7-sonnet", "codex", "deepseek-v3"]) {
   check(
     `${nonGeminiModel} planner produces no block (empty array)`,
     Array.isArray(noBlockLines) && noBlockLines.length === 0,
-    noBlockLines
+    noBlockLines.length
   );
 }
 

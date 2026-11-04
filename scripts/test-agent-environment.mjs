@@ -62,6 +62,30 @@ const safeEnv = {
   check("spawnEnv.HOME matches guardedEnv.HOME", result.spawnEnv.HOME === safeEnv.HOME);
   check("spawnEnv has no bridge proxy vars when gateway inactive",
     result.spawnEnv.HTTP_PROXY === undefined && result.spawnEnv.HTTPS_PROXY === undefined);
+  check("spawnEnv sets GIT_PAGER to cat", result.spawnEnv.GIT_PAGER === "cat", result.spawnEnv.GIT_PAGER);
+  check("spawnEnv sets PAGER to cat", result.spawnEnv.PAGER === "cat", result.spawnEnv.PAGER);
+}
+
+// ---- Adapter spawn env GIT_PAGER and PAGER checks ----
+{
+  for (const adapter of ["codex", "agy", "opencode", "claude", "gemini"]) {
+    const result = assembleAgentEnvironment({
+      guardedEnv: safeEnv,
+      envelope: null,
+      adapterRoleScratchExists: false,
+      gatewayActive: false,
+      adapter,
+    });
+    check(`native spawn env for ${adapter} has GIT_PAGER "cat"`,
+      result.spawnEnv.GIT_PAGER === "cat",
+      result.spawnEnv.GIT_PAGER);
+    check(`native spawn env for ${adapter} has PAGER "cat"`,
+      result.spawnEnv.PAGER === "cat",
+      result.spawnEnv.PAGER);
+    check(`native spawn env for ${adapter} preserves safeEnv variables without dropping any`,
+      result.spawnEnv.PATH === safeEnv.PATH && result.spawnEnv.HOME === safeEnv.HOME && result.spawnEnv.NODE_ENV === safeEnv.NODE_ENV,
+      result.spawnEnv);
+  }
 }
 
 // ---- 2. bridgeEnv invariants ----
@@ -346,6 +370,30 @@ const safeEnv = {
     withRewrite.spawnEnv.HOME === "/workspace/scratch/.autopilot-home");
   check("with envelope + host paths: PWD is /workspace/repository",
     withRewrite.spawnEnv.PWD === "/workspace/repository");
+  check("with envelope + host paths: GIT_PAGER is cat",
+    withRewrite.spawnEnv.GIT_PAGER === "cat",
+    withRewrite.spawnEnv.GIT_PAGER);
+  check("with envelope + host paths: PAGER is cat",
+    withRewrite.spawnEnv.PAGER === "cat",
+    withRewrite.spawnEnv.PAGER);
+
+  for (const adapter of ["codex", "agy", "opencode", "claude", "gemini"]) {
+    const enveloped = assembleAgentEnvironment({
+      guardedEnv: envWithHostPaths,
+      envelope: mockEnvelope,
+      repo: hostRepo,
+      scratchDir: hostScratch,
+      adapterRoleScratchExists: false,
+      gatewayActive: false,
+      adapter,
+    });
+    check(`enveloped spawn env for ${adapter} has GIT_PAGER "cat"`,
+      enveloped.spawnEnv.GIT_PAGER === "cat",
+      enveloped.spawnEnv.GIT_PAGER);
+    check(`enveloped spawn env for ${adapter} has PAGER "cat"`,
+      enveloped.spawnEnv.PAGER === "cat",
+      enveloped.spawnEnv.PAGER);
+  }
 }
 
 // ---- 16. --b2-core-env harness invocation (structural) ----

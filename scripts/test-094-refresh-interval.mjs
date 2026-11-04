@@ -35,7 +35,7 @@ check("watches refresh interval cleared in finally block",
   /finally\s*\{[^}]*if\s*\(\s*watchRefreshInterval\s*\)\s*\{[^}]*clearInterval\s*\(\s*wri\s*\)/.test(src));
 
 check("process.on('exit') hook installed for report refresh",
-  /process\.on\s*\(\s*["']exit["']\s*,\s*\(\s*\)\s*=>\s*\{\s*if\s*\(\s*activeRelayState\s*\)\s*refreshWatchReport\s*\(\s*activeRelayState\s*\)/.test(src));
+  /process\.on\s*\(\s*["']exit["']\s*,\s*\(\s*\)\s*=>\s*\{\s*(?:shuttingDown\s*=\s*true\s*;\s*)?if\s*\(\s*activeRelayState\s*\)\s*refreshWatchReport\s*\(\s*activeRelayState\s*\)/.test(src));
 
 check("only one process.on('exit') hook in full source",
   (src.match(/process\.on\s*\(\s*["']exit["']/g) || []).length === 1);
@@ -43,7 +43,7 @@ check("only one process.on('exit') hook in full source",
 // ── Test-interrupt-flush compatibility ────────────────────────────────────
 // The exact pattern from test-interrupt-flush.mjs:28-29
 check("exit hook matches test-interrupt-flush contract",
-  /process\.on\s*\(\s*["']exit["']\s*,\s*\(\s*\)\s*=>\s*\{\s*if\s*\(\s*activeRelayState\s*\)\s*refreshWatchReport\s*\(\s*activeRelayState\s*\)\s*;\s*\}\s*\)/.test(src));
+  /process\.on\s*\(\s*["']exit["']\s*,\s*\(\s*\)\s*=>\s*\{\s*(?:shuttingDown\s*=\s*true\s*;\s*)?if\s*\(\s*activeRelayState\s*\)\s*refreshWatchReport\s*\(\s*activeRelayState\s*\)\s*;\s*\}\s*\)/.test(src));
 
 // ── Additional source code checks ────────────────────────────────────────
 check("interval resolves live state with activeRelayState??loadState()",

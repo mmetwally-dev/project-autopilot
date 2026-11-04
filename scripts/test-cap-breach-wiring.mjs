@@ -709,7 +709,7 @@ check("031 P4.5: wrap-up note path stays the shared mission handoff path",
     /const runCappedReview=async\(prompt,opts=\{\}\)=>\{[\s\S]*?relay\("plan_reviewer"[\s\S]*?capEnabled:true,taskRef:planReviewerTaskRef/.test(speckitPart));
   check("backlog#1: SpecKit initial, confirmation, and re-review all route through runCappedReview",
     speckitPart.includes("rr=await runCappedReview(initialReviewPrompt)")
-    && speckitPart.includes("cr=await runCappedReview(confirmationPrompt,confirmationRelayOpts)")
+    && speckitPart.includes("cr=await runCappedReview(activeConfirmationPrompt,confirmationRelayOpts)")
     && speckitPart.includes("retry=deterministicRetry||await runCappedReview(reReviewPrompt)"));
   check("backlog#1: SpecKit gate reviewer handles capped + incomplete continuations",
     /if\(result\.capped\)\{[\s\S]{0,300}?handleCappedPlanningResult\(\{c,s,framework:"speckit",role:"plan_reviewer"/.test(speckitPart)

@@ -7,7 +7,7 @@ import { peekSummary } from "./watch-summary.mjs";
 import { defaultIsPidAlive } from "./run-recovery.mjs";
 import { growingTerm } from "./per-task-budget.mjs";
 import { readOwnerPid, ownerPidAlive } from "./owner-pid.mjs";
-import { buildReportModel, renderReport, formatStamp } from "./watch-report.mjs";
+import { buildReportModel, renderReport, formatStamp, readBriefExtras } from "./watch-report.mjs";
 import { detectUiProject } from "./e2e-detect.mjs";
 import { formatNotRunInMissions } from "./command-probe.mjs";
 import { phases as standalonePhases } from "../adapters/standalone.mjs";
@@ -178,7 +178,7 @@ export function readRunMeta(dir, id) {
   const parsed = parseRunDirName(id);
   const role = status?.role || result?.role || parsed?.role || null;
   const exitCode = status?.exit_code ?? result?.process?.exitCode ?? null;
-  const decision = status?.decision ?? result?.review?.decision ?? null;
+  const decision = status?.decision ?? result?.review?.decision ?? result?.verdict?.decision ?? null;
   const pid = status?.pid ?? null;
   const duration = status?.duration ?? null;
   // TASK-26: expose the measured run duration for deadline derivation.
@@ -203,6 +203,14 @@ export function readRunMeta(dir, id) {
   const failureClass = result?.failure?.class ?? status?.failureClass ?? null;
   const recordedError = failureReason ?? (failure?.message || null);
   const note = status?.note ?? result?.note ?? recordedError ?? null;
+
+  let gate = status?.gate ?? status?.planningGate ?? result?.gate ?? null;
+  let briefArtifacts = status?.briefArtifacts ?? result?.briefArtifacts ?? null;
+  if (gate == null || briefArtifacts == null) {
+    const brief = readBriefExtras(dir, { gate, briefArtifacts });
+    if (gate == null) gate = brief.gate;
+    if (briefArtifacts == null) briefArtifacts = brief.briefArtifacts;
+  }
 
   return {
     id: runId,
@@ -234,6 +242,8 @@ export function readRunMeta(dir, id) {
   // standalone spec-stage runs), recorded at launch.
   // Null for non-planning runs and for standalone PLAN/TASKS planning (`plan/tasks`).
   planningStage: status?.planningStage ?? result?.planningStage ?? null,
+  gate: gate ?? null,
+  briefArtifacts: briefArtifacts ?? null,
   attempt: status?.attempt ?? result?.attempt ?? null,
   note,
   failure,
@@ -404,13 +414,20 @@ export function modelCellText(run) {
 // "690K" final). "-" whenever usage was never recorded — never a
 // fabricated number.
 export function contextCellText(run) {
-  const usage = run.usage;
+  const usage = run?.usage;
   if (!usage || typeof usage !== "object") return "-";
   if (usage.maxSingleTurnContext === null) return "-";
-  const cacheRead = Number(usage.cacheRead);
-  const input = Number(usage.input);
-  if (!Number.isFinite(cacheRead) || !Number.isFinite(input)) return "-";
-  const value = cacheRead + input;
+  let value = null;
+  for (const key of ["peakContext", "maxSingleTurnContext"]) {
+    const n = Number(usage[key]);
+    if (Number.isFinite(n) && n > 0) { value = n; break; }
+  }
+  if (value == null) {
+    const cacheRead = Number(usage.cacheRead);
+    const input = Number(usage.input);
+    if (Number.isFinite(cacheRead) && Number.isFinite(input)) value = cacheRead + input;
+  }
+  if (value == null) return "-";
   const text = value >= 1000 ? `${(value / 1000).toFixed(1)}K` : String(Math.round(value));
   return run?.status === "running" ? `~${text}` : text;
 }

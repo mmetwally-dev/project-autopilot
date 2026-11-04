@@ -65,10 +65,78 @@ function attemptNumberOf(run) {
   return Number.isFinite(n) ? n : null;
 }
 
+export function artifactFilesFromFindings(raw) {
+  if (!raw) return null;
+  const list = Array.isArray(raw) ? raw : [raw];
+  if (!list.length) return null;
+  let hasSpec = false;
+  let hasPlan = false;
+  let hasTasks = false;
+  for (const item of list) {
+    if (!item) continue;
+    const loc = typeof item === "string"
+      ? item
+      : String(item.location ?? item.file ?? item.path ?? item.problem ?? item.text ?? "");
+    if (/\bspec\.md\b/i.test(loc) || /(?:^|[\/\\;,\s])specs?[/\\].*spec\.md\b/i.test(loc)) hasSpec = true;
+    if (/\bplan\.md\b/i.test(loc) || /(?:^|[\/\\;,\s])specs?[/\\].*plan\.md\b/i.test(loc)) hasPlan = true;
+    if (/\btasks?\.md\b/i.test(loc) || /(?:^|[\/\\;,\s])specs?[/\\].*tasks?\.md\b/i.test(loc)) hasTasks = true;
+    if (/^(?:spec|plan|tasks)(\/(?:spec|plan|tasks))*$/.test(loc)) {
+      if (loc.includes("spec")) hasSpec = true;
+      if (loc.includes("plan")) hasPlan = true;
+      if (loc.includes("tasks")) hasTasks = true;
+    }
+  }
+  const parts = [];
+  if (hasSpec) parts.push("spec");
+  if (hasPlan) parts.push("plan");
+  if (hasTasks) parts.push("tasks");
+  return parts.length ? parts.join("/") : null;
+}
+
+export function readBriefExtras(dir, { gate = null, briefArtifacts = null } = {}) {
+  let g = gate ?? null;
+  let artifacts = briefArtifacts ?? null;
+  if (!dir || typeof dir !== "string") return { gate: g, briefArtifacts: artifacts };
+  if (g !== null && artifacts !== null) return { gate: g, briefArtifacts: artifacts };
+  try {
+    const briefPath = path.join(dir, "brief.txt");
+    let fd = null;
+    try {
+      fd = fs.openSync(briefPath, "r");
+      const buf = Buffer.alloc(8192);
+      const bytesRead = fs.readSync(fd, buf, 0, 8192, 0);
+      if (bytesRead > 0) {
+        const briefHead = buf.toString("utf8", 0, bytesRead);
+        if (g == null) {
+          const m = briefHead.match(/SpecKit gate "([^"]+)"/i) || briefHead.match(/\bgate "([^"]+)"/i);
+          if (m) g = m[1].toLowerCase();
+          else if (/\breview-tasks\b/i.test(briefHead)) g = "review-tasks";
+          else if (/\breview-plan\b/i.test(briefHead)) g = "review-plan";
+          else if (/\breview-spec\b/i.test(briefHead)) g = "review-spec";
+        }
+        if (artifacts == null) {
+          const match = briefHead.match(/The plan reviewer REJECTED[^:]*:\s*([\s\S]+?)(?:\n\n|\n[A-Z]|$)/i);
+          if (match) {
+            artifacts = artifactFilesFromFindings(match[1]);
+          } else if (/\b(?:spec|plan|tasks)\.md\b/i.test(briefHead)) {
+            artifacts = artifactFilesFromFindings(briefHead);
+          }
+        }
+      }
+    } finally {
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch {}
+      }
+    }
+  } catch { /* missing/invalid brief.txt is fine */ }
+  return { gate: g, briefArtifacts: artifacts };
+}
+
 // A failed reviewer/verifier records its findings on result.json under
 // `review.findings` (falling back to a top-level `findings`).
-function readRunExtras(dir) {
+export function readRunExtras(dir) {
   const extras = {
+    decision: null,
     findings: [],
     notes: [],
     carriedForwardTasks: null,
@@ -84,6 +152,8 @@ function readRunExtras(dir) {
     snapshotAfterAt: null,
     planRevision: null,
     planningStage: null,
+    gate: null,
+    briefArtifacts: null,
     note: null,
     policyViolation: null,
     failureClass: null,
@@ -108,6 +178,9 @@ function readRunExtras(dir) {
       if (st.snapshotAfterAt !== undefined) extras.snapshotAfterAt = st.snapshotAfterAt;
       if (st.planRevision !== undefined) extras.planRevision = st.planRevision;
       if (st.planningStage !== undefined) extras.planningStage = st.planningStage;
+      if (st.gate !== undefined) extras.gate = st.gate;
+      if (st.planningGate !== undefined) extras.gate = st.planningGate;
+      if (st.decision !== undefined) extras.decision = st.decision;
       if (st.note !== undefined) extras.note = st.note;
       if (extras.note == null && st.failure_reason) extras.note = st.failure_reason;
       if (extras.note == null && st.error) extras.note = st.error;
@@ -122,7 +195,11 @@ function readRunExtras(dir) {
       if (extras.note == null && rs.failure?.reason) extras.note = rs.failure.reason;
       if (extras.note == null && rs.failure?.message) extras.note = rs.failure.message;
       if (extras.note == null && rs.error) extras.note = rs.error;
+      if (extras.decision == null && rs.decision !== undefined) extras.decision = rs.decision;
+      if (extras.decision == null && rs.review?.decision !== undefined) extras.decision = rs.review.decision;
+      if (extras.decision == null && rs.verdict?.decision !== undefined) extras.decision = rs.verdict.decision;
       if (extras.planningStage == null && rs.planningStage !== undefined) extras.planningStage = rs.planningStage;
+      if (extras.gate == null && rs.gate !== undefined) extras.gate = rs.gate;
       if (Array.isArray(rs.review?.findings) && rs.review.findings.length) extras.findings = rs.review.findings.map(String);
       else if (Array.isArray(rs.findings) && rs.findings.length) extras.findings = rs.findings.map(String);
       // A plan-review FAIL can record its findings only on verdict.findings
@@ -143,6 +220,9 @@ function readRunExtras(dir) {
       extras.escalated = rs.escalated === true || rs.missionEscalated === true;
     }
   } catch { /* missing/invalid result.json is fine */ }
+  const brief = readBriefExtras(dir, { gate: extras.gate, briefArtifacts: extras.briefArtifacts });
+  if (extras.gate == null) extras.gate = brief.gate;
+  if (extras.briefArtifacts == null) extras.briefArtifacts = brief.briefArtifacts;
   return extras;
 }
 
@@ -153,11 +233,11 @@ function readRunExtras(dir) {
 // dir. The dir is always read when known - gating on a single inline field
 // (e.g. `resolvedModel`) silently dropped those extras (backlog #4).
 const RUN_EXTRA_KEYS = [
-  "carriedForwardTasks", "sessionNumber", "resolvedModel", "configuredModel",
-  "modelMismatch", "reasoning", "variant", "snapshotBeforeStartedAt", "snapshotBeforeAt", "snapshotAfterStartedAt", "snapshotAfterAt", "planRevision", "planningStage", "note", "notes",
+  "decision", "carriedForwardTasks", "sessionNumber", "resolvedModel", "configuredModel",
+  "modelMismatch", "reasoning", "variant", "snapshotBeforeStartedAt", "snapshotBeforeAt", "snapshotAfterStartedAt", "snapshotAfterAt", "planRevision", "planningStage", "gate", "briefArtifacts", "note", "notes",
   "policyViolation", "failureClass", "escalated", "interrupted_at", "interruption_reason",
 ];
-function enrichRun(run) {
+export function enrichRun(run) {
   const enriched = { ...run };
   const inlineComplete = RUN_EXTRA_KEYS.every((key) => enriched[key] !== undefined);
   const extras = typeof run?.dir === "string" && (!inlineComplete || !Array.isArray(enriched.findings))
@@ -168,6 +248,9 @@ function enrichRun(run) {
     : (extras ? extras.findings : []);
   for (const key of RUN_EXTRA_KEYS) {
     if (enriched[key] === undefined) enriched[key] = extras ? extras[key] : null;
+  }
+  if (enriched.decision == null && extras?.decision != null) {
+    enriched.decision = extras.decision;
   }
   return enriched;
 }
@@ -206,6 +289,13 @@ export function normalizePhases(phases) {
 
 function isDecision(run, value) {
   return String(run?.decision || "").toUpperCase() === value;
+}
+
+function hasVerdictDecision(run) {
+  const d = String(run?.decision || "").trim().toUpperCase();
+  if (d === "PASS" || d === "FAIL" || d === "APPROVED" || d === "DENIED") return true;
+  if (!d && run?.status === "completed" && Array.isArray(run?.findings) && run.findings.length > 0) return true;
+  return false;
 }
 
 function isRunning(run) {
@@ -575,13 +665,29 @@ export function planningOnlyDone(state, runs = []) {
   const stopsAfterPlanning = cmd?.stopAfter === "planning" || cmd?.name === "plan";
   if (!stopsAfterPlanning) return false;
   const list = Array.isArray(runs) ? runs : [];
+  let latestPlanningStart = null;
+  for (const r of list) {
+    if (PLANNING_ROLES.has(roleOf(r))) {
+      const v = r?.started_at ?? r?.startedAt;
+      const t = typeof v === "number" && Number.isFinite(v) ? v : (Date.parse(v ?? "") || 0);
+      if (latestPlanningStart === null || t > latestPlanningStart) {
+        latestPlanningStart = t;
+      }
+    }
+  }
   return !list.some((r) => {
     const role = roleOf(r);
-    return role === "implementer" || role === "verifier" || role === "code_reviewer";
+    if (role !== "implementer" && role !== "verifier" && role !== "code_reviewer") return false;
+    if (latestPlanningStart !== null) {
+      const v = r?.started_at ?? r?.startedAt;
+      const t = typeof v === "number" && Number.isFinite(v) ? v : (Date.parse(v ?? "") || 0);
+      if (t < latestPlanningStart) return false;
+    }
+    return true;
   });
 }
 
-function classifyStage(state, planning, phases, finalReview, runs = []) {
+export function classifyStage(state, planning, phases, finalReview, runs = []) {
   const statePhase = typeof state?.phase === "string" ? state.phase : "";
   const stateStep = typeof state?.step === "string" ? state.step : "";
   // The recorded state wins when it names a stage: a report rendered after a
@@ -1984,7 +2090,7 @@ function slowSnapshotNote(run) {
 // plan_reviewer always adds its findings count and minor notes; a FAILED/KILLED/
 // INTERRUPTED run also carries its failure reason (backlog #29); slow snapshots
 // (>= 10s) are noted.
-function planningNote(run, model) {
+export function planningNote(run, model) {
   const parts = [];
   const noteText = (run && typeof run.note === "string" && run.note)
     ? run.note
@@ -1993,8 +2099,10 @@ function planningNote(run, model) {
     parts.push(noteText);
   }
   if (roleOf(run) === "plan_reviewer") {
-    const n = Array.isArray(run.findings) ? run.findings.length : 0;
-    parts.push(`${n} finding${n === 1 ? "" : "s"}`);
+    if (hasVerdictDecision(run)) {
+      const n = Array.isArray(run.findings) ? run.findings.length : 0;
+      parts.push(`${n} finding${n === 1 ? "" : "s"}`);
+    }
     const notes = Array.isArray(run.notes) ? run.notes.length : 0;
     if (notes) parts.push(`notes: ${notes} minor`);
   }
@@ -2044,6 +2152,9 @@ function reportColumnWidths(rows) {
     ...rows.map((row) => String(c.cell(row) ?? "").length),
   ));
   widths[0] = Math.max(widths[0], longestRunName());
+  if (rows.some((r) => PLANNING_ROLES.has(roleOf(r)))) {
+    widths[2] = Math.max(widths[2], "spec/plan/tasks".length);
+  }
   widths[3] = Math.max(widths[3], ...REPORT_STATUS_WORDS.map((word) => word.length));
   return widths;
 }
@@ -2093,7 +2204,99 @@ function planningStageLabel(run) {
     .replace(/-review-failed$/, "");
   return PLANNING_STAGE_LABELS[key] ?? key;
 }
-function planningTaskLabel(run) {
+function reviewerGateName(run) {
+  const candidates = [
+    run?.gate,
+    run?.planningGate,
+    run?.planningStage,
+    run?.stage,
+    run?.planningStep,
+    run?.step,
+    run?.task,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) {
+      const norm = c.trim().toLowerCase()
+        .replace(/^(?:speckit|gsd)-/, "")
+        .replace(/-revision-\d+$/, "")
+        .replace(/-review-failed$/, "");
+      if (norm === "review-tasks" || norm.includes("review-tasks") || norm === "tasks") return "review-tasks";
+      if (norm === "review-plan" || norm.includes("review-plan") || norm === "plan") return "review-plan";
+      if (norm === "review-spec" || norm.includes("review-spec") || norm === "spec") return "review-spec";
+    }
+  }
+  if (typeof run?.gate === "string" && run.gate.trim()) {
+    const g = run.gate.trim().toLowerCase();
+    if (g === "tasks") return "review-tasks";
+    if (g === "plan") return "review-plan";
+    if (g === "spec") return "review-spec";
+    return g;
+  }
+  return null;
+}
+
+function plannerFindingsForRevision(run, model) {
+  if (run?.planRevision === 0 && (!Array.isArray(run?.findings) || !run.findings.length)) {
+    return null;
+  }
+  if (Array.isArray(run?.findings) && run.findings.length) return run.findings;
+  if (Array.isArray(run?.reviewFeedback) && run.reviewFeedback.length) return run.reviewFeedback;
+  if (Array.isArray(run?.review?.findings) && run.review.findings.length) return run.review.findings;
+
+  const stage = planningStageLabel(run);
+  const stateFeedback = model?.state?.reviewFeedback ?? run?.state?.reviewFeedback;
+  if (stateFeedback && typeof stateFeedback === "object") {
+    const candidateKeys = [
+      stage ? `speckit-stage:${stage}` : null,
+      stage === "spec" ? "speckit-stage:specify" : null,
+      stage,
+      "standalone-plan",
+    ].filter(Boolean);
+    for (const key of candidateKeys) {
+      const slot = stateFeedback[key];
+      const findings = slot?.findings ?? (Array.isArray(slot) ? slot : null);
+      if (Array.isArray(findings) && findings.length) return findings;
+    }
+  }
+
+  const runs = model?.runs ?? model?.planning?.runs ?? [];
+  const idx = runs.indexOf(run);
+  if (idx > 0) {
+    for (let i = idx - 1; i >= 0; i--) {
+      const prev = runs[i];
+      if (roleOf(prev) === "plan_reviewer" && Array.isArray(prev.findings) && prev.findings.length) {
+        return prev.findings;
+      }
+      if (roleOf(prev) === "planner") break;
+    }
+  }
+
+  if (typeof run?.briefArtifacts === "string" && run.briefArtifacts) {
+    return [run.briefArtifacts];
+  }
+  return null;
+}
+
+function planningTaskLabel(run, model = null) {
+  const role = roleOf(run);
+  if (role === "plan_reviewer") {
+    const gate = reviewerGateName(run);
+    if (gate === "review-tasks") return "spec/plan/tasks";
+    if (gate === "review-plan") return "plan";
+    if (gate === "review-spec") return "spec";
+    return planningStageLabel(run) ?? "plan/tasks";
+  }
+  if (role === "planner") {
+    if (typeof run?.briefArtifacts === "string" && run.briefArtifacts) {
+      return run.briefArtifacts;
+    }
+    const findings = plannerFindingsForRevision(run, model);
+    if (findings) {
+      const files = artifactFilesFromFindings(findings);
+      if (files) return files;
+    }
+    return planningStageLabel(run) ?? "plan/tasks";
+  }
   return planningStageLabel(run) ?? "plan/tasks";
 }
 
@@ -2104,7 +2307,7 @@ function planningRow(run, model, tracker = null) {
     running: isRunning(run),
     role: roleCell(run),
     model: run?.displayModel ?? modelDisplay(run),
-    task: planningTaskLabel(run),
+    task: planningTaskLabel(run, model),
     status: runStatusCell(run),
     duration: durationCell(run, model?.now ?? null),
     snapshot: snapshotCell(run),
@@ -2815,17 +3018,19 @@ function retryText(run, model) {
 // finding count, the recorded note, the `session k of N` scope, the failure
 // reason (backlog #29), the high-usage ⚠ (rule 15), provider-trouble ⚠ (rule 11)
 // and slow snapshots (>= 10s).
-function implementationNote(run, model, noteHint = null) {
+export function implementationNote(run, model, noteHint = null) {
   const parts = [];
   const role = roleOf(run);
   const findingsCount = Array.isArray(run?.findings) ? run.findings.length : 0;
   if (noteHint === "final review") {
     parts.push("final review");
-    parts.push(`${findingsCount} finding${findingsCount === 1 ? "" : "s"}`);
+    if (hasVerdictDecision(run)) {
+      parts.push(`${findingsCount} finding${findingsCount === 1 ? "" : "s"}`);
+    }
   } else {
     if (role === "code_reviewer") parts.push("phase review");
     else if (role === "verifier") parts.push("phase verify");
-    if (findingsCount > 0) parts.push(`${findingsCount} finding${findingsCount === 1 ? "" : "s"}`);
+    if (hasVerdictDecision(run) && findingsCount > 0) parts.push(`${findingsCount} finding${findingsCount === 1 ? "" : "s"}`);
   }
   const notesCount = Array.isArray(run?.notes) ? run.notes.length : 0;
   if (notesCount > 0) parts.push(`notes: ${notesCount} minor`);
@@ -3365,7 +3570,7 @@ export function renderCurrentRun(model) {
   const usageParts = [];
   const price = priceCell(current);
   if (price && price !== "-") usageParts.push(`${price} tokens`);
-  const cap = capForRole(model, current.role);
+  const cap = capForRole(model, current.role) ?? (Number.isFinite(Number(current?.usage?.contextWindow)) ? Number(current.usage.contextWindow) : null);
   const context = contextCell(current);
   if (context && context !== "-") usageParts.push(`context ${context}${cap ? ` of ${formatTokens(cap)} cap` : ""}`);
   const turns = turnsCell(current);

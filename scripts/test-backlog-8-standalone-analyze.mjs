@@ -105,7 +105,7 @@ function check(name, condition, detail) {
   );
 
   // reviewPrompt computes reviewRoundLines once
-  const computesRoundLines = autopilotSrc.includes("const reviewRoundLines=planReviewerRoundLines(s,STANDALONE_PLAN_FEEDBACK_KEY,c.workflow?.plan_review_convergence!==false);");
+  const computesRoundLines = autopilotSrc.includes("const reviewRoundLines=planReviewerRoundLines(s,STANDALONE_PLAN_FEEDBACK_KEY,c.workflow?.plan_review_convergence!==false,standaloneTaskSizeLine);");
   check(
     "wiring: scripts/autopilot.mjs computes reviewRoundLines before reviewPrompt",
     computesRoundLines,

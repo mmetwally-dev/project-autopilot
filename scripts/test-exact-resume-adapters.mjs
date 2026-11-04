@@ -313,7 +313,7 @@ function runAdapterScenario(adapterName, binaryName, source) {
         check(`codex implementer attempt #${i + 1}: no "resume" token anywhere in its args (exact resume unsupported under --ephemeral)`,
           !a.includes("resume"), a);
         check(`codex implementer attempt #${i + 1}: no "--continue" (resume-last fallback) either`, !a.includes("--continue"), a);
-        check(`codex implementer attempt #${i + 1}: still carries --ephemeral (never removed)`, a.includes("--ephemeral"), a);
+        check(`codex implementer attempt #${i + 1}: no longer carries --ephemeral`, !a.includes("--ephemeral"), a);
       }
       // Every attempt is a fresh exec invocation: base args identical modulo
       // no resume flags ever appended, proving "start fresh" rather than a

@@ -873,7 +873,7 @@ function versionOf(binary) {
 }
 
 function codexInvocation(request) {
-  const args = ["exec", "--json", "--ephemeral", "--color", "never", "--skip-git-repo-check"];
+  const args = ["exec", "--json", "--color", "never", "--skip-git-repo-check"];
   args.push("--sandbox", ["write", "scratch"].includes(request.mode) ? "workspace-write" : "read-only");
   args.push("--cd", request.cwd);
   if (request.scratchDir) args.push("--add-dir", request.scratchDir);
@@ -1096,11 +1096,11 @@ export function sessionIdFromEvents(events) {
 // changes.
 export const USAGE_PRICE_WEIGHTS = Object.freeze({input: 1, cacheCreation: 1.25, cacheRead: 0.1, output: 5});
 
-function priceWeightedUsage({input, cacheCreation, cacheRead, output}) {
-  return input * USAGE_PRICE_WEIGHTS.input
-    + cacheCreation * USAGE_PRICE_WEIGHTS.cacheCreation
-    + cacheRead * USAGE_PRICE_WEIGHTS.cacheRead
-    + output * USAGE_PRICE_WEIGHTS.output;
+export function priceWeightedUsage({input, cacheCreation = 0, cacheRead = 0, output = 0}) {
+  return (Number(input) || 0) * USAGE_PRICE_WEIGHTS.input
+    + (Number(cacheCreation) || 0) * USAGE_PRICE_WEIGHTS.cacheCreation
+    + (Number(cacheRead) || 0) * USAGE_PRICE_WEIGHTS.cacheRead
+    + (Number(output) || 0) * USAGE_PRICE_WEIGHTS.output;
 }
 
 // Per-invocation token-usage accumulation, keyed by adapter id since the raw

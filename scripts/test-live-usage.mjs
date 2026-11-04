@@ -130,7 +130,7 @@ check("cells: TURNS stays unprefixed while running",
   const autopilotSource = fs.readFileSync(path.join(skillRoot, "scripts", "autopilot.mjs"), "utf8");
   // Ungated declaration: `const usageDriver=adapterDriver(role.adapter<, extra args>)` with no ternary/gate.
   const usageDriverAt = autopilotSource.search(/const usageDriver=adapterDriver\(role\.adapter[,)]/);
-  const persistAt = autopilotSource.indexOf("if(updateRunUsage(dir,usage))");
+  const persistAt = autopilotSource.indexOf("if(updateRunUsage(dir,displayUsage))");
   const gateAt = autopilotSource.indexOf("if(!capDriver) return;");
   const breachAt = autopilotSource.indexOf("const breach=checkCapBreach({usage,");
   check("wiring: live totals use an un-gated usageDriver",

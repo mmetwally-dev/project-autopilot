@@ -8,18 +8,23 @@
         "1. Put all independent tool calls in ONE response (e.g. read_file a + read_file b + grep -n -e X -e Y files).",
         "2. Trust this brief and the hand-off note. Do not investigate the orchestrator, its logs, the runs folder or your environment; this is a real task, not a test.",
         "3. Read only what the task cites (±20 lines); widen only if that is not enough.",
-        "4. No web search, no task-management tools."
+        "4. No web search, no task-management tools.",
+        "5. Gather before you act: read every cited location and run every lookup you need in 1-2 responses (one grep -n -e A -e B for several IDs), not one per response.",
+        "6. Do not re-read lines you already read in this session unless they changed (you edited them) or you need lines outside what you read; then read only the missing or changed part.",
+        "7. Search with grep -n or rg, not git grep: new files are not tracked by git yet, so git grep misses them."
       ],
       "planner": [
-        "5. Edit as you go, as soon as you know the change; never save edits for the end.",
-        "6. After editing, do not run git status/log/diff and do not re-read what you just edited.",
-        "7. If the cited lines already contain the fix, say so per finding and end your turn.",
-        "8. If the work is bigger than your turns: do what fits, write in the hand-off note exactly what is done and what is left (file:line), then end your turn."
+        "8. Edit as you go, as soon as you know the change; never save edits for the end.",
+        "9. Make independent edits together in ONE response when they touch different places (different files or non-overlapping lines). An edit that depends on, or overlaps, an earlier edit goes in the next response.",
+        "10. After editing, do not run git status/log/diff and do not re-read what you just edited only to double-check, and do not write checker scripts.",
+        "11. If the cited lines already contain the fix, say so per finding and end your turn.",
+        "12. If the work is bigger than your turns: do what fits, write in the hand-off note exactly what is done and what is left (file:line), then end your turn."
       ],
       "implementer": [
-        "5. Edit as you go; run the task's tests once after the edits and fix what fails.",
-        "6. Do not run git status/log/diff or re-read files only to double-check.",
-        "7. If the work is bigger than your turns: hand-off note with done / left (file:line), then end your turn."
+        "8. Edit as you go; run the task's tests once after the edits and fix what fails.",
+        "9. Make independent edits together in ONE response when they touch different places (different files or non-overlapping lines). An edit that depends on, or overlaps, an earlier edit goes in the next response.",
+        "10. Do not run git status/log/diff or re-read files only to double-check, and do not write checker scripts.",
+        "11. If the work is bigger than your turns: hand-off note with done / left (file:line), then end your turn."
       ]
     }
   ]

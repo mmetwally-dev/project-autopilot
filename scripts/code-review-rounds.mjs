@@ -63,17 +63,95 @@ export function clearCodeReviewHistory(state, key) {
   if (state[STATE_KEY] && !Object.keys(state[STATE_KEY]).length) delete state[STATE_KEY];
 }
 
-function render(rounds) {
+function render(rounds, extraLen = 0) {
   const blocks = rounds.map(r => `Round ${r.round}:\n${(Array.isArray(r.findings) ? r.findings : []).map((f, i) => `${i + 1}. ${f}`).join("\n")}`);
-  while (blocks.length > 1 && blocks.join("\n\n").length > MAX_CUMULATIVE_CHARS) blocks.shift();
+  while (blocks.length > 1 && (blocks.join("\n\n").length + extraLen) > MAX_CUMULATIVE_CHARS) blocks.shift();
   return blocks.join("\n\n");
+}
+
+export function scopeReviewRounds(allRounds) {
+  if (!Array.isArray(allRounds) || !allRounds.length) {
+    return { rounds: [], fixedCount: 0, fixedLine: "" };
+  }
+  if (allRounds.length === 1) {
+    return { rounds: allRounds.slice(), fixedCount: 0, fixedLine: "" };
+  }
+
+  // Find V: index of the LAST round (latest round included) whose `previous` array is non-empty.
+  let v = -1;
+  for (let i = allRounds.length - 1; i >= 0; i--) {
+    if (Array.isArray(allRounds[i]?.previous) && allRounds[i].previous.length > 0) {
+      v = i;
+      break;
+    }
+  }
+
+  let candidates;
+  let fixedCount = 0;
+  let fixedLine = "";
+
+  if (v > 0) {
+    candidates = allRounds.slice(v);
+    const distinctBeforeV = new Set();
+    for (let i = 0; i < v; i++) {
+      for (const f of (Array.isArray(allRounds[i]?.findings) ? allRounds[i].findings : [])) {
+        const k = normalizeFindingKey(f);
+        if (k) distinctBeforeV.add(k);
+      }
+    }
+    fixedCount = distinctBeforeV.size;
+    const vRoundNum = allRounds[v]?.round ?? (v + 1);
+    const prevRoundNum = vRoundNum - 1;
+    fixedLine = `${fixedCount} earlier findings (rounds 1-${prevRoundNum}) were already verified in round ${vRoundNum}; do not re-check them unless this revision touched their lines.`;
+  } else {
+    candidates = allRounds.slice();
+  }
+
+  const latestRound = candidates[candidates.length - 1];
+  const earlierCandidates = candidates.slice(0, -1);
+
+  // Latest round's findings always in full; identical texts listed once
+  const seenKeys = new Set();
+  const latestFindings = [];
+  for (const f of (Array.isArray(latestRound?.findings) ? latestRound.findings : [])) {
+    const k = normalizeFindingKey(f);
+    if (k && seenKeys.has(k)) continue;
+    if (k) seenKeys.add(k);
+    latestFindings.push(f);
+  }
+
+  const keptEarlier = [];
+  for (let i = earlierCandidates.length - 1; i >= 0; i--) {
+    const r = earlierCandidates[i];
+    const rawFindings = Array.isArray(r?.findings) ? r.findings : [];
+    const keptFindings = [];
+    for (const f of rawFindings) {
+      const k = normalizeFindingKey(f);
+      if (k && seenKeys.has(k)) continue;
+      if (k) seenKeys.add(k);
+      keptFindings.push(f);
+    }
+    if (keptFindings.length > 0) {
+      keptEarlier.unshift({ ...r, findings: keptFindings });
+    }
+  }
+
+  const scopedRounds = [...keptEarlier, { ...latestRound, findings: latestFindings }];
+  return { rounds: scopedRounds, fixedCount, fixedLine };
 }
 
 // Reviewer brief lines for the NEXT review (recorded rounds = previous rounds).
 export function codeReviewerRoundLines(state, key) {
   const rounds = slot(state, key);
   if (!rounds.length) return [CODE_REVIEW_EXHAUSTIVE_LINE];
-  return [CODE_REVIEW_VERIFY_LINE, `Previous findings from all earlier review rounds (verify each):\n${render(rounds)}`];
+  if (rounds.length === 1) {
+    return [CODE_REVIEW_VERIFY_LINE, `Previous findings from all earlier review rounds (verify each):\n${render(rounds)}`];
+  }
+  const { rounds: scoped, fixedLine = "" } = scopeReviewRounds(rounds);
+  const fixedLen = fixedLine ? fixedLine.length + 2 : 0;
+  const rendered = render(scoped, fixedLen);
+  const body = [fixedLine, rendered].filter(Boolean).join("\n\n");
+  return [CODE_REVIEW_VERIFY_LINE, `Previous findings from all earlier review rounds (verify each):\n${body}`];
 }
 
 export const EARLIER_ROUNDS_RECHECK_LINE =

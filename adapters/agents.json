@@ -106,14 +106,12 @@
       "write": [
         "exec",
         "--json",
-        "--ephemeral",
         "--sandbox",
         "workspace-write"
       ],
       "read_only": [
         "exec",
         "--json",
-        "--ephemeral",
         "--sandbox",
         "read-only"
       ],
