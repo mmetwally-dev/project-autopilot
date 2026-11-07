@@ -22,6 +22,7 @@
 // on every platform, not just Native Windows.
 import fs from "node:fs";
 import path from "node:path";
+import { NETWORK_GATED_TEST_LINE } from "./task-requirements.mjs";
 
 function playwrightGuidanceLines(playwrightRuntime) {
   const mod = playwrightRuntime?.module;
@@ -63,6 +64,7 @@ export function verifierTask(task, cwd = null, scratchDir = null, config = null,
       : "Scratch writing is not available for this review; report through stdout only.",
     "Return exactly one AUTOPILOT_REVIEW JSON sentinel with decision PASS or FAIL and concise findings.",
     "If a git diff shows whole-file churn, re-run it EOL-normalized (git diff --ignore-cr-at-eol or git -c core.autocrlf=input diff) and trust the normalized stat.",
+    NETWORK_GATED_TEST_LINE,
     "",
     "TASK/VERIFICATION TARGET:",
     task

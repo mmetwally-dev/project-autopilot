@@ -75,7 +75,7 @@ import {spawnRelayChild} from "./subprocess-relay.mjs";
 import {adapterDriver, finalAgentText, sessionIdFromEvents, accumulateUsage, recordRunModel, runModelPatch, applyClaudeReadOnlyScratchAllow, finalVerdictPrinted} from "./adapter-drivers.mjs";
 import {agyRelayExtraArgs} from "./agy-events.mjs";
 import {listAgyHubs, runHubsToStop, stopRunHubs} from "./agy-hub-cleanup.mjs";
-import {mergeTaskFacts,mergeTaskLineFacts,browserVerifierNote,browserCheckNotes,CODE_REVIEWER_BROWSER_LINE,isBrowserCheckFinding,splitBrowserFindings} from "./task-requirements.mjs";
+import {mergeTaskFacts,mergeTaskLineFacts,browserVerifierNote,browserCheckNotes,CODE_REVIEWER_BROWSER_LINE,isBrowserCheckFinding,splitBrowserFindings,NETWORK_GATED_TEST_LINE,splitNetworkTestFindings,networkCheckNotes} from "./task-requirements.mjs";
 import {appendManualChecks} from "./manual-checks.mjs";
 import {buildRoleRequirements, requirementFailure} from "./role-requirements.mjs";
 import { classifyPlanningRequest } from "./planning-request.mjs";
@@ -89,7 +89,7 @@ import { nextRunSeq, writeWatchReportFile, noE2eReportNote, appendNoE2eNoteToRep
 import { updateSummary, updateSummaryForRunDir, scopeForRunDir } from "./watch-summary.mjs";
 import { recoverStaleRuns, markInterrupted } from "./run-recovery.mjs";
 import { recordCodeReviewRound, clearCodeReviewHistory, codeReviewerRoundLines, implementerEarlierRoundsText, codeReviewScopeKey } from "./code-review-rounds.mjs";
-import { scheduleEscalation, pendingEscalationModel, consumeEscalationFor, formatEscalationLog, recordVerifierRound, clearVerifierHistory, verifierRoundLines, scheduleNoProgressEscalation, formatNoProgressEscalationLog, noProgressDecision } from "./escalation-model.mjs";
+import { scheduleEscalation, pendingEscalationModel, consumeEscalationFor, formatEscalationLog, recordVerifierRound, clearVerifierHistory, verifierRoundLines, scheduleNoProgressEscalation, formatNoProgressEscalationLog, noProgressDecision, endNoProgressRound } from "./escalation-model.mjs";
 import { recordPlanReviewRound, seedPlanReviewHistory, clearPlanReviewHistory, planReviewPassNeedsConfirmation, planReviewConfirmationPending, markPlanReviewConfirmationPending, clearPlanReviewConfirmation, planReviewRevisionCount, recordPlanReviewRevision, clearPlanReviewRevisions, planReviewerRoundLines, planReviewerConfirmationLines, plannerEarlierRoundsText, recordPlanReviewNotes, planReviewNotesText, recordPlanPassNotes, planPassNotesText, allPlanPassNotes, firstTaskPassNotes, firstGsdUnitPassNotes, planPassNoteEntries, applyPlanPassNoteMarks, phaseCodeReviewPassNotesText, finalReviewPassNotesText, formatPlanPassNotesLines, PLAN_REVIEW_FULL_LINE, PLAN_REVIEW_SEVERITY_LINE, demoteLowSeverityFindings, STANDALONE_SPEC_ANALYZE_LINE, isFullPlanReviewRound, REVIEW_CONTINUATION_LINE, formatReviewBriefForContinuation, hasReviewContinuationSignal, parseTaskBlocks, changedTaskIds, taskSizeConfirmationLine, demoteUnchangedTaskSizeFindings, recordPlanReviewTaskHashes, getPlanReviewTaskHashes } from "./plan-review-rounds.mjs";
 import { saveReviewFeedback, loadReviewFeedback, clearReviewFeedback, clearReviewFeedbackByPrefix, feedbackText } from "./review-feedback.mjs";
 import { taskLabel, recordFindingTasks, loadFindingTasks, carryDecision, findingsForTask, renderHandledFindings, fixPassBriefExcerpts, clearFindingTasks, clearFindingTasksByPrefix, FINDING_TASKS_STATE_KEY } from "./finding-task-locality.mjs";
@@ -1567,6 +1567,11 @@ function clearAllSpentCounters(s){
   for(const [k,v] of Object.entries(s.continuationBudgets||{})){ cleared.push(`continuationBudgets:${k}=${v}`); delete s.continuationBudgets[k]; }
   for(const [k,v] of Object.entries(s.noProgressGenerations||{})){ delete s.noProgressGenerations[k]; }
   for(const [k,v] of Object.entries(s.rolloverDeadEnds||{})){ cleared.push(`rolloverDeadEnds:${k}${Array.isArray(v)?` (${v.length})`:""}`); delete s.rolloverDeadEnds[k]; }
+  for(const k of Object.keys(s.noProgressEscalations||{})){
+    cleared.push(`noProgressEscalations:${k}`);
+    delete s.noProgressEscalations[k];
+  }
+  if(s.noProgressEscalations && !Object.keys(s.noProgressEscalations).length) delete s.noProgressEscalations;
   const rev=s.standalonePlanReview;
   if(rev&&typeof rev==="object"&&Object.prototype.hasOwnProperty.call(rev,"revision")){
     if(Number(rev.revision)>0) cleared.push(`standalonePlanReview.revision=${rev.revision}`);
@@ -1764,7 +1769,11 @@ function resetCommand(scopeArg, {dryRun = false} = {}){
 // escalation-recorded lastContinuation is the automatic target. Returns
 // {scope} or {scope:null} (plus {ambiguous} when a bare id matches several).
 function resetContinuationScope(s,scopeArg){
-  const present=new Set([...Object.keys(s.continuationBudgets||{}),...Object.keys(s.rolloverDeadEnds||{})]);
+  const present=new Set([
+    ...Object.keys(s.continuationBudgets||{}),
+    ...Object.keys(s.rolloverDeadEnds||{}),
+    ...Object.keys(s.noProgressEscalations||{}).map(continuationBudgetKey)
+  ]);
   const canon=k=>String(k).startsWith(CONTINUATION_BUDGET_KEY_PREFIX)?String(k).slice(CONTINUATION_BUDGET_KEY_PREFIX.length):String(k);
   const hasScope=scope=>present.has(continuationBudgetKey(scope));
   if(scopeArg){
@@ -1821,7 +1830,8 @@ function resetContinuationCommand(s,contScope, {dryRun = false} = {}){
   const used=s.continuationBudgets?.[fullKey];
   const deadList=s.rolloverDeadEnds?.[fullKey];
   const deadCount=Array.isArray(deadList)?deadList.length:0;
-  if(used===undefined && deadCount===0 && !stale.length){
+  const hadNoProg=Boolean(s.noProgressEscalations && s.noProgressEscalations[contScope]);
+  if(used===undefined && deadCount===0 && !hadNoProg && !stale.length){
     console.error(`ap reset: '${fullKey}' has no recorded allowance or dead-ends. Nothing to clear (see \`continuationBudgets\`/\`rolloverDeadEnds\` in state.json).`);
     return 1;
   }
@@ -1832,6 +1842,10 @@ function resetContinuationCommand(s,contScope, {dryRun = false} = {}){
   if(!dryRun){
     if(used!==undefined && s.continuationBudgets) delete s.continuationBudgets[fullKey];
     if(deadList!==undefined && s.rolloverDeadEnds) delete s.rolloverDeadEnds[fullKey];
+    if(hadNoProg && s.noProgressEscalations){
+      delete s.noProgressEscalations[contScope];
+      if(!Object.keys(s.noProgressEscalations).length) delete s.noProgressEscalations;
+    }
     clearNoProgress(s,contScope);
     clearLastContinuation(s,contScope);
     s.lastReset={at:now(),scope:fullKey,clearedUsed:used??0,clearedLimit:limit,
@@ -1841,6 +1855,7 @@ function resetContinuationCommand(s,contScope, {dryRun = false} = {}){
     try{ if (missionDir) appendWatchEvent(missionDir, { type: "operator", reason: "reset", scope: "continuation", contScope, live: false }); }catch{}
   }
   console.log(`Reset '${fullKey}': ${dryRun ? "would clear" : "cleared"} allowance ${used??0}/${limit} and ${deadCount} dead-end entr${deadCount===1?"y":"ies"}.`);
+  if(hadNoProg) console.log(`  ${dryRun ? "would clear" : "cleared"} noProgressEscalations:${contScope}`);
   console.log(noteKept
     ? `  kept the task hand-off note at ${noteRel} (notes are never cleared by reset).`
     : `  kept the task hand-off note (notes are never cleared by reset).`);
@@ -2261,10 +2276,15 @@ function maybeApplyPendingContinuationReset(s,contScope){
     const used=s.continuationBudgets?.[fullKey];
     const deadList=s.rolloverDeadEnds?.[fullKey];
     const deadCount=Array.isArray(deadList)?deadList.length:0;
-    if(used===undefined && deadCount===0) continue;
+    const hadNoProg=Boolean(s.noProgressEscalations && s.noProgressEscalations[contScope]);
+    if(used===undefined && deadCount===0 && !hadNoProg) continue;
     if(s.continuationBudgets && used!==undefined) delete s.continuationBudgets[fullKey];
     if(s.rolloverDeadEnds && deadList!==undefined) delete s.rolloverDeadEnds[fullKey];
     if(s.noProgressGenerations) delete s.noProgressGenerations[fullKey];
+    if(hadNoProg && s.noProgressEscalations){
+      delete s.noProgressEscalations[contScope];
+      if(!Object.keys(s.noProgressEscalations).length) delete s.noProgressEscalations;
+    }
     clearLastContinuation(s,contScope);
     // Only THIS entry leaves the queue; every other armed request stays queued,
     // and the file itself disappears only when this was its last entry.
@@ -3448,7 +3468,16 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // Pending #22: a reviewer/verifier start ends the fix round, so the fixing
   // role's pending escalation is dropped (its next run is back on the normal
   // or fallback model; the stored session of the escalated model is cleared).
-  try{ const ended=consumeEscalationFor(s,roleName); if(ended){ clearRoleSession(s,ended); if(persistState) saveState(s); } }catch{}
+  // Backlog #8: also clear used no-progress escalations so the next fix round
+  // of the same task may escalate once again.
+  try{
+    const ended=consumeEscalationFor(s,roleName);
+    if(ended){ clearRoleSession(s,ended); if(persistState) saveState(s); }
+    if(roleName==="code_reviewer"||roleName==="verifier"){
+      const clearedNoProg=endNoProgressRound(s);
+      if(clearedNoProg.length&&persistState) saveState(s);
+    }
+  }catch{}
   // Pending #22: ONE fix round on the stronger model (never on the at-once
   // fallback re-run). The model switch starts a fresh session (#112).
   let escalated=false;
@@ -5359,12 +5388,19 @@ function review(reviewer,task,c,s,feedback="",requirements=[],taskRef=null,timeo
   return relay(reviewer,task+(feedback?`\n\nFEEDBACK TO ADDRESS:\n${feedback}`:""),c,s,{readOnly:true,review:true,resume:false,requirements,taskRef,timeoutMs,capEnabled,resultExtra}).then((result)=>{
     if(reviewer==="code_reviewer" && result?.review?.decision==="FAIL"){
       try{
-        const {browser, rest} = splitBrowserFindings(result.review);
-        if(browser.length){
+        const {browser, rest: afterBrowser} = splitBrowserFindings(result.review);
+        const {network, rest} = splitNetworkTestFindings(afterBrowser);
+        if(browser.length || network.length){
           const missionDir = getMissionWatchDir(s);
           const phaseName = s?.[CHECKPOINT_STATE_KEY]?.phaseName || (s?.phaseIndex != null ? String(s.phaseIndex) : "unknown");
-          appendManualChecks(missionDir, {phaseName, notes: browser, at: new Date().toISOString()});
-          console.log(`Manual UI check recorded in MANUAL-CHECKS.md (${browser.length} note(s)) — not counted as a review finding.`);
+          if(browser.length){
+            appendManualChecks(missionDir, {phaseName, notes: browser, at: new Date().toISOString()});
+            console.log(`Manual UI check recorded in MANUAL-CHECKS.md (${browser.length} note(s)) — not counted as a review finding.`);
+          }
+          if(network.length){
+            appendManualChecks(missionDir, {phaseName, notes: network, at: new Date().toISOString()});
+            console.log(`Manual network-test run recorded in MANUAL-CHECKS.md (${network.length} note(s)) — not counted as a review finding.`);
+          }
           result.review.findings = rest;
           if(rest.length === 0){
             result.review.decision = "PASS";
@@ -10148,7 +10184,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         const tasksTextForReview=fs.existsSync(tasksFilePathForReview)?fs.readFileSync(tasksFilePathForReview,"utf8"):"";
         const scratchNote=unexpectedNewFilesReviewNote(tasksTextForReview);
         const phaseReviewPassNotes=phaseCodeReviewPassNotesText(s);
-        const rv=await review("code_reviewer",`${reviewHandoff.text}\n\n${scratchNote?`${scratchNote}\n\n`:""}${reviewDeadEndsText}\n\n${reviewHandoffNoteText}\n\n${operatorNote?`${operatorNote}\n\n`:""}${phaseReviewPassNotes?`${phaseReviewPassNotes}\n\n`:""}${CODE_REVIEWER_TARGETED_TESTS_LINE}\n\n${CODE_REVIEWER_BROWSER_LINE}\n\n${reviewBudget.note}\n${readOnlyHandoffNoteReminder({mission, ref: reviewRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
+        const rv=await review("code_reviewer",`${reviewHandoff.text}\n\n${scratchNote?`${scratchNote}\n\n`:""}${reviewDeadEndsText}\n\n${reviewHandoffNoteText}\n\n${operatorNote?`${operatorNote}\n\n`:""}${phaseReviewPassNotes?`${phaseReviewPassNotes}\n\n`:""}${CODE_REVIEWER_TARGETED_TESTS_LINE}\n\n${CODE_REVIEWER_BROWSER_LINE}\n\n${NETWORK_GATED_TEST_LINE}\n\n${reviewBudget.note}\n${readOnlyHandoffNoteReminder({mission, ref: reviewRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
           cReview,s,feedback,phaseRequirements,reviewRef,reviewBudget.timeoutMs,true,codeReviewScopeKey("standalone-phase",s.phaseIndex),
           reviewTruncationResult(reviewHandoff.meta));
         noteRoleDeadlineOutcome(s,"code_reviewer",rv,reviewBudget.derived);
@@ -10500,6 +10536,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         }
         if(g.ok&&vv.status==="completed"&&vv.review?.decision==="PASS"){
           { const bn=browserCheckNotes(vv.review); if(bn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:bn,at:new Date().toISOString()})) console.log(`Manual UI check recorded in MANUAL-CHECKS.md (${bn.length} note(s)).`); } }
+          { const nn=networkCheckNotes(vv.review); if(nn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:nn,at:new Date().toISOString()})) console.log(`Manual network-test run recorded in MANUAL-CHECKS.md (${nn.length} note(s)).`); } }
           // Mission 025 task 2.2: never accept a standalone verifier PASS
           // while any linked verify/tool result exited non-zero or 124. The
           // joint gate+verdict check covers both evidence channels: the
@@ -11926,7 +11963,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         const scratchNote=unexpectedNewFilesReviewNote(phaseTasks.map((t)=>`${t.text||""} ${t.file||""}`).join("\n"));
         const phaseReviewPassNotes=phaseCodeReviewPassNotesText(s);
         const rv=await review("code_reviewer",
-          `${reviewPrompt}\n\n${scratchNote?`${scratchNote}\n\n`:""}${reviewDeadEndsText}\n\n${reviewHandoffNoteText}\n\n${operatorPhaseNoteLine(s)?`${operatorPhaseNoteLine(s)}\n\n`:""}${phaseReviewPassNotes?`${phaseReviewPassNotes}\n\n`:""}${CODE_REVIEWER_TARGETED_TESTS_LINE}\n\n${CODE_REVIEWER_BROWSER_LINE}\n\n${reviewBudget.note}\n${readOnlyHandoffNoteReminder({mission: missionIdentity, ref: reviewRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
+          `${reviewPrompt}\n\n${scratchNote?`${scratchNote}\n\n`:""}${reviewDeadEndsText}\n\n${reviewHandoffNoteText}\n\n${operatorPhaseNoteLine(s)?`${operatorPhaseNoteLine(s)}\n\n`:""}${phaseReviewPassNotes?`${phaseReviewPassNotes}\n\n`:""}${CODE_REVIEWER_TARGETED_TESTS_LINE}\n\n${CODE_REVIEWER_BROWSER_LINE}\n\n${NETWORK_GATED_TEST_LINE}\n\n${reviewBudget.note}\n${readOnlyHandoffNoteReminder({mission: missionIdentity, ref: reviewRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
           cReview,s,feedback,phaseRequirements,reviewRef,reviewBudget.timeoutMs,true,codeReviewScopeKey("speckit-phase",s.phaseIndex));
         noteRoleDeadlineOutcome(s,"code_reviewer",rv,reviewBudget.derived);
         lastReview=rv;
@@ -12283,6 +12320,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         }
         if(g.ok&&vv.status==="completed"&&vv.review?.decision==="PASS"){
           { const bn=browserCheckNotes(vv.review); if(bn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:bn,at:new Date().toISOString()})) console.log(`Manual UI check recorded in MANUAL-CHECKS.md (${bn.length} note(s)).`); } }
+          { const nn=networkCheckNotes(vv.review); if(nn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:nn,at:new Date().toISOString()})) console.log(`Manual network-test run recorded in MANUAL-CHECKS.md (${nn.length} note(s)).`); } }
           // Mission 025 task 3.2: never accept a SpecKit verifier PASS
           // while any linked verify/tool result exited non-zero or 124. The
           // joint gate+verdict check covers both evidence channels: the

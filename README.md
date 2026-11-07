@@ -291,11 +291,19 @@ The messages name the exact command when one is needed, for example
 - **No-progress stop.** A continuation session that changes no project file is
   "no progress". After `retries.no_progress_sessions` of them in a row
   (default 2) the task stops early instead of using up all its sessions. If the
-  implementer has an `escalation_model` not yet used for that task, the task
-  first gets one more session on it; if that session also changes nothing, the
-  task stops. The next task is back on the normal model. The next
-  session's brief quotes the code lines the hand-off note points at, so it can
-  edit right away.
+  implementer has an `escalation_model`, the task first gets one more session
+  on it (once per fix round: a new review round may escalate again; a restart
+  inside the same round does not); if that session also changes nothing, the
+  task stops. The next task is back on the normal model. `ap reset` also clears
+  a used escalation. The next session's brief quotes the code lines the
+  hand-off note points at, so it can edit right away.
+- **Network tests the task asks for.** The test gate runs offline. When a task
+  itself asks for a network or env-gated test (for example behind
+  `RUN_INTEGRATION=1`, against a dev database or a real auth provider), the
+  code reviewer and verifier review that test's code without running it and do
+  not fail it for needing the network; the command to run it goes to
+  `MANUAL-CHECKS.md` for you. Network use the task did not ask for is still a
+  finding.
 - **Hung sessions.** A session that prints nothing, runs nothing and writes
   nothing for `time_limits.silent_run_minutes` (default 10) is stopped as
   `IDLE_HANG`; a provider rate-limit storm is caught as `RATE_LIMITED`. Both count

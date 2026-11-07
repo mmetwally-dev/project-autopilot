@@ -152,6 +152,17 @@ export function consumeEscalationFor(state, reviewerRole) {
 }
 
 // ---- no-progress escalation (backlog #8) ----
+// consumeEscalationFor drops the pending flag when the reviewer starts;
+// endNoProgressRound clears the spent no-progress record so the NEXT fix
+// round of the same task may escalate once again (restart within the same
+// round still does not repeat it).
+export function endNoProgressRound(state) {
+  if (!isRecord(state?.noProgressEscalations)) return [];
+  const keys = Object.keys(state.noProgressEscalations);
+  delete state.noProgressEscalations;
+  return keys;
+}
+
 // Pure helper: schedule one run on the escalation model when a task made no
 // file progress in consecutive sessions. Returns null when the role has no
 // escalation_model, or when this scope already used its escalation.

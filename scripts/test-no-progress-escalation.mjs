@@ -9,6 +9,8 @@ import {
   scheduleNoProgressEscalation,
   formatNoProgressEscalationLog,
   noProgressDecision,
+  endNoProgressRound,
+  consumeEscalationFor,
 } from "./escalation-model.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -131,6 +133,83 @@ test("another scopeKey works after the first scopeKey was escalated", () => {
   assert.ok(state.noProgressEscalations["task:standalone:phase-0:T1"]);
   assert.ok(state.noProgressEscalations["task:standalone:phase-0:T2"]);
   assert.equal(state.escalationPending.implementer.scopeKey, "task:standalone:phase-0:T2");
+});
+
+// ── 1b. Unit cases for endNoProgressRound ──
+
+test("endNoProgressRound clears all entries, deletes key, and returns scope keys", () => {
+  const state = {
+    noProgressEscalations: {
+      "task:standalone:phase-0:T1": { role: "implementer", taskId: "T1" },
+      "task:standalone:phase-0:T2": { role: "implementer", taskId: "T2" },
+    },
+  };
+  const keys = endNoProgressRound(state);
+  assert.deepEqual(keys.sort(), ["task:standalone:phase-0:T1", "task:standalone:phase-0:T2"]);
+  assert.equal("noProgressEscalations" in state, false);
+});
+
+test("endNoProgressRound no-op on empty or absent noProgressEscalations", () => {
+  // Absent key
+  const state1 = {};
+  assert.deepEqual(endNoProgressRound(state1), []);
+  assert.deepEqual(state1, {});
+
+  // Empty object
+  const state2 = { noProgressEscalations: {} };
+  assert.deepEqual(endNoProgressRound(state2), []);
+  assert.equal("noProgressEscalations" in state2, false);
+
+  // Null/undefined state
+  assert.deepEqual(endNoProgressRound(null), []);
+  assert.deepEqual(endNoProgressRound(undefined), []);
+});
+
+test("behaviour sequence: schedule → second schedule same scope null → endNoProgressRound → schedule same scope works again", () => {
+  const state = {};
+  const scopeKey = "task:speckit:phase-10:speckit:P11:T8:135cabc19224";
+
+  // 1. Initial schedule: works
+  const first = scheduleNoProgressEscalation(state, cfgWithEsc, {
+    role: "implementer",
+    scopeKey,
+    taskId: "T8",
+    consecutive: 2,
+    from: { adapter: "opencode", model: "free-y" },
+  });
+  assert.ok(first, "first schedule must succeed");
+  assert.ok(state.noProgressEscalations?.[scopeKey]);
+
+  // 2. Second schedule in same round: null (does not repeat)
+  const second = scheduleNoProgressEscalation(state, cfgWithEsc, {
+    role: "implementer",
+    scopeKey,
+    taskId: "T8",
+    consecutive: 2,
+    from: { adapter: "opencode", model: "free-y" },
+  });
+  assert.equal(second, null, "second schedule in same round must return null");
+
+  // Reviewer starts: consumeEscalationFor clears pending escalation
+  consumeEscalationFor(state, "code_reviewer");
+  assert.equal(state.escalationPending, undefined);
+
+  // Reviewer start also triggers endNoProgressRound: clears noProgressEscalations
+  const cleared = endNoProgressRound(state);
+  assert.deepEqual(cleared, [scopeKey]);
+  assert.equal("noProgressEscalations" in state, false);
+
+  // 3. Next fix round gets stuck again: schedule same scope works again!
+  const third = scheduleNoProgressEscalation(state, cfgWithEsc, {
+    role: "implementer",
+    scopeKey,
+    taskId: "T8",
+    consecutive: 2,
+    from: { adapter: "opencode", model: "free-y" },
+  });
+  assert.ok(third, "schedule same scope in new fix round must succeed");
+  assert.equal(third.taskId, "T8");
+  assert.ok(state.noProgressEscalations?.[scopeKey]);
 });
 
 // ── 2. Log text formatting ──
@@ -285,6 +364,47 @@ test("source check: noProgressEscalations in MISSION_SCOPED_STATE_KEYS", () => {
   const keysStart = src.indexOf("MISSION_SCOPED_STATE_KEYS=Object.freeze([");
   const keysBlock = src.slice(keysStart, keysStart + 3000);
   assert.ok(keysBlock.includes('"noProgressEscalations"'), "MISSION_SCOPED_STATE_KEYS must include noProgressEscalations");
+});
+
+test("source check: runRelay calls endNoProgressRound next to consumeEscalationFor for reviewer/verifier starts", () => {
+  const src = fs.readFileSync(path.join(here, "autopilot.mjs"), "utf8");
+  const relayIdx = src.indexOf("async function runRelay(");
+  assert.ok(relayIdx > 0, "runRelay function exists");
+  const relayBody = src.slice(relayIdx, src.indexOf("\nasync function ", relayIdx + 100));
+
+  assert.match(src, /import\s*\{[^}]*endNoProgressRound[^}]*\}\s*from\s*"\.\/escalation-model\.mjs"/);
+  assert.match(relayBody, /consumeEscalationFor\(s,\s*roleName\)/);
+  assert.match(relayBody, /roleName\s*===\s*"code_reviewer"\s*\|\|\s*roleName\s*===\s*"verifier"/);
+  assert.match(relayBody, /endNoProgressRound\(s\)/);
+
+  const consumePos = relayBody.indexOf("consumeEscalationFor(s,roleName)");
+  const endRoundPos = relayBody.indexOf("endNoProgressRound(s)");
+  assert.ok(consumePos > 0 && endRoundPos > 0, "both calls exist in runRelay");
+  assert.ok(Math.abs(endRoundPos - consumePos) < 300, "endNoProgressRound is called next to consumeEscalationFor");
+});
+
+test("source check: resetCommand handles noProgressEscalations in both global and scoped paths", () => {
+  const src = fs.readFileSync(path.join(here, "autopilot.mjs"), "utf8");
+
+  // Global reset path (clearAllSpentCounters)
+  const clearCountersIdx = src.indexOf("function clearAllSpentCounters(");
+  assert.ok(clearCountersIdx > 0, "clearAllSpentCounters exists");
+  const clearCountersBody = src.slice(clearCountersIdx, src.indexOf("\nfunction ", clearCountersIdx + 50));
+  assert.match(clearCountersBody, /s\.noProgressEscalations/);
+  assert.match(clearCountersBody, /noProgressEscalations:\$\{k\}/);
+
+  // Scoped reset scope resolution
+  const scopeFnIdx = src.indexOf("function resetContinuationScope(");
+  assert.ok(scopeFnIdx > 0, "resetContinuationScope exists");
+  const scopeFnBody = src.slice(scopeFnIdx, src.indexOf("\nfunction ", scopeFnIdx + 50));
+  assert.match(scopeFnBody, /s\.noProgressEscalations/);
+
+  // Scoped reset command (resetContinuationCommand)
+  const resetContIdx = src.indexOf("function resetContinuationCommand(");
+  assert.ok(resetContIdx > 0, "resetContinuationCommand exists");
+  const resetContBody = src.slice(resetContIdx, src.indexOf("\nfunction ", resetContIdx + 50));
+  assert.match(resetContBody, /s\.noProgressEscalations/);
+  assert.match(resetContBody, /noProgressEscalations:\$\{contScope\}/);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

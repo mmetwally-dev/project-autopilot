@@ -21,7 +21,7 @@ export function offlineGateBriefLine({ roleName, config } = {}) {
 
   const base = `The test gate runs with NO network access: tests must not reach external hosts, remote databases or cloud APIs. Use in-process fakes or mocks instead${tools ? ` (available here: ${tools})` : ""}; a test that needs the network fails in the gate.`;
   if (roleName === "code_reviewer" || roleName === "verifier") {
-    return `${base} Judge only tests this phase added or changed: network errors logged by other, pre-existing tests — or in a gate that passed — are not findings; mention them in notes at most.`;
+    return `${base} Judge only tests this phase added or changed: network errors logged by other, pre-existing tests — or in a gate that passed — are not findings; mention them in notes at most. The offline rule does not apply to tests the task explicitly env-gates on the network.`;
   }
   return base;
 }

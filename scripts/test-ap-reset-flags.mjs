@@ -199,6 +199,116 @@ function makeRepo(state) {
     out.includes("ap reset [--scope <key>] [--dry-run] [--repo <path>]"), out);
 }
 
+// 9. Reset with noProgressEscalations (backlog #8)
+const noProgressEscalationState = () => ({
+  version: 1,
+  phase: "escalated",
+  step: "speckit_task_no_progress",
+  phaseIndex: 1,
+  taskIndex: 0,
+  attempt: 1,
+  noProgressEscalations: {
+    "task:speckit:phase-10:speckit:P11:T8:135cabc19224": {
+      role: "implementer",
+      taskId: "T8",
+      at: "2026-11-07T00:00:00.000Z"
+    },
+    "task:speckit:phase-10:speckit:P11:T9:999zzzaaa111": {
+      role: "implementer",
+      taskId: "T9",
+      at: "2026-11-07T00:00:00.000Z"
+    }
+  }
+});
+
+// 9a. Global reset --dry-run lists noProgressEscalations and leaves state.json unchanged
+{
+  const repo = makeRepo(noProgressEscalationState());
+  const beforeBytes = fs.readFileSync(path.join(repo, ".autopilot", "state.json"));
+  const r = spawnSync(process.execPath, [path.join(skillRoot, "scripts", "autopilot.mjs"), "reset", "--dry-run"], {
+    cwd: repo,
+    encoding: "utf8"
+  });
+  const afterBytes = fs.readFileSync(path.join(repo, ".autopilot", "state.json"));
+  const out = `${r.stdout || ""}${r.stderr || ""}`;
+
+  check("reset --dry-run with noProgressEscalations exits 0", r.status === 0, {status: r.status, out});
+  check("reset --dry-run lists would clear noProgressEscalations",
+    out.includes("would clear noProgressEscalations:task:speckit:phase-10:speckit:P11:T8:135cabc19224") &&
+    out.includes("would clear noProgressEscalations:task:speckit:phase-10:speckit:P11:T9:999zzzaaa111"), out);
+  check("reset --dry-run leaves state.json byte-identical", beforeBytes.equals(afterBytes));
+}
+
+// 9b. Global reset --yes clears noProgressEscalations
+{
+  const repo = makeRepo(noProgressEscalationState());
+  const beforeBytes = fs.readFileSync(path.join(repo, ".autopilot", "state.json"));
+  const r = spawnSync(process.execPath, [path.join(skillRoot, "scripts", "autopilot.mjs"), "reset", "--yes"], {
+    cwd: repo,
+    encoding: "utf8"
+  });
+  const afterBytes = fs.readFileSync(path.join(repo, ".autopilot", "state.json"));
+  const out = `${r.stdout || ""}${r.stderr || ""}`;
+  const s = JSON.parse(afterBytes.toString("utf8"));
+
+  check("reset --yes with noProgressEscalations exits 0", r.status === 0, {status: r.status, out});
+  check("reset --yes lists cleared noProgressEscalations",
+    out.includes("cleared noProgressEscalations:task:speckit:phase-10:speckit:P11:T8:135cabc19224") &&
+    out.includes("cleared noProgressEscalations:task:speckit:phase-10:speckit:P11:T9:999zzzaaa111"), out);
+  check("reset --yes clears noProgressEscalations from state.json",
+    !s.noProgressEscalations || Object.keys(s.noProgressEscalations).length === 0, s.noProgressEscalations);
+  check("reset --yes modifies state.json", !beforeBytes.equals(afterBytes));
+}
+
+// 9c. Scoped reset clears only that scope
+{
+  const repo = makeRepo(noProgressEscalationState());
+  const r = spawnSync(process.execPath, [
+    path.join(skillRoot, "scripts", "autopilot.mjs"),
+    "reset",
+    "--scope",
+    "continuationAllowance:task:speckit:phase-10:speckit:P11:T8:135cabc19224"
+  ], {
+    cwd: repo,
+    encoding: "utf8"
+  });
+  const afterBytes = fs.readFileSync(path.join(repo, ".autopilot", "state.json"));
+  const out = `${r.stdout || ""}${r.stderr || ""}`;
+  const s = JSON.parse(afterBytes.toString("utf8"));
+
+  check("scoped reset for continuationAllowance:<scope> exits 0", r.status === 0, {status: r.status, out});
+  check("scoped reset prints cleared line for scoped key",
+    out.includes("cleared noProgressEscalations:task:speckit:phase-10:speckit:P11:T8:135cabc19224"), out);
+  check("scoped reset does not print cleared line for other scope",
+    !out.includes("task:speckit:phase-10:speckit:P11:T9:999zzzaaa111"), out);
+  check("scoped reset clears only that scope from state.noProgressEscalations",
+    Boolean(s.noProgressEscalations) &&
+    !("task:speckit:phase-10:speckit:P11:T8:135cabc19224" in s.noProgressEscalations) &&
+    ("task:speckit:phase-10:speckit:P11:T9:999zzzaaa111" in s.noProgressEscalations), s.noProgressEscalations);
+}
+
+// 9d. Scoped reset with bare task: scope
+{
+  const repo = makeRepo(noProgressEscalationState());
+  const r = spawnSync(process.execPath, [
+    path.join(skillRoot, "scripts", "autopilot.mjs"),
+    "reset",
+    "--scope",
+    "task:speckit:phase-10:speckit:P11:T8:135cabc19224"
+  ], {
+    cwd: repo,
+    encoding: "utf8"
+  });
+  const afterBytes = fs.readFileSync(path.join(repo, ".autopilot", "state.json"));
+  const out = `${r.stdout || ""}${r.stderr || ""}`;
+  const s = JSON.parse(afterBytes.toString("utf8"));
+
+  check("scoped reset for bare task: scope exits 0", r.status === 0, {status: r.status, out});
+  check("scoped reset for bare task: scope clears only that scope",
+    !("task:speckit:phase-10:speckit:P11:T8:135cabc19224" in (s.noProgressEscalations || {})) &&
+    Boolean(s.noProgressEscalations?.["task:speckit:phase-10:speckit:P11:T9:999zzzaaa111"]), s.noProgressEscalations);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);
