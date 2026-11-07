@@ -14,6 +14,18 @@
 // helpers against the live stream once per second and kills the child on
 // breach: the redundant re-run detector itself is still observe-only.
 
+import fs from "node:fs";
+import path from "node:path";
+import {isFreeModel} from "./free-model.mjs";
+import {
+  AGY_WRITE_TOOLS,
+  AGY_READ_TOOLS,
+  AGY_COMMAND_TOOLS,
+  stepOf,
+  resultOf,
+  toolTarget,
+} from "./agy-events.mjs";
+
 // A real per-task budget, not a hang backstop. Strictly below the call
 // backstop default so the intentional per-task deadline fires first; 60
 // minutes fits a full gate run (~60-70 min) instead of cutting it short.
@@ -589,15 +601,6 @@ export function resolveHandoffWrapupTokens(policy = {}, perTaskMaxTokens = PER_T
 // and existing constants for implementer/unknown. Config overrides via policy.caps.<role>.
 // For implementer, also honors policy.per_task_max_turns / per_task_max_tokens as fallbacks.
 // wrapUpTokenThreshold from PER_ROLE_WRAPUP_TOKENS_DEFAULT or policy.caps.<role>.wrap_up_tokens_threshold.
-import {isFreeModel} from "./free-model.mjs";
-import {
-  AGY_WRITE_TOOLS,
-  AGY_READ_TOOLS,
-  AGY_COMMAND_TOOLS,
-  stepOf,
-  resultOf,
-  toolTarget,
-} from "./agy-events.mjs";
 export const FREE_MODEL_TURNS_CAP_DEFAULT = 45;
 // Backlog #101: policy.free_model_turns_cap (default 45; 0 or explicit null = off).
 export function resolveFreeModelTurnsCap(policy = {}) {
@@ -765,6 +768,30 @@ export function consumeContinuation(state, policy, scope, continuationAllowance)
   return {allowed: used <= limit, used, limit, scope};
 }
 
+export function clearContinuationRound(state, scope) {
+  const key = continuationKey(scope);
+  let deleted = false;
+  if (state?.continuationBudgets && typeof state.continuationBudgets === "object" && key in state.continuationBudgets) {
+    delete state.continuationBudgets[key];
+    deleted = true;
+  }
+  if (state?.rolloverDeadEnds && typeof state.rolloverDeadEnds === "object" && key in state.rolloverDeadEnds) {
+    delete state.rolloverDeadEnds[key];
+    deleted = true;
+  }
+  if (state?.verdictOnlyTurns && typeof state.verdictOnlyTurns === "object") {
+    if (scope in state.verdictOnlyTurns) {
+      delete state.verdictOnlyTurns[scope];
+      deleted = true;
+    }
+    if (key in state.verdictOnlyTurns) {
+      delete state.verdictOnlyTurns[key];
+      deleted = true;
+    }
+  }
+  return deleted;
+}
+
 // Mission 031 Phase 1 task 1.2: resolve continuation allowance for a role.
 // Review roles use their configured extraSessions (default 2), implementer/unknown uses the global default (5).
 export function resolveContinuationAllowanceForRole(roleName, policy = {}) {
@@ -930,6 +957,49 @@ export function noteNextSection(note) {
     out.push(lines[i]);
   }
   return out.join("\n").trim();
+}
+
+export function extractNoteSections(noteText) {
+  if (typeof noteText !== "string" || !noteText.trim()) return {};
+  const sections = {};
+  const headerRegex = /(?:^|\r?\n|(?:^|[\s.;—]))(?:#+\s*|\d+\.\s*|-\s*)?(Done|Found|Next|Dead\s+ends)\s*[:—\-]\s*|(?:^|\r?\n)\s*#+\s*(Done|Found|Next|Dead\s+ends)\s*(?:\r?\n|$)/gi;
+  const matches = [...noteText.matchAll(headerRegex)];
+  if (!matches.length) return {};
+  for (let i = 0; i < matches.length; i++) {
+    const headerName = (matches[i][1] || matches[i][2]).toLowerCase().replace(/\s+/, " ");
+    const contentStart = matches[i].index + matches[i][0].length;
+    const contentEnd = (i + 1 < matches.length) ? matches[i + 1].index : noteText.length;
+    sections[headerName] = noteText.slice(contentStart, contentEnd).trim();
+  }
+  return sections;
+}
+
+export function noteSaysOnlyGateLeft(noteText) {
+  if (typeof noteText !== "string" || !noteText.trim()) return false;
+  const sections = extractNoteSections(noteText);
+  const found = sections.found;
+  const next = sections.next;
+  if (!found || !next) return false;
+
+  const NO_FINDINGS_PATTERN = /\b(?:no\s+new\s+actionable\b|no\s+(?:open\s+|new\s+|critical\s+|security\s+)?findings?\b|all\b.*?\bfindings\b.*?\b(?:corrected|fixed|resolved)\b|(?:0|zero)\s+findings?\b|none\b|nothing\s+(?:new\s+)?found\b|clean\b)/i;
+  if (!NO_FINDINGS_PATTERN.test(found)) return false;
+
+  const OPEN_FINDINGS_PATTERN = /\b(?:open|unresolved|remaining|unfixed)\s+(?:findings?|issues?|bugs?|defects?)\b|\b[1-9]\d*\s+(?:open|unresolved|remaining|new)?\s*(?:findings?|issues?|bugs?|defects?)\b/i;
+  if (OPEN_FINDINGS_PATTERN.test(found)) return false;
+
+  const GATE_PATTERN = /(?:gate|full\s+(?:root\s+)?(?:suite|gate)|test-all|collect)/i;
+  if (!GATE_PATTERN.test(next)) return false;
+
+  const ACTIONABLE_PATTERN = /\b(?:edit|edits|editing|modify|modifying|modification|fix|fixes|fixing|change|changes|changing|patch|patching|write|writing|update|updating|refactor|refactoring|remove|removing|delete|deleting|add|adding|create|creating|rebut|rebuttal|re-?review|implement|implementing|investigate|investigating|check|checking|inspect|inspecting|verify|verifying|re-?check|re-?test)\b/i;
+  if (ACTIONABLE_PATTERN.test(next)) return false;
+
+  const FILE_REF_PATTERN = /\b[\w.-]+\.(?:mjs|cjs|js|ts|jsx|tsx|json|md|py|sh|yaml|yml|css|html)\b|\b[\w.-]+\/[\w.-]+|:\d+(?:-\d+)?\b/i;
+  if (FILE_REF_PATTERN.test(next)) return false;
+
+  const FINDINGS_PATTERN = /\b(?:findings?|defects?|bugs?|issues?|task|tasks|todo)\b/i;
+  if (FINDINGS_PATTERN.test(next)) return false;
+
+  return true;
 }
 export function handoffNoteCitedExcerpts(note, readFile, {
   maxRanges = NOTE_EXCERPT_MAX_RANGES, context = NOTE_EXCERPT_CONTEXT,
@@ -2002,6 +2072,96 @@ export function scratchHandoffNotePath(scratchDir, taskRef) {
   } catch {
     return `${SCRATCH_HANDOFF_NOTE_DEFAULT_DIR}/task.md`;
   }
+}
+
+// Backlog #11: carry scratch dir of a capped read-only session.
+// Destination: .autopilot/missions/<mission>/handoff/<safe taskRef>-scratch/
+export const CARRIED_SCRATCH_MAX_FILE_BYTES = 1024 * 1024; // 1 MB
+export const CARRIED_SCRATCH_TOTAL_CAP_BYTES = 20 * 1024 * 1024; // 20 MB
+
+export function carriedScratchDir(repo, mission, taskRef) {
+  const safe = String(taskRef ?? "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "task";
+  const missionStr = String(mission ?? "mission").replace(/\\/g, "/");
+  return path.join(String(repo ?? ""), ".autopilot", "missions", missionStr, "handoff", `${safe}-scratch`);
+}
+
+export function copyCarriedScratch(srcDir, destDir) {
+  try {
+    if (!srcDir || !destDir || !fs.existsSync(srcDir)) return {copied: 0, bytes: 0};
+    if (fs.existsSync(destDir)) {
+      fs.rmSync(destDir, {recursive: true, force: true});
+    }
+    fs.mkdirSync(destDir, {recursive: true});
+
+    let totalBytes = 0;
+    let copiedCount = 0;
+
+    function walkAndCopy(currentSrc, currentDest, relPath) {
+      if (!fs.existsSync(currentSrc)) return;
+      const entries = fs.readdirSync(currentSrc, {withFileTypes: true});
+      for (const entry of entries) {
+        if (entry.name === ".autopilot-home") continue;
+        const entryRel = relPath ? `${relPath}/${entry.name}` : entry.name;
+        if (entryRel === ".autopilot-home" || entryRel.startsWith(".autopilot-home/")) continue;
+
+        const srcEntryPath = path.join(currentSrc, entry.name);
+        const destEntryPath = path.join(currentDest, entry.name);
+
+        if (entry.isDirectory()) {
+          walkAndCopy(srcEntryPath, destEntryPath, entryRel);
+          if (totalBytes >= CARRIED_SCRATCH_TOTAL_CAP_BYTES) return;
+        } else if (entry.isFile()) {
+          try {
+            const stat = fs.statSync(srcEntryPath);
+            if (stat.size > CARRIED_SCRATCH_MAX_FILE_BYTES) continue;
+            if (totalBytes + stat.size > CARRIED_SCRATCH_TOTAL_CAP_BYTES) return;
+            fs.mkdirSync(path.dirname(destEntryPath), {recursive: true});
+            fs.copyFileSync(srcEntryPath, destEntryPath);
+            totalBytes += stat.size;
+            copiedCount++;
+          } catch {}
+        }
+      }
+    }
+
+    walkAndCopy(srcDir, destDir, "");
+    return {copied: copiedCount, bytes: totalBytes};
+  } catch {
+    return {copied: 0, bytes: 0};
+  }
+}
+
+export function seedPreviousScratch(carriedDir, targetScratchDir) {
+  try {
+    if (!carriedDir || !targetScratchDir || !fs.existsSync(carriedDir)) return false;
+    const destDir = path.join(targetScratchDir, "previous-session");
+    if (fs.existsSync(destDir)) {
+      fs.rmSync(destDir, {recursive: true, force: true});
+    }
+    fs.cpSync(carriedDir, destDir, {recursive: true});
+    if (!fs.existsSync(destDir)) return false;
+    const entries = fs.readdirSync(destDir, {recursive: true});
+    return entries.some((f) => {
+      try {
+        return fs.statSync(path.join(destDir, f)).isFile();
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  }
+}
+
+export function deleteCarriedScratch(repo, mission, taskRef) {
+  try {
+    const dir = carriedScratchDir(repo, mission, taskRef);
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, {recursive: true, force: true});
+      return true;
+    }
+  } catch {}
+  return false;
 }
 
 // Mission 049 Phase 1 task 1.1: pick the fresher of the repo note vs the

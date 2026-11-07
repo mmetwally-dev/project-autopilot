@@ -10,13 +10,15 @@ import * as speckit from "../adapters/speckit.mjs";
 import * as gsd from "../adapters/gsd.mjs";
 import * as standalone from "../adapters/standalone.mjs";
 import { specKitState, gsdState } from "../adapters/planning-state.mjs";
-import { createGitMutationGuard, appendGuardScopeRoot, writeGuardBeforeSnapshot, guardedEnv, gitSnapshot, assertSupportedTopology, touchedFilesBetween, sessionFromOutput, roleSession, saveRoleSession, clearRoleSession, readGuardLog, describeGitStateChange, redactedGitSnapshot, formatRelayPolicyViolation, parsePorcelainV1ZEntries, keepEntryAfterEolFilter, classifyGitBlocks } from "./relay-guards.mjs";
+import { createGitMutationGuard, appendGuardScopeRoot, writeGuardBeforeSnapshot, guardedEnv, gitSnapshot, assertSupportedTopology, touchedFilesBetween, sessionFromOutput, roleSession, saveRoleSession, clearRoleSession, readGuardLog, describeGitStateChange, redactedGitSnapshot, formatRelayPolicyViolation, parsePorcelainV1ZEntries, keepEntryAfterEolFilter, classifyGitBlocks, looseObjectGrowthHasCommit } from "./relay-guards.mjs";
 import { collectSnapshotGuards, decideSnapshotReuse, getCachedSnapshot, getSnapshotCacheKey, setCachedSnapshot, clearSnapshotReuseCache, makeCacheEntry } from "./snapshot-reuse-cache.mjs";
 import { logShellDecision, networkIsolationPrefix } from "./shell-guard.mjs";
 import { runGuardedCommand } from "./guarded-command.mjs";
 import { createGateShell } from "./gate-shell.mjs";
+import { withAutopilotExclude } from "./gate-autopilot-exclude.mjs";
 import { appendNotRunInMissionsToReport, formatNotRunInMissions } from "./command-probe.mjs";
 import {loadAndMigrateConfig} from "./config-migration.mjs";
+import {diffConfigPaths, applyConfigReload} from "./config-reload.mjs";
 import {planApprovalRequired, beginPlanApprovalPause, resumePlanApproval, isPlanApprovalPaused, planApprovalPauseLines} from "./plan-approval.mjs";
 import {validateNewConfig} from "./config-validation.mjs";
 import {verifyDenylistFindings, effectiveVerifyDenylist, speckitTaskDenylistFindings, verifyLengthFindings, speckitTaskVerifyLengthFindings, verifyShardFindings, speckitTaskVerifyShardFindings, phaseTaskCountFindings, unrecognizedAnnotationFindings, specContentFindings, specCoverageFindings} from "./verify-denylist.mjs";
@@ -72,7 +74,9 @@ import {preflightConfig, preflightPrimaryModels, primaryModelPreflightMessage, o
 import {spawnRelayChild} from "./subprocess-relay.mjs";
 import {adapterDriver, finalAgentText, sessionIdFromEvents, accumulateUsage, recordRunModel, runModelPatch, applyClaudeReadOnlyScratchAllow, finalVerdictPrinted} from "./adapter-drivers.mjs";
 import {agyRelayExtraArgs} from "./agy-events.mjs";
-import {mergeTaskFacts,mergeTaskLineFacts,browserVerifierNote} from "./task-requirements.mjs";
+import {listAgyHubs, runHubsToStop, stopRunHubs} from "./agy-hub-cleanup.mjs";
+import {mergeTaskFacts,mergeTaskLineFacts,browserVerifierNote,browserCheckNotes,CODE_REVIEWER_BROWSER_LINE,isBrowserCheckFinding,splitBrowserFindings} from "./task-requirements.mjs";
+import {appendManualChecks} from "./manual-checks.mjs";
 import {buildRoleRequirements, requirementFailure} from "./role-requirements.mjs";
 import { classifyPlanningRequest } from "./planning-request.mjs";
 import { appendWatchEvent } from "./watch-events.mjs";
@@ -85,8 +89,8 @@ import { nextRunSeq, writeWatchReportFile, noE2eReportNote, appendNoE2eNoteToRep
 import { updateSummary, updateSummaryForRunDir, scopeForRunDir } from "./watch-summary.mjs";
 import { recoverStaleRuns, markInterrupted } from "./run-recovery.mjs";
 import { recordCodeReviewRound, clearCodeReviewHistory, codeReviewerRoundLines, implementerEarlierRoundsText, codeReviewScopeKey } from "./code-review-rounds.mjs";
-import { scheduleEscalation, pendingEscalationModel, consumeEscalationFor, formatEscalationLog, recordVerifierRound, clearVerifierHistory, verifierRoundLines } from "./escalation-model.mjs";
-import { recordPlanReviewRound, seedPlanReviewHistory, clearPlanReviewHistory, planReviewPassNeedsConfirmation, planReviewConfirmationPending, markPlanReviewConfirmationPending, clearPlanReviewConfirmation, planReviewRevisionCount, recordPlanReviewRevision, clearPlanReviewRevisions, planReviewerRoundLines, planReviewerConfirmationLines, plannerEarlierRoundsText, recordPlanReviewNotes, planReviewNotesText, recordPlanPassNotes, planPassNotesText, allPlanPassNotes, firstTaskPassNotes, firstGsdUnitPassNotes, PLAN_REVIEW_FULL_LINE, PLAN_REVIEW_SEVERITY_LINE, demoteLowSeverityFindings, STANDALONE_SPEC_ANALYZE_LINE, isFullPlanReviewRound, REVIEW_CONTINUATION_LINE, formatReviewBriefForContinuation, hasReviewContinuationSignal, parseTaskBlocks, changedTaskIds, taskSizeConfirmationLine, demoteUnchangedTaskSizeFindings, recordPlanReviewTaskHashes, getPlanReviewTaskHashes } from "./plan-review-rounds.mjs";
+import { scheduleEscalation, pendingEscalationModel, consumeEscalationFor, formatEscalationLog, recordVerifierRound, clearVerifierHistory, verifierRoundLines, scheduleNoProgressEscalation, formatNoProgressEscalationLog, noProgressDecision } from "./escalation-model.mjs";
+import { recordPlanReviewRound, seedPlanReviewHistory, clearPlanReviewHistory, planReviewPassNeedsConfirmation, planReviewConfirmationPending, markPlanReviewConfirmationPending, clearPlanReviewConfirmation, planReviewRevisionCount, recordPlanReviewRevision, clearPlanReviewRevisions, planReviewerRoundLines, planReviewerConfirmationLines, plannerEarlierRoundsText, recordPlanReviewNotes, planReviewNotesText, recordPlanPassNotes, planPassNotesText, allPlanPassNotes, firstTaskPassNotes, firstGsdUnitPassNotes, planPassNoteEntries, applyPlanPassNoteMarks, phaseCodeReviewPassNotesText, finalReviewPassNotesText, formatPlanPassNotesLines, PLAN_REVIEW_FULL_LINE, PLAN_REVIEW_SEVERITY_LINE, demoteLowSeverityFindings, STANDALONE_SPEC_ANALYZE_LINE, isFullPlanReviewRound, REVIEW_CONTINUATION_LINE, formatReviewBriefForContinuation, hasReviewContinuationSignal, parseTaskBlocks, changedTaskIds, taskSizeConfirmationLine, demoteUnchangedTaskSizeFindings, recordPlanReviewTaskHashes, getPlanReviewTaskHashes } from "./plan-review-rounds.mjs";
 import { saveReviewFeedback, loadReviewFeedback, clearReviewFeedback, clearReviewFeedbackByPrefix, feedbackText } from "./review-feedback.mjs";
 import { taskLabel, recordFindingTasks, loadFindingTasks, carryDecision, findingsForTask, renderHandledFindings, fixPassBriefExcerpts, clearFindingTasks, clearFindingTasksByPrefix, FINDING_TASKS_STATE_KEY } from "./finding-task-locality.mjs";
 import { runFinalReviewFixRounds, parseGateGreenFiles, isNoWorkPerformed, isReviewerFeedbackFixPass, buildNoWorkAnswerSection } from "./final-review-fix-rounds.mjs";
@@ -94,21 +98,23 @@ import { classifyGateFailures, parseGateFailures, taskLinkedTestFiles, formatGat
 import { importsDeltaFile } from "./gate-locality-imports.mjs";
 import { checkGateBaseline, resolveGateTestFile } from "./gate-baseline-locality.mjs";
 import { findUnexpectedScratchFiles, unexpectedNewFilesNote } from "./scratch-file-locality.mjs";
+import { offlineGateBriefLine, CODE_REVIEWER_TARGETED_TESTS_LINE } from "./offline-gate-brief.mjs";
 import {mapPathIntoEnvelope, SANDBOX_HOME} from "./execution-envelope.mjs";
 import {resolveAdapterTransport} from "./adapter-transport.mjs";
-import {findCodexRollout, codexUsageFromRollout, deleteCodexRollout, reconcileLiveCodexRolloutUsage} from "./codex-rollout.mjs";
+import {findCodexRollout, codexUsageFromRollout, deleteCodexRollout, reconcileLiveCodexRolloutUsage, resolveCodexHomes} from "./codex-rollout.mjs";
+export { resolveCodexHomes };
 import {ensureBaseline, hasBaseline, removeBaseline, scopedDelta, scopedDeltaChunks, sanitizeKeySegment, scopedDeltaBeginMarker, SCOPED_DELTA_END_MARKER, listWorktreeEntries, rebaseBaselineOntoHead, headMovedSinceBaseline} from "./implementation-baseline.mjs";
 import {buildStandaloneHandoff, boundedDeltaBody, MISSION_FINAL_SECURITY_LINE, specFrCheckLine, formatOperatorPhaseEdits, parseIncompleteSignal, parsePlanningIncompleteSignal, parseFoundEntries, sanitizeSummary, truncationWarning, reviewTruncationResult, formatGateResult, resolveGateDurations} from "./standalone-handoff.mjs";
 import {applyRedGateOverride, persistRedGateOverride} from "./verifier-red-gate-override.mjs";
 import {handlePlanningContinuation, planningNoProgressTouchedFiles, clearPlanningContinuations, clearPlanningContinuationScope, hasSpentPlanningContinuations, PLANNING_CONTINUATION_SCOPES} from "./planning-continuation.mjs";
-import {ensurePhaseBriefForCheckpoint, phaseBriefRelativePath} from "./role-progress-brief.mjs";
+import {ensurePhaseBriefForCheckpoint, phaseBriefRelativePath, regenerateAllPhaseBriefs, validateAndReconcilePhaseBriefs} from "./role-progress-brief.mjs";
 import {buildTaskPrompt, taskDisplayRef, reviewTaskRef, allPhaseTaskRef, readOnlyHandoffNoteReminder} from "./role-progress-prompt.mjs";
 import {stableTaskIds} from "./role-progress-ids.mjs";
 import {prepareTaskInvocation, commitTaskResult, evaluateCrashResume} from "./role-progress-commit.mjs";
 import {attributionMap, changedPaths as attributedChangedPaths, detectWorkAhead} from "./task-attribution.mjs";
 import { stageFilesChangedSinceReview, stageFilesChangedLine, recordReviewFailSnapshot, clearReviewFailSnapshot, speckitStageFilePaths, speckitGateNote, standalonePlanFeedbackNote, standaloneSpecFeedbackNote, gsdStageFiles } from "./revision-files-changed.mjs";
 import {parseTaskResultContract} from "./task-result-contract.mjs";
-import {taskSizingRuleText, taskSizeReviewText, resolveTaskSizeTargetTurns, resolveMaxPhaseTasks, resolveMinPhaseTasks, resolvePerTaskLimits, resolvePerRoleLimits, checkCapBreach, capUnitLabel, growingTerm, evaluateCapGraceWindow, checkWrapupTrigger, sessionStoreRelDir, sessionStoreSandboxSubpath, consumeContinuation, clearTaskContinuation, recordRolloverDeadEnd, readRolloverDeadEnds, clearRolloverDeadEnds, deadEndTail, sessionWorkDigest, resolveHandoffMaxChars, resolveHandoffNoteMaxChars, resolveHandoffWrapupTokens, handoffNoteRelPath, continuationBudgetKey, CONTINUATION_BUDGET_KEY_PREFIX, resolveContinuationAllowance, RELAY_TIMEOUT_DEFAULT_MS, HANDOFF_WRAPUP_TOKENS_DEFAULT, PER_ROLE_WRAPUP_TOKENS_DEFAULT, WRAPUP_MAX_TURNS, WRAPUP_TIMEOUT_MS, SESSION_STORE_WARN_BYTES, recordGenerationProgress, resolveNoProgressGenerations, clearNoProgress, noProgressDisplayLabel, handoffNoteCitedExcerpts, resolveIdleHangMs, resolveFirstOutputMs, resolveMaxSilenceMs, isHandoffNoteFresh, buildOrchestratorFallbackNote, scratchHandoffNotePath, SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, pickFresherHandoffNote, handoffBudgetReminder, mergeFallbackWithPreviousNote, resolveBackstopRawTokens, evaluateBackstopBreach, recordBackstopFiring, readBackstopFirings, clearBackstopFirings, backstopLedgerKey, evaluateBackstopEscalation, handleRoleBackstopFiring, resolveSessionNumber} from "./per-task-budget.mjs";
+import {taskSizingRuleText, taskSizeReviewText, resolveTaskSizeTargetTurns, resolveMaxPhaseTasks, resolveMinPhaseTasks, resolvePerTaskLimits, resolvePerRoleLimits, checkCapBreach, capUnitLabel, growingTerm, evaluateCapGraceWindow, checkWrapupTrigger, sessionStoreRelDir, sessionStoreSandboxSubpath, consumeContinuation, clearContinuationRound, clearTaskContinuation, recordRolloverDeadEnd, readRolloverDeadEnds, clearRolloverDeadEnds, deadEndTail, sessionWorkDigest, resolveHandoffMaxChars, resolveHandoffNoteMaxChars, resolveHandoffWrapupTokens, handoffNoteRelPath, continuationBudgetKey, CONTINUATION_BUDGET_KEY_PREFIX, resolveContinuationAllowance, RELAY_TIMEOUT_DEFAULT_MS, HANDOFF_WRAPUP_TOKENS_DEFAULT, PER_ROLE_WRAPUP_TOKENS_DEFAULT, WRAPUP_MAX_TURNS, WRAPUP_TIMEOUT_MS, SESSION_STORE_WARN_BYTES, recordGenerationProgress, resolveNoProgressGenerations, clearNoProgress, noProgressDisplayLabel, handoffNoteCitedExcerpts, resolveIdleHangMs, resolveFirstOutputMs, resolveMaxSilenceMs, isHandoffNoteFresh, buildOrchestratorFallbackNote, scratchHandoffNotePath, SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, pickFresherHandoffNote, handoffBudgetReminder, mergeFallbackWithPreviousNote, resolveBackstopRawTokens, evaluateBackstopBreach, recordBackstopFiring, readBackstopFirings, clearBackstopFirings, backstopLedgerKey, evaluateBackstopEscalation, handleRoleBackstopFiring, resolveSessionNumber, carriedScratchDir, copyCarriedScratch, seedPreviousScratch, deleteCarriedScratch, noteSaysOnlyGateLeft} from "./per-task-budget.mjs";
 import {createIdleWatch, noteIdleOutput, noteIdleStdoutChunk, noteIdleStderrText, evaluateIdleWatch, formatIdleHangMessage, formatRateLimitedMessage, adapterMarkerFor, extractSessionIdFromChunk, noteIdleSessionId, IDLE_HANG_KILL_GRACE_MS, FREE_QUOTA_REASON, PROVIDER_BALANCE_REASON} from "./idle-hang-watchdog.mjs";
 import {deriveRoleDeadline, collectRoleSamples, ROLE_DEADLINE_FLOOR_MS} from "./role-deadline.mjs";
 import {assembleAdapterLaunchPlan} from "./launch-plan.mjs";
@@ -128,7 +134,7 @@ import {
 } from "./opencode-credentials.mjs";
 import {runFailedBeforeFirstStep, isSessionNotFound, storedSessionMatches} from "./session-reset.mjs";
 import {failedRunDidWork, appendFailureHandoff} from "./failure-handoff.mjs";
-import {decideRoleFallback, resolveEffectiveRoleModel, formatRoleFallbackLog, decideRoleFallbackRetry, stampStickyFallback, staleStickyFallback, markExhausted, isExhausted, skipExhaustedRoleModel} from "./role-fallback.mjs";
+import {decideRoleFallback, resolveEffectiveRoleModel, formatRoleFallbackLog, decideRoleFallbackRetry, stampStickyFallback, staleStickyFallback, markExhausted, isExhausted, skipExhaustedRoleModel, canonicalModelId} from "./role-fallback.mjs";
 import {detectModelNotFoundFailure, formatPrimaryModelFallbackLine, primaryModelFallbackEntries} from "./primary-model-fallback.mjs";
 import {setTaskCheckboxes, applyTaskCheckboxStates} from "./speckit-task-state.mjs";
 import {CHECKPOINT_STATE_KEY, createCheckpoint, validateCheckpoint, isCheckpointForPhase, resumeStage, isApprovalReuseStage, phaseTaskDigest, deltaDigest, evaluatePlanningGate, decideTransition, emptyRoleProgress, retryPauseStageOf, shouldRetryPause, getCachedGateResult, setCachedGateResult, recordContinuationGateResult, takeContinuationGateResult, clearContinuationGateResult, getLastGateResult, recordLastGateResult, skipCheckpointStage} from "./phase-stage-checkpoint.mjs";
@@ -193,6 +199,11 @@ const repo=path.resolve(process.argv.includes("--repo")?process.argv[process.arg
 const command=process.argv[2]||"status";
 const commandArgs=process.argv.slice(3);
 const cfgPath=path.join(repo,".autopilot","config.json");
+let liveConfigMtimeMs=0;
+let lastSkippedConfigMtimeMs=0;
+let liveConfigRepairs=[];
+export function setLiveConfigRepairsForTests(repairs){ liveConfigRepairs = repairs || []; }
+export { liveConfigRepairs };
 const statePath=path.join(repo,".autopilot","state.json");
 // Plain read from the skill's own adapters/ directory — no trusted-release
 // bootstrap, no installer-owned install root required. This is the file
@@ -284,18 +295,25 @@ function reportNotRunInMissions(s){
     if(mission) appendNotRunInMissionsToReport(path.join(repo,".autopilot","missions",mission,"REPORT.md"),list);
   }catch{}
 }
-function reportPlanPassNotes(s){
+export function reportPlanPassNotes(s, { reportFile = null, repoRoot = repo } = {}){
   try{
-    const notes=allPlanPassNotes(s);
-    if(!notes.length) return;
-    const mission=missionDirFor(repo,s);
-    if(!mission) return;
-    const reportFile=path.join(repo,".autopilot","missions",mission,"REPORT.md");
-    if(fs.existsSync(reportFile)){
-      const cur=fs.readFileSync(reportFile,"utf8");
-      if(!cur.includes("Plan-review notes not applied")){
-        const text=`Plan-review notes not applied:\n${notes.map((n,i)=>`${i+1}. ${n}`).join("\n")}`;
-        fs.writeFileSync(reportFile,`${cur.replace(/\n+$/,"")}\n\n${text}\n`);
+    const entries=planPassNoteEntries(s);
+    if(!entries.length) return;
+    const mission=missionDirFor(repoRoot,s);
+    const targetFile=reportFile || (mission ? path.join(repoRoot,".autopilot","missions",mission,"REPORT.md") : null);
+    if(!targetFile) return;
+    if(fs.existsSync(targetFile)){
+      const cur=fs.readFileSync(targetFile,"utf8");
+      const lines=formatPlanPassNotesLines(entries);
+      const text=`Plan-review notes:\n${lines.join("\n")}`;
+      const sectionRegex=/(?:^|\n\n)(?:Plan-review notes(?: not applied)?:|=== Plan-review notes(?: not applied)? ===)\n[\s\S]*?(?=(?:\r?\n\r?\n[^\n]|$))/;
+      const match=cur.match(sectionRegex);
+      if(match){
+        const isAtStart=match.index===0;
+        const replacement=isAtStart?text:`\n\n${text}`;
+        fs.writeFileSync(targetFile,cur.replace(sectionRegex,replacement));
+      }else{
+        fs.writeFileSync(targetFile,`${cur.replace(/\n+$/,"")}\n\n${text}\n`);
       }
     }
   }catch{}
@@ -421,7 +439,7 @@ const MISSION_SCOPED_STATE_KEYS=Object.freeze([
   // review for THIS mission only — never inherited by the next one.
   "finalReviewSkipped",
   // Pending #22: one-round escalation model bookkeeping + verifier round history.
-  "escalationSwitches","escalationPending","verifierHistory",
+  "escalationSwitches","escalationPending","verifierHistory","noProgressEscalations",
   // Backlog #95: free models already rate-limited this mission (per role).
   "triedFreeModels",
   // Backlog #18: mission-wide models already found RATE_LIMITED by any role,
@@ -434,7 +452,9 @@ const MISSION_SCOPED_STATE_KEYS=Object.freeze([
   // Mission 063 task 1.1: operator-acknowledged phase-delta edits recorded by
   // `ap rebase`. They describe THIS mission's own drift acceptance, so a new
   // mission or cancel must drop them with the checkpoint they annotate.
-  "operatorPhaseEdits"
+  "operatorPhaseEdits",
+  // Backlog #6: single verdict-only review turns run on cap when only gate left.
+  "verdictOnlyTurns"
 ]);
 // F9: settle the INTENT before either crash-recovery reconcile validates a dead
 // mission's debris.
@@ -1576,10 +1596,17 @@ function applyPendingGlobalReset(s){
   console.log(`[autopilot] live global reset applied: cleared ${cleared.length?cleared.join(", "):"nothing spent"} — continuing instead of escalating.`);
   return true;
 }
-function resetGlobalCommand(s){
+function resetGlobalCommand(s, {dryRun = false} = {}){
   const found=stopLivePid();
   const livePids=found.pid?[found.pid]:(Array.isArray(found.ambiguous)?found.ambiguous:[]);
   if(livePids.length){
+    if(dryRun){
+      console.log(`Global reset REQUESTED — ${livePids.length>1?`runs are alive (pids ${livePids.join(", ")})`:`a run is alive (pid ${livePids[0]})`}, so it would be handed to that run.`);
+      console.log("  Applies at its next failure or continuation decision, in the same process: every spent counter is cleared and the mission continues instead of escalating.");
+      console.log("  Counters only; stage position and every other field are untouched.");
+      console.log("dry run — nothing changed");
+      return 0;
+    }
     fs.mkdirSync(path.dirname(pendingResetPath()),{recursive:true});
     enqueueResetRequest(pendingResetPath(),{global:true,key:GLOBAL_RESET_KEY,scope:GLOBAL_RESET_KEY,at:now(),requestedBy:"ap reset",requestedPid:process.pid});
     const missionDir = getMissionWatchDir(s);
@@ -1590,21 +1617,26 @@ function resetGlobalCommand(s){
     return 0;
   }
   const stale=readResetRequests(pendingResetPath());
-  try{ removeAllResetRequests(pendingResetPath()); }catch{ /* none */ }
-  const cleared=clearAllSpentCounters(s);
+  if(!dryRun){
+    try{ removeAllResetRequests(pendingResetPath()); }catch{ /* none */ }
+  }
+  const cleared=clearAllSpentCounters(dryRun ? JSON.parse(JSON.stringify(s)) : s);
   if(!cleared.length&&!stale.length){
     console.error("ap reset: nothing is spent anywhere (failureBudgets, continuationBudgets, rolloverDeadEnds, standalonePlanReview.revision, planReviewRevisions). Nothing to clear. To target one key explicitly pass `--scope <key>`.");
     return 1;
   }
-  s.lastReset={at:now(),scope:"global",clearedUsed:cleared.length,clearedLimit:null,failure:null,role:null,adapter:null,appliedLive:false};
-  saveState(s);
-  const missionDir = getMissionWatchDir(s);
-  try{ if (missionDir) appendWatchEvent(missionDir, { type: "operator", reason: "reset", scope: "global", live: false }); }catch{}
+  if(!dryRun){
+    s.lastReset={at:now(),scope:"global",clearedUsed:cleared.length,clearedLimit:null,failure:null,role:null,adapter:null,appliedLive:false};
+    saveState(s);
+    const missionDir = getMissionWatchDir(s);
+    try{ if (missionDir) appendWatchEvent(missionDir, { type: "operator", reason: "reset", scope: "global", live: false }); }catch{}
+  }
   console.log(`Reset ALL spent counters (${cleared.length}):`);
-  for(const c of cleared) console.log(`  cleared ${c}`);
-  for(const old of stale) console.log(`  discarded a stale reset request for '${old?.key||old?.scope}' left behind by an earlier run.`);
+  for(const c of cleared) console.log(`  ${dryRun ? "would clear" : "cleared"} ${c}`);
+  for(const old of stale) console.log(`  ${dryRun ? "would discard" : "discarded"} a stale reset request for '${old?.key||old?.scope}' left behind by an earlier run.`);
   console.log("  counters only — stage position, checkpoints, hand-off notes, reviewFeedback and every other field are untouched.");
   console.log("  `ap run` (no message) now resumes the same mission at the same position.");
+  if(dryRun) console.log("dry run — nothing changed");
   return 0;
 }
 // Mission 086: the standalone plan-revision counter (`standalonePlanReview.revision`)
@@ -1612,10 +1644,17 @@ function resetGlobalCommand(s){
 // the counter (findings, reviewFeedback, budgets and dead-ends are kept); live
 // it queues a request consumed at the top of the runStandalonePlanning revision
 // loop and just before its revision>=maxRevisions cap checks.
-function resetPlanRevisionCommand(s){
+function resetPlanRevisionCommand(s, {dryRun = false} = {}){
   const found=stopLivePid();
   const livePids=found.pid?[found.pid]:(Array.isArray(found.ambiguous)?found.ambiguous:[]);
   if(livePids.length){
+    if(dryRun){
+      console.log(`Reset REQUESTED for '${PLAN_REVISION_RESET_KEY}' — ${livePids.length>1?`runs are alive (pids ${livePids.join(", ")})`:`a run is alive (pid ${livePids[0]})`}, so it would be handed to that run.`);
+      console.log("  Applies at its next planning-revision decision, in the same process: the revision counter restarts instead of escalating.");
+      console.log("  Revision counter only; findings, reviewFeedback and every other field are untouched.");
+      console.log("dry run — nothing changed");
+      return 0;
+    }
     fs.mkdirSync(path.dirname(pendingResetPath()),{recursive:true});
     enqueueResetRequest(pendingResetPath(),{...planRevisionResetRequest(s?.mission),at:now(),requestedBy:"ap reset",requestedPid:process.pid});
     const missionDir = getMissionWatchDir(s);
@@ -1626,27 +1665,33 @@ function resetPlanRevisionCommand(s){
     return 0;
   }
   const stale=readResetRequests(pendingResetPath());
-  try{ removeAllResetRequests(pendingResetPath()); }catch{ /* none */ }
+  if(!dryRun){
+    try{ removeAllResetRequests(pendingResetPath()); }catch{ /* none */ }
+  }
   const before=s?.standalonePlanReview && typeof s.standalonePlanReview==="object" ? s.standalonePlanReview.revision : undefined;
-  const cleared=clearPlanRevisionCounter(s);
+  const cleared=dryRun ? (before!==undefined&&Number.isFinite(Number(before))?Number(before):null) : clearPlanRevisionCounter(s);
   if(cleared===null&&!stale.length){
     console.error(`ap reset: '${PLAN_REVISION_RESET_KEY}' has no recorded revision. Nothing to clear (see \`standalonePlanReview.revision\` in state.json).`);
     return 1;
   }
   const used=Number(before);
-  s.lastReset={at:now(),scope:PLAN_REVISION_RESET_KEY,clearedUsed:Number.isFinite(used)?used:(cleared??0),clearedLimit:null,failure:null,role:null,adapter:null,appliedLive:false};
-  saveState(s);
-  const missionDir = getMissionWatchDir(s);
-  try{ if (missionDir) appendWatchEvent(missionDir, { type: "operator", reason: "reset", scope: "plan-revision", live: false }); }catch{}
-  console.log(`Reset '${PLAN_REVISION_RESET_KEY}': cleared revision ${cleared??0}.`);
-  for(const old of stale) console.log(`  discarded a stale reset request for '${old?.key||old?.scope}' left behind by an earlier run.`);
+  if(!dryRun){
+    s.lastReset={at:now(),scope:PLAN_REVISION_RESET_KEY,clearedUsed:Number.isFinite(used)?used:(cleared??0),clearedLimit:null,failure:null,role:null,adapter:null,appliedLive:false};
+    saveState(s);
+    const missionDir = getMissionWatchDir(s);
+    try{ if (missionDir) appendWatchEvent(missionDir, { type: "operator", reason: "reset", scope: "plan-revision", live: false }); }catch{}
+  }
+  console.log(`Reset '${PLAN_REVISION_RESET_KEY}': ${dryRun ? "would clear" : "cleared"} revision ${cleared??0}.`);
+  for(const old of stale) console.log(`  ${dryRun ? "would discard" : "discarded"} a stale reset request for '${old?.key||old?.scope}' left behind by an earlier run.`);
   console.log("  revision counter only — findings, reviewFeedback, stage position, checkpoints and every other field are untouched.");
   console.log("  `ap run` (no message) now resumes the same mission at the same position.");
+  if(dryRun) console.log("dry run — nothing changed");
   return 0;
 }
 // Backlog #17: `ap reset --scope fallback:<role>` clears that role's sticky
 // fallback and tried-free list. Offline only: a live run would overwrite it.
 function resetFallbackCommand(s,role){
+  const dryRun=Boolean(arguments[2]?.dryRun);
   const found=stopLivePid();
   if(found.pid||(Array.isArray(found.ambiguous)&&found.ambiguous.length)){
     console.error(`ap reset: a run is alive — stop it first (\`ap stop\`), then \`ap reset --scope fallback:${role}\` (or a bare \`ap reset\`, which a live run applies itself).`);
@@ -1659,28 +1704,31 @@ function resetFallbackCommand(s,role){
     console.error(`ap reset: role '${role}' has no sticky fallback, tried-model list or exhausted models. Nothing to clear (see \`activeRoleModels\`, \`triedFreeModels\` and \`exhaustedModels\` in the state file).`);
     return 1;
   }
-  if(s.activeRoleModels) delete s.activeRoleModels[role];
-  if(s.triedFreeModels) delete s.triedFreeModels[role];
-  if(s.exhaustedModels){
-    s.exhaustedModels=Object.fromEntries(Object.entries(s.exhaustedModels).filter(([,v])=>v?.by!==role));
+  if(!dryRun){
+    if(s.activeRoleModels) delete s.activeRoleModels[role];
+    if(s.triedFreeModels) delete s.triedFreeModels[role];
+    if(s.exhaustedModels){
+      s.exhaustedModels=Object.fromEntries(Object.entries(s.exhaustedModels).filter(([,v])=>v?.by!==role));
+    }
+    s.lastReset={at:now(),scope:`fallback:${role}`,clearedUsed:had?1:0,clearedLimit:null,failure:null,role,adapter:null,appliedLive:false};
+    saveState(s);
+    const missionDir = getMissionWatchDir(s);
+    try{ if (missionDir) appendWatchEvent(missionDir, { type: "operator", reason: "reset", scope: "fallback", role, live: false }); }catch{}
   }
-  s.lastReset={at:now(),scope:`fallback:${role}`,clearedUsed:had?1:0,clearedLimit:null,failure:null,role,adapter:null,appliedLive:false};
-  saveState(s);
-  const missionDir = getMissionWatchDir(s);
-  try{ if (missionDir) appendWatchEvent(missionDir, { type: "operator", reason: "reset", scope: "fallback", role, live: false }); }catch{}
-  console.log(`Reset 'fallback:${role}': cleared ${had?`sticky fallback ${had.adapter}/${had.model}`:"no sticky fallback"}${Array.isArray(tried)&&tried.length?` and ${tried.length} tried model(s)`:""}${exhaustedKeys.length?` and ${exhaustedKeys.length} exhausted model(s)`:""}.`);
+  console.log(`Reset 'fallback:${role}': ${dryRun ? "would clear" : "cleared"} ${had?`sticky fallback ${had.adapter}/${had.model}`:"no sticky fallback"}${Array.isArray(tried)&&tried.length?` and ${tried.length} tried model(s)`:""}${exhaustedKeys.length?` and ${exhaustedKeys.length} exhausted model(s)`:""}.`);
   console.log(`  ${role} runs on its configured primary again; every other field is untouched.`);
   console.log("  `ap run` (no message) now resumes the same mission at the same position.");
+  if(dryRun) console.log("dry run — nothing changed");
   return 0;
 }
-function resetCommand(scopeArg){
+function resetCommand(scopeArg, {dryRun = false} = {}){
   const s=loadState();
-  if(!scopeArg) return resetGlobalCommand(s);
-  if(scopeArg.startsWith("fallback:")) return resetFallbackCommand(s,scopeArg.slice("fallback:".length));
+  if(!scopeArg) return resetGlobalCommand(s, {dryRun});
+  if(scopeArg.startsWith("fallback:")) return resetFallbackCommand(s,scopeArg.slice("fallback:".length), {dryRun});
   // Mission 086: the standalone plan-revision counter has its own scope —
   // checked before the continuation/failure resolution below so the
   // colon-free scope is never mistaken for a failure-budget key.
-  if(scopeArg===PLAN_REVISION_RESET_SCOPE||scopeArg===PLAN_REVISION_RESET_KEY) return resetPlanRevisionCommand(s);
+  if(scopeArg===PLAN_REVISION_RESET_SCOPE||scopeArg===PLAN_REVISION_RESET_KEY) return resetPlanRevisionCommand(s, {dryRun});
   // Backlog #27: an explicit continuation target (full key, scope without the
   // prefix, or bare task id) takes the continuation path. Failure budgets keep
   // their existing resolution untouched below.
@@ -1690,17 +1738,17 @@ function resetCommand(scopeArg){
       console.error(`ap reset: '${scopeArg}' matches ${cont.ambiguous.length} continuations: ${cont.ambiguous.join(", ")}. Pass the full scope to disambiguate.`);
       return 1;
     }
-    if(cont.scope) return resetContinuationCommand(s,cont.scope);
+    if(cont.scope) return resetContinuationCommand(s,cont.scope, {dryRun});
   }
   const recorded=s.lastFailureBudget||null;
   const {key,scope}=resetTargetKey(s,scopeArg);
-  if(key) return resetFailureCommand(s,recorded,key,scope);
+  if(key) return resetFailureCommand(s,recorded,key,scope, {dryRun});
   // Backlog #27: no failure target — after a *_task_not_converging escalation
   // the recorded continuation is the automatic target (recorded at escalation,
   // like lastFailureBudget).
   if(!scopeArg){
     const cont=resetContinuationScope(s,null);
-    if(cont.scope) return resetContinuationCommand(s,cont.scope);
+    if(cont.scope) return resetContinuationCommand(s,cont.scope, {dryRun});
   }
   console.error("ap reset: nothing to target. Pass `--scope <scope>`:");
   console.error("  - a failure budget: the full budget key, or the scope `lastFailureBudget.budget`/`.scope` name in state.json;");
@@ -1738,11 +1786,18 @@ function resetContinuationScope(s,scopeArg){
 // hand-off note is deliberately KEPT (default): it is the useful resume
 // context — the next run starts from the previous session's conclusions,
 // while the generation counter and digest restart fresh.
-function resetContinuationCommand(s,contScope){
+function resetContinuationCommand(s,contScope, {dryRun = false} = {}){
   const fullKey=continuationBudgetKey(contScope);
   const found=stopLivePid();
   const livePids=found.pid?[found.pid]:(Array.isArray(found.ambiguous)?found.ambiguous:[]);
   if(livePids.length){
+    if(dryRun){
+      console.log(`Reset REQUESTED for '${fullKey}' (scope '${contScope}') — ${livePids.length>1?`runs are alive (pids ${livePids.join(", ")})`:`a run is alive (pid ${livePids[0]})`}, so it would be handed to that run.`);
+      console.log("  Applies at its next continuation decision for that scope, in the same process: the mission continues on a fresh allowance instead of escalating.");
+      console.log("  Allowance + dead-ends only; stage position and every other field are untouched. The task hand-off note is kept.");
+      console.log("dry run — nothing changed");
+      return 0;
+    }
     // Live case: hand the request to the running mission — same side-channel
     // file as the failure-budget path. It applies at the next continuation
     // decision for this scope (maybeApplyPendingContinuationReset), so the
@@ -1760,7 +1815,9 @@ function resetContinuationCommand(s,contScope){
   // Idle case: apply directly, and discard any stale request so a leftover can
   // never fire during some later run.
   const stale=readResetRequests(pendingResetPath());
-  try{ removeAllResetRequests(pendingResetPath()); }catch{ /* none */ }
+  if(!dryRun){
+    try{ removeAllResetRequests(pendingResetPath()); }catch{ /* none */ }
+  }
   const used=s.continuationBudgets?.[fullKey];
   const deadList=s.rolloverDeadEnds?.[fullKey];
   const deadCount=Array.isArray(deadList)?deadList.length:0;
@@ -1771,29 +1828,32 @@ function resetContinuationCommand(s,contScope){
   const owner=s.lastContinuation && s.lastContinuation.scope===contScope ? s.lastContinuation : null;
   const noteRel=owner?.mission && owner?.taskRef ? handoffNoteRelPath(owner.mission,owner.taskRef) : null;
   const noteKept=noteRel && fs.existsSync(path.join(repo,noteRel));
-  if(used!==undefined && s.continuationBudgets) delete s.continuationBudgets[fullKey];
-  if(deadList!==undefined && s.rolloverDeadEnds) delete s.rolloverDeadEnds[fullKey];
-  clearNoProgress(s,contScope);
-  clearLastContinuation(s,contScope);
   const limit=resolveContinuationAllowance(cfg()?.policy);
-  s.lastReset={at:now(),scope:fullKey,clearedUsed:used??0,clearedLimit:limit,
-    failure:null,role:null,adapter:null,appliedLive:false};
-  saveState(s);
-  const missionDir = getMissionWatchDir(s);
-  try{ if (missionDir) appendWatchEvent(missionDir, { type: "operator", reason: "reset", scope: "continuation", contScope, live: false }); }catch{}
-  console.log(`Reset '${fullKey}': cleared allowance ${used??0}/${limit} and ${deadCount} dead-end entr${deadCount===1?"y":"ies"}.`);
+  if(!dryRun){
+    if(used!==undefined && s.continuationBudgets) delete s.continuationBudgets[fullKey];
+    if(deadList!==undefined && s.rolloverDeadEnds) delete s.rolloverDeadEnds[fullKey];
+    clearNoProgress(s,contScope);
+    clearLastContinuation(s,contScope);
+    s.lastReset={at:now(),scope:fullKey,clearedUsed:used??0,clearedLimit:limit,
+      failure:null,role:null,adapter:null,appliedLive:false};
+    saveState(s);
+    const missionDir = getMissionWatchDir(s);
+    try{ if (missionDir) appendWatchEvent(missionDir, { type: "operator", reason: "reset", scope: "continuation", contScope, live: false }); }catch{}
+  }
+  console.log(`Reset '${fullKey}': ${dryRun ? "would clear" : "cleared"} allowance ${used??0}/${limit} and ${deadCount} dead-end entr${deadCount===1?"y":"ies"}.`);
   console.log(noteKept
     ? `  kept the task hand-off note at ${noteRel} (notes are never cleared by reset).`
     : `  kept the task hand-off note (notes are never cleared by reset).`);
-  for(const old of stale) console.log(`  discarded a stale reset request for '${old?.key||old?.scope}' left behind by an earlier run.`);
+  for(const old of stale) console.log(`  ${dryRun ? "would discard" : "discarded"} a stale reset request for '${old?.key||old?.scope}' left behind by an earlier run.`);
   console.log("  allowance + dead-ends only — stage position, checkpoints and every other field are untouched.");
   console.log("  `ap run` (no message) now resumes the same mission at the same position.");
+  if(dryRun) console.log("dry run — nothing changed");
   return 0;
 }
 // The failure-budget half of `ap reset` (unchanged behavior): resolve the
 // recorded failure's own key or a named key, queue while live, apply while
 // idle. Counters only — position, checkpoints and lastFailure survive.
-function resetFailureCommand(s,recorded,key,scope){
+function resetFailureCommand(s,recorded,key,scope, {dryRun = false} = {}){
   // WSL-aware ground truth (shared with stop/cancel): a /proc-only check would
   // miss a live run on native Windows and clear its counters underneath it —
   // the lost update the live path exists to prevent. Several matches (Windows
@@ -1802,6 +1862,13 @@ function resetFailureCommand(s,recorded,key,scope){
   const found=stopLivePid();
   const livePids=found.pid?[found.pid]:(Array.isArray(found.ambiguous)?found.ambiguous:[]);
   if(livePids.length){
+    if(dryRun){
+      console.log(`Reset REQUESTED for '${key}' (scope '${scope}') — ${livePids.length>1?`runs are alive (pids ${livePids.join(", ")})`:`a run is alive (pid ${livePids[0]})`}, so it would be handed to that run.`);
+      console.log("  Applies at its next failure decision for that scope, in the same process: the mission continues instead of escalating.");
+      console.log("  Counters only; stage position and every other field are untouched.");
+      console.log("dry run — nothing changed");
+      return 0;
+    }
     // Live case: hand the request to the running mission. It applies inside the
     // SAME run at the next failure decision for this scope, so the mission
     // continues instead of escalating — no stop and no restart. QUEUED, so a
@@ -1818,7 +1885,9 @@ function resetFailureCommand(s,recorded,key,scope){
   // Idle case: apply directly, and discard any stale request so a leftover can
   // never fire during some later run.
   const stale=readResetRequests(pendingResetPath());
-  try{ removeAllResetRequests(pendingResetPath()); }catch{ /* none */ }
+  if(!dryRun){
+    try{ removeAllResetRequests(pendingResetPath()); }catch{ /* none */ }
+  }
   const budgets=s.failureBudgets||{};
   const used=budgets[key];
   if(used===undefined && !stale.length){
@@ -1827,18 +1896,21 @@ function resetFailureCommand(s,recorded,key,scope){
   }
   const f=s.lastFailure||null;
   const limit=recorded&&recorded.budget&&recorded.scope&&`${recorded.budget}:${recorded.scope}`===key?recorded.limit:null;
-  if(used!==undefined) delete budgets[key];
-  s.failureBudgets=budgets;
-  s.lastReset={at:now(),scope:key,clearedUsed:used??0,clearedLimit:limit,
-    failure:f?`${f.class}/${f.domain}`:null,role:f?.sourceRole||null,adapter:f?.adapter||null,appliedLive:false};
-  saveState(s);
-  const missionDir = getMissionWatchDir(s);
-  try{ if (missionDir) appendWatchEvent(missionDir, { type: "operator", reason: "reset", scope: "failure-budget", key, live: false }); }catch{}
-  console.log(`Reset '${key}': cleared ${used??0}/${limit??"?"} recorded use(s).`);
+  if(!dryRun){
+    if(used!==undefined) delete budgets[key];
+    s.failureBudgets=budgets;
+    s.lastReset={at:now(),scope:key,clearedUsed:used??0,clearedLimit:limit,
+      failure:f?`${f.class}/${f.domain}`:null,role:f?.sourceRole||null,adapter:f?.adapter||null,appliedLive:false};
+    saveState(s);
+    const missionDir = getMissionWatchDir(s);
+    try{ if (missionDir) appendWatchEvent(missionDir, { type: "operator", reason: "reset", scope: "failure-budget", key, live: false }); }catch{}
+  }
+  console.log(`Reset '${key}': ${dryRun ? "would clear" : "cleared"} ${used??0}/${limit??"?"} recorded use(s).`);
   if(f) console.log(`  overriding: ${f.class}/${f.domain}${f.sourceRole?` (role ${f.sourceRole})`:""}${f.adapter?` on ${f.adapter}`:""} — retryable=${f.retryable}`);
-  for(const old of stale) console.log(`  discarded a stale reset request for '${old?.key||old?.scope}' left behind by an earlier run.`);
+  for(const old of stale) console.log(`  ${dryRun ? "would discard" : "discarded"} a stale reset request for '${old?.key||old?.scope}' left behind by an earlier run.`);
   console.log("  counters only — stage position, checkpoints and every other field are untouched.");
   console.log("  `ap run` (no message) now resumes the same mission at the same position.");
+  if(dryRun) console.log("dry run — nothing changed");
   return 0;
 }
 // Backlog #26 Step A: the task hand-off note. The implementer keeps it
@@ -1919,7 +1991,19 @@ function reviewNoProgressTouchedFiles(missionName, taskRef, contScope, s){
 function stopOnNoProgress(s,c,{framework,contScope,taskId,missionName,taskRef,touchedFiles,checkpoint,step}){
   const consecutive=recordGenerationProgress(s,contScope,touchedFiles);
   const limit=resolveNoProgressGenerations(c.policy);
-  if(consecutive<limit) return;
+  const isTaskSite=taskId!=null && step===undefined;
+  const escalatedForScope=Boolean(isTaskSite && contScope && s?.noProgressEscalations?.[contScope]);
+  const pendingForScope=Boolean(isTaskSite && contScope && s?.escalationPending?.implementer?.reason==="no_progress" && s.escalationPending.implementer.scopeKey===contScope);
+  const decision=noProgressDecision({consecutive,limit,isTaskSite,escalatedForScope,pendingForScope});
+  if(decision==="continue") return;
+  if(decision==="escalate"){
+    let from=null;try{from=effectiveRoleModelFor(s,c,"implementer");}catch{}
+    const esc=scheduleNoProgressEscalation(s,c,{role:"implementer",scopeKey:contScope,taskId,consecutive,from});
+    if(esc){
+      console.log(formatNoProgressEscalationLog(esc));
+      clearNoProgress(s,contScope);saveState(s);return;
+    }
+  }
   s.phase="escalated";s.step=step ?? `${framework}_task_no_progress`;
   s.phaseCheckpointError={code:"NO_PROGRESS",evidence:{taskId,consecutive,limit}};
   recordLastContinuation(s,{contScope,taskId,missionName,taskRef});
@@ -1942,6 +2026,7 @@ function clearHandoffNote(missionName, taskRef){
   try{
     if(!missionName || !taskRef) return false;
     fs.rmSync(path.join(repo,handoffNoteRelPath(missionName,taskRef)),{force:true});
+    deleteCarriedScratch(repo,missionName,taskRef);
     return true;
   }catch{ return false; }
 }
@@ -2237,6 +2322,9 @@ function orchestratorFatal(message){ const e=new Error(message); e.autopilotFata
 // runRelay()'s onStart, cleared when the relay settles). The relay child
 // is spawned detached on POSIX, so this PID is also its process-group ID.
 let activeChildPid=null;
+let activeAgyHubBefore=null;
+let activeAgyAddDirs=null;
+let activeAgyRelayPid=null;
 let interruptFlushInstalled=false;
 // Task 042-1.5: once SIGTERM/SIGINT arrives, no new role run may launch.
 // Set in installInterruptFlush() before the flush; checked at runRelay()
@@ -2273,6 +2361,19 @@ function installInterruptFlush(){
     // bounded wait, SIGKILL — synchronous), so a SIGTERM-ignoring adapter
     // tree is gone before state is flushed and the signal re-raised.
     try{ killActiveProcessGroupSync(activeChildPid); }catch{}
+    try{
+      if(activeAgyHubBefore || activeAgyAddDirs){
+        const hubs=runHubsToStop({
+          before:activeAgyHubBefore,
+          relayPid:activeAgyRelayPid || activeChildPid,
+          addDirs:activeAgyAddDirs,
+        });
+        const stopped=stopRunHubs(hubs);
+        if(stopped.length>0){
+          console.log(`[agy] stopped ${stopped.length} orphaned hub process(es): ${stopped.join(", ")}`);
+        }
+      }
+    }catch{}
     try{ if(activeRunDir) markInterrupted(activeRunDir,{reason:`received ${signal}`}); }catch{}
     // F2b #23b: record an orchestrator_exit event before exiting.
     try{
@@ -2584,7 +2685,7 @@ function cfg(){
 // whether the executable actually works is a live question answered exactly
 // once, by preflightConfiguredRoles() below, immediately before the mission
 // opens.
-function validateRoleRuntimeConfig(c){
+function validateRoleRuntimeConfig(c, { orThrow = false } = {}){
   const problems=[];
   for(const [roleName,role] of Object.entries(c.roles||{})){
     const a=agents[role.adapter];
@@ -2627,7 +2728,10 @@ function validateRoleRuntimeConfig(c){
       }
     }
   }
-  if(problems.length) die("Invalid role configuration:\n" + problems.map(p=>` - ${p}`).join("\n"));
+  if(problems.length){
+    if(orThrow) throw new Error(problems[0]);
+    die("Invalid role configuration:\n" + problems.map(p=>` - ${p}`).join("\n"));
+  }
 }
 
 // The git-mutation guard (relay-guards.mjs) is hardcoded and unconditional —
@@ -2637,7 +2741,7 @@ function validateRoleRuntimeConfig(c){
 // were never read anywhere. A user setting allow_git_commit:true would see
 // no change and wrongly conclude the tool respects that setting. Fail loud
 // instead of silently ignoring a config value the code can't honor.
-function validateSafetyConfig(c){
+function validateSafetyConfig(c, { orThrow = false } = {}){
   const safety=c.safety||{};
   const policy=c.policy||{};
   const problems=[];
@@ -2646,7 +2750,100 @@ function validateSafetyConfig(c){
   if(safety.allow_destructive_operations) problems.push("safety.allow_destructive_operations=true is not supported.");
   if(policy.require_human_commit===false) problems.push("policy.require_human_commit=false is not supported — there is no code path for Autopilot to commit on your behalf.");
   if(policy.fail_closed_on_relay_violation===false) problems.push("policy.fail_closed_on_relay_violation=false is not supported — a relay policy violation always stops the run.");
-  if(problems.length) die("Unsupported safety config:\n" + problems.map(p=>` - ${p}`).join("\n"));
+  if(problems.length){
+    if(orThrow) throw new Error(problems[0]);
+    die("Unsupported safety config:\n" + problems.map(p=>` - ${p}`).join("\n"));
+  }
+}
+
+export function applyPreflightRepairs(c, repairs){
+  for(const repair of repairs||[]){
+    const r=c?.roles?.[repair?.role];
+    if(r){
+      if(r.model===repair.from) r.model=repair.to;
+      else if(Array.isArray(r.fallbacks)){
+        const fb=r.fallbacks.find(entry=>entry && entry.model===repair.from && ((entry.adapter||entry.cli||r.adapter)===repair.adapter));
+        if(fb) fb.model=repair.to;
+      }
+    }
+  }
+}
+
+export function reloadConfigIfChanged(c, targetPath = cfgPath){
+  let curMtime;
+  try{
+    curMtime = fs.statSync(targetPath).mtimeMs;
+  }catch{
+    return;
+  }
+  if(curMtime === liveConfigMtimeMs) return;
+
+  let migrated;
+  try{
+    migrated = loadAndMigrateConfig(targetPath, { persist: false });
+    if(!migrated || !migrated.config){
+      if(lastSkippedConfigMtimeMs !== curMtime){
+        lastSkippedConfigMtimeMs = curMtime;
+        console.warn("config reload skipped: config file is missing or empty — keeping the running config");
+      }
+      return;
+    }
+  }catch(err){
+    if(lastSkippedConfigMtimeMs !== curMtime){
+      lastSkippedConfigMtimeMs = curMtime;
+      console.warn(`config reload skipped: ${err?.message || err} — keeping the running config`);
+    }
+    return;
+  }
+
+  const validation = validateNewConfig(migrated.layout, { migrated: migrated.changed });
+  if(!validation.valid){
+    if(lastSkippedConfigMtimeMs !== curMtime){
+      lastSkippedConfigMtimeMs = curMtime;
+      const firstError = validation.errors[0] || "validation failed";
+      console.warn(`config reload skipped: ${firstError} — keeping the running config`);
+    }
+    return;
+  }
+
+  const newConfig = migrated.config;
+  try{
+    validateSafetyConfig(newConfig, { orThrow: true });
+    validateRoleRuntimeConfig(newConfig, { orThrow: true });
+  }catch(err){
+    if(lastSkippedConfigMtimeMs !== curMtime){
+      lastSkippedConfigMtimeMs = curMtime;
+      console.warn(`config reload skipped: ${err?.message || err} — keeping the running config`);
+    }
+    return;
+  }
+
+  let diffLines = applyConfigReload(c, newConfig);
+  applyPreflightRepairs(c, liveConfigRepairs);
+  if(liveConfigRepairs?.length && diffLines.length > 0){
+    diffLines = diffLines.filter(line => {
+      const arrowIdx = line.lastIndexOf(" → ");
+      if(arrowIdx === -1) return true;
+      const spaceIdx = line.indexOf(" ");
+      if(spaceIdx === -1 || spaceIdx > arrowIdx) return true;
+      const itemPath = line.slice(0, spaceIdx);
+      if(!itemPath.endsWith(".model")) return true;
+      const newVal = line.slice(arrowIdx + 3);
+      return !liveConfigRepairs.some(r => r.from === newVal && (!r.role || itemPath.startsWith(`roles.${r.role}.`)));
+    });
+  }
+  liveConfigMtimeMs = curMtime;
+  lastSkippedConfigMtimeMs = 0;
+
+  if(diffLines.length > 0){
+    console.log("config reloaded:");
+    for(const line of diffLines){
+      console.log(`  ${line}`);
+    }
+    if(diffLines.some(l => l.startsWith("gates.") || l.startsWith("tests."))){
+      console.log("  note: gate/test command changes apply from the next gate run");
+    }
+  }
 }
 // config.example.json documents planning.gsd.phase_root as configurable but
 // gsd.mjs previously hardcoded ".planning/phases" and ignored it — same
@@ -2734,7 +2931,7 @@ function openCodeSandboxModelWarnings(roles, catalogOverride=undefined){
 // invocation verifier read. Without this warm-up those launch-time callers
 // would fall back to a synchronous help probe, blocking the event loop once
 // per process (and re-probing if their key did not match discovery's).
-async function preflightConfiguredRoles(c){
+async function preflightConfiguredRoles(c, s = null){
   for(const [roleName,role] of Object.entries(c.roles||{})){
     if(!agents[role.adapter]) throw new Error(`Unknown adapter '${role.adapter}' for role '${roleName}'.`);
   }
@@ -2749,6 +2946,11 @@ async function preflightConfiguredRoles(c){
   // not be obtained (timeout/unsupported/error) or an adapter whose models
   // come from documentation (claude) never blocks — today's warning stands.
   const primaryModels=await preflightPrimaryModels({config:c,agents});
+  liveConfigRepairs=primaryModels.repairs||[];
+  applyPreflightRepairs(c, liveConfigRepairs);
+  for(const repair of liveConfigRepairs){
+    console.log(`[preflight] ${repair.role}: opencode model "${repair.from}" → "${repair.to}" (exact id from \`opencode models\`; fix it in \`ap config\`)`);
+  }
   if(!primaryModels.ok) throw new Error(primaryModelPreflightMessage(primaryModels,agents));
   // Backlog #14: an OpenCode 2 role on a paid provider needs a credential the
   // sandbox can receive, so the host's own `opencode auth list` must name that
@@ -2765,9 +2967,25 @@ async function preflightConfiguredRoles(c){
     try{ await discoverCapabilities(adapter); }
     catch{ /* leave the cache cold; detectOpenCodeGeneration is the last resort */ }
   }
-  if(ok) return;
-  const failed=results.filter(entry=>!entry.ok);
-  throw new Error(failed.map(entry=>`Preflight failed for role '${entry.roleName}' (${entry.adapter}):\n${entry.problems.map(p=>` - ${p}`).join("\n")}`).join("\n"));
+  if(!ok){
+    const failed=results.filter(entry=>!entry.ok);
+    throw new Error(failed.map(entry=>`Preflight failed for role '${entry.roleName}' (${entry.adapter}):\n${entry.problems.map(p=>` - ${p}`).join("\n")}`).join("\n"));
+  }
+  const state = s ?? (() => { try { return loadState(); } catch { return null; } })();
+  if(state){
+    let stateChanged = false;
+    const rolesToCheck = new Set([...Object.keys(c.roles||{}),...Object.keys(state.activeRoleModels||{})]);
+    for(const roleName of rolesToCheck){
+      if(syncStickyFallback(state, c, roleName)) stateChanged = true;
+    }
+    if(stateChanged){ try{ saveState(state); }catch{} }
+    for(const roleName of Object.keys(c.roles||{})){
+      const active = state.activeRoleModels?.[roleName];
+      if(active){
+        console.log(`${roleName}: on fallback ${canonicalModelId(active)} since ${active.since}`);
+      }
+    }
+  }
 }
 
 function buildRelayArgs(role,a,readOnly,resume,state,{trustedEnvelope=false,promptText=null,forceResume=false,stdinSink=null,scratchPath=null}={}){
@@ -2820,6 +3038,9 @@ function buildRelayArgs(role,a,readOnly,resume,state,{trustedEnvelope=false,prom
 }
 
 function roleNameForBuild(state){return state.__relayRoleName||"implementer";}
+function checkLoose(cwd,before,after,refsChanged,changedFields){
+  return before.head===after.head && !refsChanged && changedFields.length===1 && changedFields[0]==="objects"?looseObjectGrowthHasCommit(cwd,before,after):null;
+}
 function makeRelayResult({roleName,role,a,p,args,invocationVerification,output,sessionId=null,before,after,guard,started,finished,reviewContract,cwd,readOnly,observations,envelopeApplied=false,usage=null,resolvedBinary,modelResolution=null,snapshotBeforeStartedAt=null,snapshotBeforeAt=null,snapshotAfterStartedAt=null,snapshotAfterAt=null,sessionNumber=null,planRevision=null,carriedForwardTasks=null}){
   let guardEvents;
   let guardLogReadable=true;
@@ -2844,8 +3065,9 @@ function makeRelayResult({roleName,role,a,p,args,invocationVerification,output,s
   // logically identical to the old chain, with refsChanged staying a
   // separate signal. Evidence only; detection behaviour is unchanged.
   const gitStateChangesForEvidence=describeGitStateChange(before,after);
-  const administrativeGitStateChanged=refsChanged
-    || gitStateChangesForEvidence.some((entry)=>entry.field!=="head"&&entry.field!=="refs");
+  const changedFields=gitStateChangesForEvidence.map(e=>e.field);
+  const looseCheck=checkLoose(cwd,before,after,refsChanged,changedFields);
+  const administrativeGitStateChanged=refsChanged||(looseCheck&&!looseCheck.commitOrTag?false:gitStateChangesForEvidence.some(e=>e.field!=="head"&&e.field!=="refs"));
   const commitDetected=before.head!==after.head || administrativeGitStateChanged;
   // An empty guard log is never proof that nothing was attempted: the
   // guard may have failed to write (envelope scratch mismatch, permission
@@ -2978,6 +3200,11 @@ function makeRelayResult({roleName,role,a,p,args,invocationVerification,output,s
     }catch(error){
       console.warn(`git state evidence snapshots unavailable: ${error?.message||error}`);
     }
+  }
+  if(looseCheck&&!looseCheck.commitOrTag){
+    const looseBefore=Number(before?.objects?.match(/^count:\s*(\d+)$/m)?.[1]??0);
+    const looseAfter=Number(after?.objects?.match(/^count:\s*(\d+)$/m)?.[1]??0);
+    result.gitObjectObservation={loose:{before:looseBefore,after:looseAfter},types:looseCheck.counts,reason:looseCheck.reason||"blob/tree only"};
   }
   if(contract.status==="invalid")result.status="failed";
   if(p.error)result.status="failed";
@@ -3174,6 +3401,7 @@ export function combineOwnNoteWithFallbackDigest(ownNote, fallbackNote, maxChars
 }
 
 async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,review=false,persistState=true,alwaysSave=false,fatal,includeError=true,requirements=[],taskFacts={},timeoutMs=null,taskRef=null,isWrapUp=false,runNote=null,capEnabled=false,contScope=null,planRevision=null,carriedForwardTasks=null,resultExtra=null,__fallbackDepth=0,__sessionRetry=false,__testCapBreach=null,__testEvents=null}={}){
+  reloadConfigIfChanged(c);
   const fail=(m)=>{ if(fatal) return fatal(m); throw new Error(m); };
   // Task 042-1.5: refuse new role runs once SIGTERM/SIGINT arrived. Must stay
   // before runDirFor/mkdir or any artifact creation so a signal racing the
@@ -3384,6 +3612,16 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // `dir/scratch` computation above (never created on disk in this branch)
   // stays purely a no-op placeholder for that case.
   const effectiveScratchDir=disposableWorkspace?disposableWorkspace.scratchDirectory:scratchDir;
+  let previousScratchSeeded=false;
+  if(readOnly && (roleName==="code_reviewer"||roleName==="verifier") && effectiveScratchDir && (mission||s.mission) && taskRef){
+    try{
+      const wrapM=mission||s.mission;
+      const carriedPath=carriedScratchDir(repo,wrapM,taskRef);
+      if(fs.existsSync(carriedPath)){
+        previousScratchSeeded=seedPreviousScratch(carriedPath,effectiveScratchDir);
+      }
+    }catch{}
+  }
   // Filesystem containment (WSL/Linux bubblewrap: repository read-only,
   // scratch writable, normal network) is attempted ONLY for read-only
   // roles (plan_reviewer, code_reviewer, verifier) and is a HARD
@@ -3541,6 +3779,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     "Run every command in the foreground and wait for its output in the same turn. Never start background jobs (&, nohup, setsid, run_in_background), never poll with sleep/ps/pgrep loops: your session ends when you end your turn.",
     ((roleName==="planner" || roleName==="implementer") && !readOnly && ((typeof relayTask==="string" && (relayTask.includes("REJECTED the previous attempt") || relayTask.includes("This is a REVISION round") || relayTask.includes("Reviewer feedback from the previous attempt that MUST be addressed") || relayTask.includes("reviewer findings that MUST be addressed") || relayTask.includes("Plan reviewer feedback that MUST be addressed") || relayTask.includes("review FAIL (fix round"))) || (Number.isInteger(planRevision)&&planRevision>0))) ? "Revision: make the cited edits, update the hand-off note, then end your turn. Do not re-run git status/git log or re-read files you just edited to double-check. If a cited location already contains the required fix, say so for that finding and do not edit or explore it further." : null,
     roleName==="implementer"?"Some tests read source files as text and anchor on exact function signatures/calls; when you change a signature, run the tests that grep for it (grep -rl '<old text>' scripts/test-*.mjs) and keep them passing.":null,
+    (typeof offlineGateBriefLine === "function" ? offlineGateBriefLine({roleName, config:c}) : null),
     "If a git diff shows whole-file churn, re-run it EOL-normalized (git diff --ignore-cr-at-eol or git -c core.autocrlf=input diff) and trust the normalized stat.",
     readOnly
       ? `This is a READ-ONLY review. Do not modify any file in the repository. You may write only inside the sanctioned scratch directory: ${promptScratch} (temporary test artifacts, browser checks, reports, browser profiles, and Playwright specs/screenshots/traces go there; ${disposableWorkspace ? "this scratch directory is temporary and is deleted once this review finishes — nothing written here is retained for audit" : "the orchestrator keeps them for audit"}).`
@@ -4093,9 +4332,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
           const threadId=sessionIdFromEvents(capEvents);
           if(threadId){
             if(!cachedCodexRolloutFile||!fs.existsSync(cachedCodexRolloutFile)){
-              const scratchCodexHome=effectiveScratchDir?path.join(effectiveScratchDir,".autopilot-home",".codex"):null;
-              const defaultCodexHome=process.env.CODEX_HOME||path.join(os.homedir(),".codex");
-              const codexHomes=scratchCodexHome?[scratchCodexHome,defaultCodexHome]:[defaultCodexHome];
+              const codexHomes=resolveCodexHomes({launchEnv,effectiveScratchDir,dir});
               cachedCodexRolloutFile=findCodexRollout({threadId,codexHome:codexHomes,startedAt:started});
             }
             if(cachedCodexRolloutFile){
@@ -4105,7 +4342,9 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
             }
           }
         }
-      }catch{}
+      }catch(err){
+        console.warn(`[codex] rollout usage not read: ${err?.message||err}`);
+      }
     }
     // Live Codex rollout tokens are for display only (status.json / watch):
     // the cap checks below keep the stream usage, so a Codex run does not
@@ -4239,6 +4478,18 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // otherwise status.json/WATCH-REPORT only ever show a run that has
   // already completed, for however long the child actually takes to run.
   let p;
+  let agyBefore=null;
+  let agyAddDirs=null;
+  let agyRelayPid=null;
+  if(role.adapter==="antigravity"){
+    try{
+      agyBefore=listAgyHubs();
+      agyAddDirs=[launchCwd,effectiveCwd,repo];
+      activeAgyHubBefore=agyBefore;
+      activeAgyAddDirs=agyAddDirs;
+      activeAgyRelayPid=null;
+    }catch{}
+  }
   try{
     p=await spawnRelayChild({
       binary:launchBinary,
@@ -4258,6 +4509,10 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
         setImmediate(()=>{ try{ throttledWatchRefresh(s); }catch{} });
         capPid=(typeof pid==="number"&&pid>0)?pid:null;
         activeChildPid=(typeof pid==="number"&&pid>0)?pid:null;
+        if(role.adapter==="antigravity"&&typeof pid==="number"&&pid>0){
+          agyRelayPid=pid;
+          activeAgyRelayPid=pid;
+        }
         // Backlog #41: arm the idle watchdog — file-mtime + log-offset
         // baselines are taken NOW so only this session's activity counts.
         // Synchronous by necessity (every later tick compares against this
@@ -4300,6 +4555,9 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     capSettled=true;
     clearCapTimers();
     activeChildPid=null;
+    activeAgyHubBefore=null;
+    activeAgyAddDirs=null;
+    activeAgyRelayPid=null;
     if(opencodePinHandle){
       try{ releaseOpenCodeCachePin(opencodePinHandle); }catch{}
       opencodePinHandle=null;
@@ -4308,6 +4566,19 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     // it after success, failure or a watchdog kill (the implementer's
     // session store is never removed here).
     cleanupCredentialProvision();
+  }
+  if(role.adapter==="antigravity"){
+    try{
+      const hubs=runHubsToStop({
+        before:agyBefore,
+        relayPid:p?.pid??agyRelayPid,
+        addDirs:agyAddDirs||[launchCwd,effectiveCwd,repo],
+      });
+      const stopped=stopRunHubs(hubs);
+      if(stopped.length>0){
+        console.log(`[agy] stopped ${stopped.length} orphaned hub process(es): ${stopped.join(", ")}`);
+      }
+    }catch{}
   }
   const finished=now();
   const out=((p.stdout||"")+"\n"+(p.stderr||"")).trim();
@@ -4328,12 +4599,10 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   let usage=driver?accumulateUsage(role.adapter,events,openCodeUsageOptions):null;
   if(role.adapter==="codex"){
     try{
-      const threadId=sessionIdFromEvents(events);
+      const threadId=sessionIdFromEvents(events)||(out.match(/"thread[_-]?id"\s*:\s*"([^"]+)"/i)?.[1]??null);
       if(threadId){
-        const scratchCodexHome=effectiveScratchDir?path.join(effectiveScratchDir,".autopilot-home",".codex"):null;
-        const defaultCodexHome=process.env.CODEX_HOME||path.join(os.homedir(),".codex");
-        const codexHomes=scratchCodexHome?[scratchCodexHome,defaultCodexHome]:[defaultCodexHome];
-        const rolloutFile=findCodexRollout({threadId,codexHome:codexHomes,startedAt:started});
+        const codexHomes=resolveCodexHomes({launchEnv,effectiveScratchDir,dir});
+        const rolloutFile=findCodexRollout({threadId,codexHome:codexHomes,startedAt:started})||(cachedCodexRolloutFile&&fs.existsSync(cachedCodexRolloutFile)?cachedCodexRolloutFile:null);
         if(rolloutFile){
           const rUsage=codexUsageFromRollout(rolloutFile);
           if(!usage||usage.usagePartial===true){
@@ -4355,9 +4624,21 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
             };
           }
           deleteCodexRollout(rolloutFile);
+        }else if((!usage||usage.usagePartial===true)&&cachedCodexRolloutUsage){
+          usage={
+            ...(usage||{}),
+            ...cachedCodexRolloutUsage,
+            usagePartial:false,
+            turns:usage?.turns??cachedCodexRolloutUsage.turns??0,
+            maxSingleTurnContext:cachedCodexRolloutUsage.maxSingleTurnContext??usage?.maxSingleTurnContext??null,
+            ...(cachedCodexRolloutUsage.contextWindow?{contextWindow:cachedCodexRolloutUsage.contextWindow}:{})
+          };
         }
+        if(capBreach&&usage) capBreach.usage=usage;
       }
-    }catch{}
+    }catch(err){
+      console.warn(`[codex] rollout usage not read: ${err?.message||err}`);
+    }
   }
   // Mission 093 Part 1 task 2.2: final model resolution from the complete
   // decoded stream (the live tick may have missed the terminal signal).
@@ -4488,12 +4769,13 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       s.triedFreeModels=markTriedFreeModel(s.triedFreeModels,roleName,from);
       decision=await extendFallbackWithFree({decision,role:roleName,roleConfig:c.roles?.[roleName]??null,activeModel:s.activeRoleModels?.[roleName]??null,failureClass:result.failure.class,noOutput:result?.idleHang?.noOutput===true,tried:s.triedFreeModels?.[roleName]??[],enabled:c.freeModelAutoFallback!==false,adapters:agents,discover:(a)=>agents[a]?discoverModelCatalog(agents[a]):[],exhausted:s.exhaustedModels,policy:c.policy,nowMs:Date.now()});
       if(decision?.action==="switch"&&decision.next){
-        s.activeRoleModels={...(s.activeRoleModels||{}),[roleName]:stampStickyFallback(decision.next,c.roles?.[roleName]??null,now())};
+        const fromPrimary=from.adapter===rawRole.adapter&&from.model===rawRole.model;
+        const stickyReason=(fromPrimary&&freeQuotaExhausted)?FREE_QUOTA_REASON:undefined;
+        s.activeRoleModels={...(s.activeRoleModels||{}),[roleName]:stampStickyFallback(decision.next,c.roles?.[roleName]??null,now(),stickyReason)};
         // Backlog #6(b): a PRIMARY model that vanished after mission start is
         // still switched away from exactly as before, but the operator gets a
         // loud, lasting record the WATCH-REPORT/final report prints. A missing
         // fallback model is not mislabelled as the primary.
-        const fromPrimary=from.adapter===rawRole.adapter&&from.model===rawRole.model;
         if(result.modelNotFound===true&&fromPrimary){
           const record={role:roleName,primary:{adapter:from.adapter,model:from.model},fallback:{adapter:decision.next.adapter,model:decision.next.model},at:now()};
           s.primaryModelFallbacks={...(s.primaryModelFallbacks||{}),[roleName]:record};
@@ -4563,6 +4845,14 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       // orchestrator fallback, never a failure.
       try{
         if(effectiveScratchDir && wrapMission && taskRef){
+          const isReviewOrVerifier=(roleName==="code_reviewer"||roleName==="verifier");
+          const hasVerdict=Boolean((result.review&&["PASS","FAIL"].includes(result.review.decision))||(result.verdict&&["PASS","FAIL"].includes(result.verdict.decision)));
+          if(isReviewOrVerifier && result.capped && !hasVerdict){
+            try{
+              const carriedDest=carriedScratchDir(repo,wrapMission,taskRef);
+              copyCarriedScratch(effectiveScratchDir,carriedDest);
+            }catch{}
+          }
           let scratchText=null, scratchMtimeMs=null;
           try{
             const scratchAbs=scratchHandoffNotePath(effectiveScratchDir,taskRef);
@@ -4991,7 +5281,7 @@ async function gates(c,s){
   for(const command of c.gates.commands){
     const t0=Date.now();
     const logFile=path.join(gatesDir,`phase-${s?.phaseIndex!=null?s.phaseIndex+1:"na"}-${t0}.log`);
-    const p=await runGuardedCommand(repo,command,env,shellGuard,{label:"gates.commands",capture:true,logFile});
+    const p=await runGuardedCommand(repo,withAutopilotExclude(command),env,shellGuard,{label:"gates.commands",capture:true,logFile});
     // Prefer the guarded-command measured durationMs (spawn-to-close wall
     // time); fall back to the local wall clock when it is missing (e.g. a
     // sync buffered result in tests).
@@ -5066,17 +5356,42 @@ function review(reviewer,task,c,s,feedback="",requirements=[],taskRef=null,timeo
   // Backlog #118: code-review round lines (exhaustive round 1 / verify previous findings).
   if(roundKey) task+=`\n\n${codeReviewerRoundLines(s,roundKey).join("\n")}`;
   if(reviewer==="code_reviewer") task+=`\n\n${CODE_REVIEW_REAL_TESTS_RULE}`;
-  return relay(reviewer,task+(feedback?`\n\nFEEDBACK TO ADDRESS:\n${feedback}`:""),c,s,{readOnly:true,review:true,resume:false,requirements,taskRef,timeoutMs,capEnabled,resultExtra});
+  return relay(reviewer,task+(feedback?`\n\nFEEDBACK TO ADDRESS:\n${feedback}`:""),c,s,{readOnly:true,review:true,resume:false,requirements,taskRef,timeoutMs,capEnabled,resultExtra}).then((result)=>{
+    if(reviewer==="code_reviewer" && result?.review?.decision==="FAIL"){
+      try{
+        const {browser, rest} = splitBrowserFindings(result.review);
+        if(browser.length){
+          const missionDir = getMissionWatchDir(s);
+          const phaseName = s?.[CHECKPOINT_STATE_KEY]?.phaseName || (s?.phaseIndex != null ? String(s.phaseIndex) : "unknown");
+          appendManualChecks(missionDir, {phaseName, notes: browser, at: new Date().toISOString()});
+          console.log(`Manual UI check recorded in MANUAL-CHECKS.md (${browser.length} note(s)) — not counted as a review finding.`);
+          result.review.findings = rest;
+          if(rest.length === 0){
+            result.review.decision = "PASS";
+          }
+        }
+      }catch{}
+    }
+    return result;
+  });
 }
 function planningScopeParts(framework,role){
   return {taskRef:`${framework}-planning-${role}`,contScope:`task:${framework}:planning:${role}`};
+}
+function readOnlyContinuationNote(note, repoPath, missionName, ref, roleLabel="reviewer"){
+  const line="The previous session's scratch files (logs, configs, copies) are in /workspace/scratch/previous-session/ — reuse what the note cites instead of redoing it.";
+  const seeded=Boolean(ref && missionName && fs.existsSync(carriedScratchDir(repoPath,missionName,ref)));
+  if(note){
+    return `Prior ${roleLabel} handoff note (continuation context — continue from where it stopped):\n${note}${seeded?`\n${line}`:""}`;
+  }
+  return seeded?`Prior ${roleLabel} handoff note (continuation context — continue from where it stopped):\n${line}`:"";
 }
 function planningContinuationText(s,framework,role){
   const {taskRef,contScope}=planningScopeParts(framework,role);
   const deadEnds=readRolloverDeadEnds(s,contScope);
   const deadEndsText=deadEnds.length?`Prior dead ends (continuation context — do not retry blindly):\n${deadEnds.map((d)=>`- Generation ${d.generation} (${d.reason} ${d.used}/${d.limit}): ${d.tail}`).join("\n")}`:"";
   const note=readHandoffNote(s?.mission,taskRef);
-  const noteText=note?`Prior ${role==="planner"?"planner":"reviewer"} handoff note (continuation context — continue from where it stopped):\n${note}`:"";
+  const noteText=readOnlyContinuationNote(note,repo,s?.mission,taskRef,role==="planner"?"planner":"reviewer");
   return {taskRef,contScope,deadEndsText,noteText};
 }
 function planningBudgetReminderFor(s,c,role){
@@ -5551,6 +5866,7 @@ async function ensurePlanningReady(c,s,request){
     delete s.planReviewHistory;
     delete s.planReviewNotes;
     delete s.planPassNotes;
+    delete s.planPassNoteStatus;
     delete s.planReviewTaskHashes;
     delete s.codeReviewHistory;
     delete s.verifierHistory;
@@ -7658,6 +7974,12 @@ Return PASS or FAIL with findings.`;
       // passed gate can never resume into it.
       delete s.speckitGateReviewCheckpoint;
       saveState(s);
+      if(gateStage==="tasks"){
+        const pList=specKitPhases(c,s);
+        const missionIdentity=s.mission||s.missionSeq||s.speckitFeatureDir||"mission";
+        const tasksFile=s.speckitFeatureDir?path.join("specs",s.speckitFeatureDir,"tasks.md"):null;
+        regenerateAllPhaseBriefs({repo,mission:missionIdentity,framework:"speckit",phases:pList,tasksFile,revision:1});
+      }
       console.log(`  ✓ PASS`);
       continue;
     }
@@ -7682,6 +8004,12 @@ Return PASS or FAIL with findings.`;
     for(const line of lines) console.log(line);
     refreshWatchReport(s);
     return s;
+  }
+  if(s.speckitFeatureDir || planningAdapter(c)===speckit){
+    const pList=specKitPhases(c,s);
+    const missionIdentity=s.mission||s.missionSeq||s.speckitFeatureDir||"mission";
+    const tasksFile=s.speckitFeatureDir?path.join("specs",s.speckitFeatureDir,"tasks.md"):null;
+    regenerateAllPhaseBriefs({repo,mission:missionIdentity,framework:"speckit",phases:pList,tasksFile,revision:1});
   }
   s.phase="tasks_ready";s.step="tasks_ready";saveState(s);
 }
@@ -8025,7 +8353,12 @@ function resumePausedPlanForCommand(c,s,commandLabel){
   return true;
 }
 
-function activeSpecKitFeatureDir(){
+function activeSpecKitFeatureDir(s){
+  const st=s||activeRelayState||loadState();
+  if(st?.speckitFeatureDir){
+    const d=path.join("specs",st.speckitFeatureDir);
+    if(fs.existsSync(path.join(repo,d))) return d;
+  }
   try{
     const feature=JSON.parse(read(path.join(repo,".specify","feature.json")));
     if(typeof feature.feature_directory==="string" && feature.feature_directory.trim()){
@@ -8035,8 +8368,8 @@ function activeSpecKitFeatureDir(){
   }catch{}
   return null;
 }
-function specKitPhases(c){
-  const scoped=activeSpecKitFeatureDir();
+function specKitPhases(c, s){
+  const scoped=activeSpecKitFeatureDir(s);
   const candidates=scoped
     ? [path.join(scoped,"tasks.md"),path.join(scoped,"tasks","*.md")]
     : (c.planning?.speckit?.task_candidates||[".specify/tasks.md","specs/*/tasks.md","specs/*/tasks/*.md"]);
@@ -8504,7 +8837,7 @@ function runGatesInCwd(c,cwd,env,shellGuard){
     console.log(`[snapshot-reuse] cache clear skipped (${error?.message||error})`);
   }
   for(const command of c.gates?.commands||[]){
-    const p=runCommandInCwd(cwd,command,env,shellGuard,{label:"gates.commands",untrusted:false});
+    const p=runCommandInCwd(cwd,withAutopilotExclude(command),env,shellGuard,{label:"gates.commands",untrusted:false});
     if(p.status!==0)return {ok:false,command,shellBlocked:!!p.shellBlocked,reason:p.shellBlockReason};
   }
   return {ok:true};
@@ -8828,10 +9161,12 @@ async function runStandaloneFinalReviewFixRounds({c,s,site,initialReview,mission
       implementationSummary:typeof summary==="string"?summary:""});
     if(handoff.meta.truncated) console.warn(truncationWarning(handoff.meta));
     const budget=roleDeadline(c,s,"code_reviewer");
-    const result=await review("code_reviewer",`${handoff.text}\n\n${budget.note}`,
+    const fixPassNotes=finalReviewPassNotesText(s);
+    const result=await review("code_reviewer",`${handoff.text}${fixPassNotes?`\n\n${fixPassNotes}`:""}\n\n${budget.note}`,
       c,s,"",missionRequirements,null,budget.timeoutMs,false,codeReviewScopeKey("final","standalone"));
     noteRoleDeadlineOutcome(s,"code_reviewer",result,budget.derived);
     lastFinalReview=result;
+    applyPlanPassNoteMarks(s, result, {phase:"final"}); saveState(s);
     return result;
   };
   const standaloneFixResult=await runFinalReviewFixRounds({
@@ -8878,6 +9213,9 @@ async function runStandaloneImplementation(c,s){
   { const r=ensureStandaloneSplit(repo,s); if(r.migrated){ clearReviewFeedbackByPrefix(s,"standalone-task:"); clearFindingTasksByPrefix(s,"standalone-task:"); clearStaleStandaloneBudgets(s); saveState(s); } }
   const mission=resolveStandaloneMission(repo,s,"");
   const missionDir = getMissionWatchDir(s);
+  const stPhases=standalone.phases(repo,mission);
+  const stTasksFile=standalone.tasksPath(repo,mission);
+  validateAndReconcilePhaseBriefs({repo,mission,framework:"standalone",phases:stPhases,tasksFile:stTasksFile,revision:s[CHECKPOINT_STATE_KEY]?.revision??1});
 
   // Startup reconcile: isolated standalone checkbox snapshot from a crashed
   // process (never shared with SpecKit's pendingCheckboxSnapshot key).
@@ -8984,9 +9322,11 @@ async function runStandaloneImplementation(c,s){
     if(finalHandoff.meta.truncated) console.warn(truncationWarning(finalHandoff.meta));
     // TASK-26: the mission-final review gets a measured deadline too.
     const finalBudget=roleDeadline(c,s,"code_reviewer");
-    let final=await review("code_reviewer",`${finalHandoff.text}\n\n${finalBudget.note}`,
+    const earlyFinalPassNotes=finalReviewPassNotesText(s);
+    let final=await review("code_reviewer",`${finalHandoff.text}${earlyFinalPassNotes?`\n\n${earlyFinalPassNotes}`:""}\n\n${finalBudget.note}`,
       c,s,"",missionRequirements,null,finalBudget.timeoutMs,false,codeReviewScopeKey("final","standalone"));
     noteRoleDeadlineOutcome(s,"code_reviewer",final,finalBudget.derived);
+    applyPlanPassNoteMarks(s, final, {phase:"final"}); saveState(s);
     if(final.status==="completed"&&!final.policyViolation&&final.review?.decision==="PASS"){
       // Mission 025 task 2.4 (no-pending early final path): same mission-wide
       // linked-verify refusal as the post-loop final review below. Only
@@ -9006,7 +9346,10 @@ async function runStandaloneImplementation(c,s){
       // refusal/policy path) escalates, keeping today's message and step
       // `final_review`.
       const earlyFinalFix=await runStandaloneFinalReviewFixRounds({c,s,site:"early-final",initialReview:final,mission,phaseList,missionRequirements,declaredPaths,missionBaselineKey});
-      if(earlyFinalFix.outcome==="passed"){final=earlyFinalFix.review;}
+      if(earlyFinalFix.outcome==="passed"){
+        final=earlyFinalFix.review;
+        applyPlanPassNoteMarks(s, final, {phase:"final"}); saveState(s);
+      }
       else{s.phase="escalated";s.step=earlyFinalFix.step||"final_review";saveState(s);die(earlyFinalFix.message||"Final review failed.");}
     }
     finalizeMissionComplete(s);
@@ -9301,6 +9644,10 @@ async function runStandaloneImplementation(c,s){
             clearTaskContinuation(s,`task:standalone:phase-${s.phaseIndex}:${taskId}`);
             clearRolloverDeadEnds(s,`task:standalone:phase-${s.phaseIndex}:${taskId}`);
             clearBackstopFirings(s,`task:standalone:phase-${s.phaseIndex}:${taskId}`);
+            if(s?.escalationPending?.implementer?.reason==="no_progress"&&s.escalationPending.implementer.scopeKey===`task:standalone:phase-${s.phaseIndex}:${taskId}`){
+              delete s.escalationPending.implementer;
+              if(!Object.keys(s.escalationPending).length) delete s.escalationPending;
+            }
             // Backlog #26 Step A: a carried task converged without running —
             // its hand-off note dies with it too, like the allowance above.
             // Backlog #26 Step B: its session store dies with it too (size
@@ -9593,6 +9940,10 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           clearTaskContinuation(s,`task:standalone:phase-${s.phaseIndex}:${taskId}`);
           clearRolloverDeadEnds(s,`task:standalone:phase-${s.phaseIndex}:${taskId}`);
           clearBackstopFirings(s,`task:standalone:phase-${s.phaseIndex}:${taskId}`);
+          if(s?.escalationPending?.implementer?.reason==="no_progress"&&s.escalationPending.implementer.scopeKey===`task:standalone:phase-${s.phaseIndex}:${taskId}`){
+            delete s.escalationPending.implementer;
+            if(!Object.keys(s.escalationPending).length) delete s.escalationPending;
+          }
           // Backlog #26 Step A: the task converged — its hand-off note dies
           // with it, so a later retry of a DIFFERENT attempt never inherits a
           // stale note. Best-effort; kept on escalation (post-mortem).
@@ -9782,17 +10133,23 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         const reviewIds=stableTaskIds({framework:"standalone",mission,phaseIndex:s.phaseIndex,phaseNumber:s.phaseIndex+1,phaseName:phase.name,tasks:taskIdentities(),repoRoot:repo});
         // TASK-26: the reviewer gets a measured kill deadline and is told it.
         const reviewBudget=roleDeadline(c,s,"code_reviewer");
+        const contScopeReview=`task:standalone:phase-${s.phaseIndex}:code_reviewer`;
+        const verdictOnlyLine=s.verdictOnlyTurns?.[contScopeReview]?`\n\n${s.verdictOnlyTurns[contScopeReview]}`:"";
+        const cReview=s.verdictOnlyTurns?.[contScopeReview]
+          ? {...c, policy: {...c.policy, free_model_turns_cap: 5, caps: {...c.policy?.caps, code_reviewer: {...c.policy?.caps?.code_reviewer, max_turns: 5}}}}
+          : c;
         const reviewRef=reviewTaskRef(s,phaseKey,phaseTasks,reviewIds,checkpoint.revision,isRereview);
         const reviewDeadEnds=readRolloverDeadEnds(s, `task:standalone:phase-${s.phaseIndex}:code_reviewer`);
         const reviewHandoffNote=readHandoffNote(mission, reviewRef);
         const reviewDeadEndsText=reviewDeadEnds.length?`Prior dead ends (continuation context — do not retry blindly):\n${reviewDeadEnds.map((d)=>`- Generation ${d.generation} (${d.reason} ${d.used}/${d.limit}): ${d.tail}`).join("\n")}`:"";
-        const reviewHandoffNoteText=reviewHandoffNote?`Prior reviewer handoff note (continuation context — continue from where it stopped):\n${reviewHandoffNote}`:"";
+        const reviewHandoffNoteText=readOnlyContinuationNote(reviewHandoffNote,repo,mission,reviewRef,"reviewer");
         const operatorNote=operatorPhaseNoteLine(s);
         const tasksFilePathForReview=standalone.tasksPath(repo,mission);
         const tasksTextForReview=fs.existsSync(tasksFilePathForReview)?fs.readFileSync(tasksFilePathForReview,"utf8"):"";
         const scratchNote=unexpectedNewFilesReviewNote(tasksTextForReview);
-        const rv=await review("code_reviewer",`${reviewHandoff.text}\n\n${scratchNote?`${scratchNote}\n\n`:""}${reviewDeadEndsText}\n\n${reviewHandoffNoteText}\n\n${operatorNote?`${operatorNote}\n\n`:""}${reviewBudget.note}\n${readOnlyHandoffNoteReminder({mission, ref: reviewRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}`,
-          c,s,feedback,phaseRequirements,reviewRef,reviewBudget.timeoutMs,true,codeReviewScopeKey("standalone-phase",s.phaseIndex),
+        const phaseReviewPassNotes=phaseCodeReviewPassNotesText(s);
+        const rv=await review("code_reviewer",`${reviewHandoff.text}\n\n${scratchNote?`${scratchNote}\n\n`:""}${reviewDeadEndsText}\n\n${reviewHandoffNoteText}\n\n${operatorNote?`${operatorNote}\n\n`:""}${phaseReviewPassNotes?`${phaseReviewPassNotes}\n\n`:""}${CODE_REVIEWER_TARGETED_TESTS_LINE}\n\n${CODE_REVIEWER_BROWSER_LINE}\n\n${reviewBudget.note}\n${readOnlyHandoffNoteReminder({mission, ref: reviewRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
+          cReview,s,feedback,phaseRequirements,reviewRef,reviewBudget.timeoutMs,true,codeReviewScopeKey("standalone-phase",s.phaseIndex),
           reviewTruncationResult(reviewHandoff.meta));
         noteRoleDeadlineOutcome(s,"code_reviewer",rv,reviewBudget.derived);
         lastReview=rv;
@@ -9840,14 +10197,22 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:rv.capped.type,used:rv.capped.used,limit:rv.capped.limit,tail:deadEndTail({summary:`Code review capped (${rv.capped.type} ${rv.capped.used}/${rv.capped.limit}); phase diff unchanged — re-review the same phase diff.`,files:[]})});
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
           if(!cont.allowed){
+            // Backlog #27: record the continuation for bare `ap reset`, and
+            // end with the exact resume command.
+            recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:reviewRef});
+            const lastNote=readHandoffNote(mission, reviewRef);
+            if(noteSaysOnlyGateLeft(lastNote) && !s.verdictOnlyTurns?.[contScope]){
+              s.verdictOnlyTurns=s.verdictOnlyTurns||{};
+              s.verdictOnlyTurns[contScope]="VERDICT-ONLY TURN: the previous sessions found no open findings and only the gate was left. Do not run any tests or the gate. Decide PASS or FAIL now from the hand-off note and the delta; the orchestrator runs the gate.";
+              saveState(s);
+              console.log(`Code review capped but handoff note reports only gate left; continuing for one verdict-only turn.`);
+              continue;
+            }
             // Dead ends are deliberately NOT cleared here: per-phase keys
             // cannot leak into another phase, and the entries are the
             // post-mortem record of why this phase never converged.
             s.phase="escalated";s.step="standalone_task_not_converging";
             s.phaseCheckpointError={code:"CONTINUATION_EXHAUSTED",evidence:{role:"code_reviewer",used:cont.used,limit:cont.limit,breach:rv.capped.type}};
-            // Backlog #27: record the continuation for bare `ap reset`, and
-            // end with the exact resume command.
-            recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:reviewRef});
             s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
             die(`Standalone code review did not converge after ${cont.used} capped generations (${rv.capped.type} cap ${rv.capped.used}/${rv.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
           }
@@ -9882,6 +10247,10 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           console.log(`Code review stopped voluntarily as incomplete; continuing as session ${cont.used+1} of ${cont.limit+1}.`);
           continue;
         }
+        if(rv.status==="completed"&&(rv.review?.decision==="PASS"||rv.review?.decision==="FAIL")){
+          clearContinuationRound(s,`task:standalone:phase-${s.phaseIndex}:code_reviewer`);
+          deleteCarriedScratch(repo,mission,reviewRef);
+        }
         if(rv.status==="completed"&&rv.review?.decision==="PASS"){
           // Mission 025 task 2.1: never accept a standalone reviewer PASS
           // while any linked verify/tool result exited non-zero or 124. The
@@ -9908,6 +10277,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           clearCodeReviewHistory(s,codeReviewScopeKey("standalone-phase",s.phaseIndex));const transition=decideTransition(checkpoint,{stage:"code_reviewer",status:"completed",decision:"PASS",runId:rv.sessionId??null,findings:rv.review?.findings??[]});
           checkpoint=applyCheckpointTransition(transition);
           checkpoint.codeReviewer={runId:rv.sessionId??null,decision:"PASS",findings:rv.review?.findings??[]};
+          applyPlanPassNoteMarks(s, rv, {phase:s.phaseIndex+1, allowSkip:false});
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
           if(stopStage==="review"){
             // Mission 090 task 1.5: review covers the Code Reviewer only.
@@ -10005,13 +10375,18 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         if(verifyHandoff.meta.truncated) console.warn(truncationWarning(verifyHandoff.meta));
         // TASK-26: the verifier gets a measured kill deadline and is told it.
         const verifyBudget=roleDeadline(c,s,"verifier");
+        const contScopeVerify=`task:standalone:phase-${s.phaseIndex}:verifier`;
+        const verdictOnlyLine=s.verdictOnlyTurns?.[contScopeVerify]?`\n\n${s.verdictOnlyTurns[contScopeVerify]}`:"";
+        const cVerify=s.verdictOnlyTurns?.[contScopeVerify]
+          ? {...c, policy: {...c.policy, free_model_turns_cap: 5, caps: {...c.policy?.caps, verifier: {...c.policy?.caps?.verifier, max_turns: 5}}}}
+          : c;
         const verifyRef=allPhaseTaskRef(phaseTasks);
         const verifyDeadEnds=readRolloverDeadEnds(s, `task:standalone:phase-${s.phaseIndex}:verifier`);
         const verifyHandoffNote=readHandoffNote(mission, verifyRef);
         const verifyDeadEndsText=verifyDeadEnds.length?`Prior dead ends (continuation context — do not retry blindly):\n${verifyDeadEnds.map((d)=>`- Generation ${d.generation} (${d.reason} ${d.used}/${d.limit}): ${d.tail}`).join("\n")}`:"";
-        const verifyHandoffNoteText=verifyHandoffNote?`Prior verifier handoff note (continuation context — continue from where it stopped):\n${verifyHandoffNote}`:"";
-        const vv=await relayAsync("verifier",`${verifyHandoff.text}\n\n${verifyDeadEndsText}\n\n${verifyHandoffNoteText}\n\n${verifyBudget.note}${browserVerifierNote(phaseTaskFacts)?`\n${browserVerifierNote(phaseTaskFacts)}`:""}\n${verifierRoundLines(s,codeReviewScopeKey("standalone-phase",s.phaseIndex)).join("\n")}\n${readOnlyHandoffNoteReminder({mission, ref: verifyRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}`,
-          c,s,{readOnly:true,review:true,requirements:phaseRequirements,taskFacts:phaseTaskFacts,taskRef:verifyRef,timeoutMs:verifyBudget.timeoutMs,capEnabled:true});
+        const verifyHandoffNoteText=readOnlyContinuationNote(verifyHandoffNote,repo,mission,verifyRef,"verifier");
+        const vv=await relayAsync("verifier",`${verifyHandoff.text}\n\n${verifyDeadEndsText}\n\n${verifyHandoffNoteText}\n\n${verifyBudget.note}${browserVerifierNote(phaseTaskFacts)?`\n${browserVerifierNote(phaseTaskFacts)}`:""}\n${verifierRoundLines(s,codeReviewScopeKey("standalone-phase",s.phaseIndex)).join("\n")}\n${readOnlyHandoffNoteReminder({mission, ref: verifyRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
+          cVerify,s,{readOnly:true,review:true,requirements:phaseRequirements,taskFacts:phaseTaskFacts,taskRef:verifyRef,timeoutMs:verifyBudget.timeoutMs,capEnabled:true});
         noteRoleDeadlineOutcome(s,"verifier",vv,verifyBudget.derived);
         {
           // Backlog #91: a red phase gate forces the recorded verdict to FAIL.
@@ -10067,14 +10442,22 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:vv.capped.type,used:vv.capped.used,limit:vv.capped.limit,tail:deadEndTail({summary:`Verification capped (${vv.capped.type} ${vv.capped.used}/${vv.capped.limit}); phase diff unchanged — re-verify the same phase diff.`,files:[]})});
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
           if(!cont.allowed){
+            // Backlog #27: record the continuation for bare `ap reset`, and
+            // end with the exact resume command.
+            recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:verifyRef});
+            const lastNote=readHandoffNote(mission, verifyRef);
+            if(noteSaysOnlyGateLeft(lastNote) && !s.verdictOnlyTurns?.[contScope]){
+              s.verdictOnlyTurns=s.verdictOnlyTurns||{};
+              s.verdictOnlyTurns[contScope]="VERDICT-ONLY TURN: the previous sessions found no open findings and only the gate was left. Do not run any tests or the gate. Decide PASS or FAIL now from the hand-off note and the delta; the orchestrator runs the gate.";
+              saveState(s);
+              console.log(`Standalone verification capped but handoff note reports only gate left; continuing for one verdict-only turn.`);
+              continue;
+            }
             // Dead ends are deliberately NOT cleared here: per-phase keys
             // cannot leak into another phase, and the entries are the
             // post-mortem record of why this phase never converged.
             s.phase="escalated";s.step="standalone_task_not_converging";
             s.phaseCheckpointError={code:"CONTINUATION_EXHAUSTED",evidence:{role:"verifier",used:cont.used,limit:cont.limit,breach:vv.capped.type}};
-            // Backlog #27: record the continuation for bare `ap reset`, and
-            // end with the exact resume command.
-            recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:verifyRef});
             s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
             die(`Standalone verification did not converge after ${cont.used} capped generations (${vv.capped.type} cap ${vv.capped.used}/${vv.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
           }
@@ -10111,7 +10494,12 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           console.log(`Verification stopped voluntarily as incomplete; continuing as session ${cont.used+1} of ${cont.limit+1}.`);
           continue;
         }
+        if(vv.status==="completed"&&(vv.review?.decision==="PASS"||vv.review?.decision==="FAIL")){
+          clearContinuationRound(s,`task:standalone:phase-${s.phaseIndex}:verifier`);
+          deleteCarriedScratch(repo,mission,verifyRef);
+        }
         if(g.ok&&vv.status==="completed"&&vv.review?.decision==="PASS"){
+          { const bn=browserCheckNotes(vv.review); if(bn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:bn,at:new Date().toISOString()})) console.log(`Manual UI check recorded in MANUAL-CHECKS.md (${bn.length} note(s)).`); } }
           // Mission 025 task 2.2: never accept a standalone verifier PASS
           // while any linked verify/tool result exited non-zero or 124. The
           // joint gate+verdict check covers both evidence channels: the
@@ -10348,9 +10736,11 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
   if(finalHandoff.meta.truncated) console.warn(truncationWarning(finalHandoff.meta));
     // TASK-26: the mission-final review gets a measured deadline too.
     const standaloneFinalBudget=roleDeadline(c,s,"code_reviewer");
-    let final=await review("code_reviewer",`${finalHandoff.text}\n\n${standaloneFinalBudget.note}`,
+    const standaloneFinalPassNotes=finalReviewPassNotesText(s);
+    let final=await review("code_reviewer",`${finalHandoff.text}${standaloneFinalPassNotes?`\n\n${standaloneFinalPassNotes}`:""}\n\n${standaloneFinalBudget.note}`,
       c,s,"",missionRequirements,null,standaloneFinalBudget.timeoutMs,false,codeReviewScopeKey("final","standalone"));
     noteRoleDeadlineOutcome(s,"code_reviewer",final,standaloneFinalBudget.derived);
+    applyPlanPassNoteMarks(s, final, {phase:"final"}); saveState(s);
     if(final.status==="completed"&&!final.policyViolation&&final.review?.decision==="PASS"){
       // Mission 025 task 2.4: never complete the mission on a final-reviewer
       // PASS while any linked verify/tool result exited non-zero or 124. The
@@ -10373,7 +10763,10 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
       // mid-loop refusal/policy), keeping message `Final review failed.`
       // and step `final_review`.
       const standaloneFinalFix=await runStandaloneFinalReviewFixRounds({c,s,site:"mission-final",initialReview:final,mission,phaseList,missionRequirements,declaredPaths,missionBaselineKey});
-      if(standaloneFinalFix.outcome==="passed"){final=standaloneFinalFix.review;}
+      if(standaloneFinalFix.outcome==="passed"){
+        final=standaloneFinalFix.review;
+        applyPlanPassNoteMarks(s, final, {phase:"final"}); saveState(s);
+      }
       else{s.phase="escalated";s.step=standaloneFinalFix.step||"final_review";saveState(s);die(standaloneFinalFix.message||"Final review failed.");}
     }
   finalizeMissionComplete(s);
@@ -10681,6 +11074,12 @@ async function runImplementation(c){
     if(resumePlanApproval(s)){
       saveState(s);
       console.log(`Plan approved by \`ap run\` (${pausedFramework}) — resuming the approved plan.`);
+      if(pausedFramework==="speckit"||s.speckitFeatureDir){
+        const pList=specKitPhases(c,s);
+        const missionIdentity=s.mission||s.missionSeq||s.speckitFeatureDir||"mission";
+        const tasksFile=s.speckitFeatureDir?path.join("specs",s.speckitFeatureDir,"tasks.md"):null;
+        regenerateAllPhaseBriefs({repo,mission:missionIdentity,framework:"speckit",phases:pList,tasksFile,revision:1});
+      }
     }
   }
   if(s.phase!=="tasks_ready" && s.phase!=="implementing" && s.phase!=="final_review" && s.phase!=="complete" && s.phase!=="phase_complete") {
@@ -10758,7 +11157,7 @@ async function runImplementation(c){
     }
   }
 
-  const phaseList=specKitPhases(c);
+  const phaseList=specKitPhases(c, s);
   if(!phaseList.length)die("No unchecked SpecKit tasks found.");
   // Mission 090 task 1.5: stage-scoped implement/review/verify are
   // standalone-only (`--stage planning` stops before the framework dispatch
@@ -10771,6 +11170,10 @@ async function runImplementation(c){
   console.log(`  Phases: ${phaseList.length}`);
   console.log(`  Implementer: ${c.roles?.implementer?.adapter||""}`);
   if(typeof s.phaseIndex!=="number" || s.phaseIndex<0) s.phaseIndex=0;
+
+  const missionIdentity=s.mission||s.missionSeq||s.speckitFeatureDir||"mission";
+  const tasksFile=s.speckitFeatureDir?path.join("specs",s.speckitFeatureDir,"tasks.md"):null;
+  validateAndReconcilePhaseBriefs({repo,mission:missionIdentity,framework:"speckit",phases:phaseList,tasksFile,revision:s[CHECKPOINT_STATE_KEY]?.revision??1});
 
   // TASK 13 / Problem B: a repository may already be dirty (modified,
   // deleted, staged, or untracked files) before this mission ever runs.
@@ -10789,7 +11192,6 @@ async function runImplementation(c){
   // mission's baseline. sanitizeKeySegment() turns that identity into a
   // path-safe segment — never interpolate it into a path directly, since
   // it can originate from planner-authored (LLM) content.
-  const missionIdentity=s.mission||s.missionSeq||s.speckitFeatureDir||"mission";
   const missionDir = getMissionWatchDir(s);
   const missionBaselineKey=`mission-${sanitizeKeySegment(missionIdentity)}`;
   ensureBaseline(repo,missionBaselineKey);
@@ -10857,7 +11259,7 @@ async function runImplementation(c){
 
     // TASK-19 Phase 3 task 10: same no-op-until-roleProgress brief producer as
     // the Standalone loop.
-    ensurePhaseBriefForCheckpoint({repo,mission:missionIdentity,framework:"speckit",checkpoint,phase:{name:phase.name,phaseTotal:phaseList.length},tasks:phaseTasks.map(t=>({id:t.id,text:t.text})),planContext:scope});
+    ensurePhaseBriefForCheckpoint({repo,mission:missionIdentity,framework:"speckit",checkpoint,phase:{name:phase.name,phaseTotal:phaseList.length},tasks:phaseTasks.map(t=>({id:t.id,text:t.text})),planContext:scope,tasksFile,phaseTotal:phaseList.length});
 
     // Merge a stage-transition decision into the checkpoint — the same
     // shared decideTransition() the Standalone loop calls, never a
@@ -11000,7 +11402,7 @@ async function runImplementation(c){
       // branch — same contract as the Standalone loop, GSD deliberately
       // untouched.
       if(!checkpoint.roleProgress) checkpoint.roleProgress=emptyRoleProgress();
-      ensurePhaseBriefForCheckpoint({repo,mission:missionIdentity,framework:"speckit",checkpoint,phase:{name:phase.name,phaseTotal:phaseList.length},tasks:phaseTasks.map(t=>({id:t.id,text:t.text})),planContext:scope});
+      ensurePhaseBriefForCheckpoint({repo,mission:missionIdentity,framework:"speckit",checkpoint,phase:{name:phase.name,phaseTotal:phaseList.length},tasks:phaseTasks.map(t=>({id:t.id,text:t.text})),planContext:scope,tasksFile,phaseTotal:phaseList.length});
       const perTaskLimits=resolvePerTaskLimits(c.policy, Number(c.policy?.relay_timeout_ms)>0?Number(c.policy.relay_timeout_ms):RELAY_TIMEOUT_DEFAULT_MS);
       const phaseTaskIds=stableTaskIds({framework:"speckit",mission:missionIdentity,phaseIndex:s.phaseIndex,phaseNumber:s.phaseIndex+1,phaseName:phase.name,tasks:taskIdentities(),repoRoot:repo});
       const phaseTaskDigestValue=phaseTaskDigest({framework:"speckit",mission:missionIdentity,phaseIndex:s.phaseIndex,phaseName:phase.name,tasks:taskIdentities(),repoRoot:repo});
@@ -11059,6 +11461,10 @@ async function runImplementation(c){
           clearTaskContinuation(s,`task:speckit:phase-${s.phaseIndex}:${taskId}`);
           clearRolloverDeadEnds(s,`task:speckit:phase-${s.phaseIndex}:${taskId}`);
           clearBackstopFirings(s,`task:speckit:phase-${s.phaseIndex}:${taskId}`);
+          if(s?.escalationPending?.implementer?.reason==="no_progress"&&s.escalationPending.implementer.scopeKey===`task:speckit:phase-${s.phaseIndex}:${taskId}`){
+            delete s.escalationPending.implementer;
+            if(!Object.keys(s.escalationPending).length) delete s.escalationPending;
+          }
           // Backlog #26 Step A: the task converged — its hand-off note dies
           // with it, so a later retry of a DIFFERENT attempt never inherits a
           // stale note. Best-effort; kept on escalation (post-mortem).
@@ -11313,6 +11719,10 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           clearTaskContinuation(s,`task:speckit:phase-${s.phaseIndex}:${taskId}`);
           clearRolloverDeadEnds(s,`task:speckit:phase-${s.phaseIndex}:${taskId}`);
           clearBackstopFirings(s,`task:speckit:phase-${s.phaseIndex}:${taskId}`);
+          if(s?.escalationPending?.implementer?.reason==="no_progress"&&s.escalationPending.implementer.scopeKey===`task:speckit:phase-${s.phaseIndex}:${taskId}`){
+            delete s.escalationPending.implementer;
+            if(!Object.keys(s.escalationPending).length) delete s.escalationPending;
+          }
           // Backlog #26 Step A: the task converged — its hand-off note dies
           // with it, so a later retry of a DIFFERENT attempt never inherits a
           // stale note. Best-effort; kept on escalation (post-mortem).
@@ -11503,15 +11913,21 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         // TASK-26, SpecKit twin: the reviewer gets a measured kill deadline
         // and is told it.
         const reviewBudget=roleDeadline(c,s,"code_reviewer");
+        const contScopeReview=`task:speckit:phase-${s.phaseIndex}:code_reviewer`;
+        const verdictOnlyLine=s.verdictOnlyTurns?.[contScopeReview]?`\n\n${s.verdictOnlyTurns[contScopeReview]}`:"";
+        const cReview=s.verdictOnlyTurns?.[contScopeReview]
+          ? {...c, policy: {...c.policy, free_model_turns_cap: 5, caps: {...c.policy?.caps, code_reviewer: {...c.policy?.caps?.code_reviewer, max_turns: 5}}}}
+          : c;
         const reviewRef=reviewTaskRef(s,speckitPhaseFeedbackKey(s.phaseIndex),phaseTasks,reviewIds,checkpoint.revision,!!fixChunks);
         const reviewDeadEnds=readRolloverDeadEnds(s, `task:speckit:phase-${s.phaseIndex}:code_reviewer`);
         const reviewHandoffNote=readHandoffNote(missionIdentity, reviewRef);
         const reviewDeadEndsText=reviewDeadEnds.length?`Prior dead ends (continuation context — do not retry blindly):\n${reviewDeadEnds.map((d)=>`- Generation ${d.generation} (${d.reason} ${d.used}/${d.limit}): ${d.tail}`).join("\n")}`:"";
-        const reviewHandoffNoteText=reviewHandoffNote?`Prior reviewer handoff note (continuation context — continue from where it stopped):\n${reviewHandoffNote}`:"";
+        const reviewHandoffNoteText=readOnlyContinuationNote(reviewHandoffNote,repo,missionIdentity,reviewRef,"reviewer");
         const scratchNote=unexpectedNewFilesReviewNote(phaseTasks.map((t)=>`${t.text||""} ${t.file||""}`).join("\n"));
+        const phaseReviewPassNotes=phaseCodeReviewPassNotesText(s);
         const rv=await review("code_reviewer",
-          `${reviewPrompt}\n\n${scratchNote?`${scratchNote}\n\n`:""}${reviewDeadEndsText}\n\n${reviewHandoffNoteText}\n\n${operatorPhaseNoteLine(s)?`${operatorPhaseNoteLine(s)}\n\n`:""}${reviewBudget.note}\n${readOnlyHandoffNoteReminder({mission: missionIdentity, ref: reviewRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}`,
-          c,s,feedback,phaseRequirements,reviewRef,reviewBudget.timeoutMs,true,codeReviewScopeKey("speckit-phase",s.phaseIndex));
+          `${reviewPrompt}\n\n${scratchNote?`${scratchNote}\n\n`:""}${reviewDeadEndsText}\n\n${reviewHandoffNoteText}\n\n${operatorPhaseNoteLine(s)?`${operatorPhaseNoteLine(s)}\n\n`:""}${phaseReviewPassNotes?`${phaseReviewPassNotes}\n\n`:""}${CODE_REVIEWER_TARGETED_TESTS_LINE}\n\n${CODE_REVIEWER_BROWSER_LINE}\n\n${reviewBudget.note}\n${readOnlyHandoffNoteReminder({mission: missionIdentity, ref: reviewRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
+          cReview,s,feedback,phaseRequirements,reviewRef,reviewBudget.timeoutMs,true,codeReviewScopeKey("speckit-phase",s.phaseIndex));
         noteRoleDeadlineOutcome(s,"code_reviewer",rv,reviewBudget.derived);
         lastReview=rv;
         if(rv.policyViolation){
@@ -11556,14 +11972,22 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:rv.capped.type,used:rv.capped.used,limit:rv.capped.limit,tail:deadEndTail({summary:`Code review capped (${rv.capped.type} ${rv.capped.used}/${rv.capped.limit}); phase diff unchanged — re-review the same phase diff.`,files:[]})});
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
           if(!cont.allowed){
+            // Backlog #27: record the continuation for bare `ap reset`, and
+            // end with the exact resume command.
+            recordLastContinuation(s,{contScope,taskId:null,missionName:missionIdentity,taskRef:reviewRef});
+            const lastNote=readHandoffNote(missionIdentity, reviewRef);
+            if(noteSaysOnlyGateLeft(lastNote) && !s.verdictOnlyTurns?.[contScope]){
+              s.verdictOnlyTurns=s.verdictOnlyTurns||{};
+              s.verdictOnlyTurns[contScope]="VERDICT-ONLY TURN: the previous sessions found no open findings and only the gate was left. Do not run any tests or the gate. Decide PASS or FAIL now from the hand-off note and the delta; the orchestrator runs the gate.";
+              saveState(s);
+              console.log(`SpecKit code review capped but handoff note reports only gate left; continuing for one verdict-only turn.`);
+              continue;
+            }
             // Dead ends are deliberately NOT cleared here: per-phase keys
             // cannot leak into another phase, and the entries are the
             // post-mortem record of why this phase never converged.
             s.phase="escalated";s.step="speckit_task_not_converging";
             s.phaseCheckpointError={code:"CONTINUATION_EXHAUSTED",evidence:{role:"code_reviewer",used:cont.used,limit:cont.limit,breach:rv.capped.type}};
-            // Backlog #27: record the continuation for bare `ap reset`, and
-            // end with the exact resume command.
-            recordLastContinuation(s,{contScope,taskId:null,missionName:missionIdentity,taskRef:reviewRef});
             s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
              die(`SpecKit code review did not converge after ${cont.used} capped generations (${rv.capped.type} cap ${rv.capped.used}/${rv.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
             }
@@ -11605,6 +12029,10 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             console.log(`SpecKit code review stopped voluntarily as incomplete; continuing as session ${cont.used+1} of ${cont.limit+1}.`);
           continue;
         }
+        if(rv.status==="completed"&&(rv.review?.decision==="PASS"||rv.review?.decision==="FAIL")){
+          clearContinuationRound(s,`task:speckit:phase-${s.phaseIndex}:code_reviewer`);
+          deleteCarriedScratch(repo,missionIdentity,reviewRef);
+        }
         if(rv.status==="completed"&&rv.review?.decision==="PASS"){
           // Mission 025 task 3.1: never accept a SpecKit reviewer PASS
           // while any linked verify/tool result exited non-zero or 124. The
@@ -11631,6 +12059,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           clearCodeReviewHistory(s,codeReviewScopeKey("speckit-phase",s.phaseIndex));const transition=decideTransition(checkpoint,{stage:"code_reviewer",status:"completed",decision:"PASS",runId:rv.sessionId??null,findings:rv.review?.findings??[]});
           checkpoint=applyCheckpointTransition(transition);
           checkpoint.codeReviewer={runId:rv.sessionId??null,decision:"PASS",findings:rv.review?.findings??[]};
+          applyPlanPassNoteMarks(s, rv, {phase:s.phaseIndex+1, allowSkip:false});
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
           continue;
         }
@@ -11720,15 +12149,20 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         // durations from the just-run gate over the persisted history.
         const verifyDurations=formatLinkedTestDurations(linkedVerifyCommandsForPhase(phaseTasks,c?.gates?.commands),resolveGateDurations(g,s?.gateDurations));
         const heavyNoParallelVerify=formatHeavySuiteNoParallelNote();
+        const contScopeVerify=`task:speckit:phase-${s.phaseIndex}:verifier`;
+        const verdictOnlyLine=s.verdictOnlyTurns?.[contScopeVerify]?`\n\n${s.verdictOnlyTurns[contScopeVerify]}`:"";
+        const cVerify=s.verdictOnlyTurns?.[contScopeVerify]
+          ? {...c, policy: {...c.policy, free_model_turns_cap: 5, caps: {...c.policy?.caps, verifier: {...c.policy?.caps?.verifier, max_turns: 5}}}}
+          : c;
         const verifyRef=allPhaseTaskRef(phaseTasks);
         const verifyDeadEnds=readRolloverDeadEnds(s, `task:speckit:phase-${s.phaseIndex}:verifier`);
         const verifyHandoffNote=readHandoffNote(missionIdentity, verifyRef);
         const verifyDeadEndsText=verifyDeadEnds.length?`Prior dead ends (continuation context — do not retry blindly):\n${verifyDeadEnds.map((d)=>`- Generation ${d.generation} (${d.reason} ${d.used}/${d.limit}): ${d.tail}`).join("\n")}`:"";
-        const verifyHandoffNoteText=verifyHandoffNote?`Prior verifier handoff note (continuation context — continue from where it stopped):\n${verifyHandoffNote}`:"";
+        const verifyHandoffNoteText=readOnlyContinuationNote(verifyHandoffNote,repo,missionIdentity,verifyRef,"verifier");
         const vv=await relayAsync("verifier",
           `${`Verify this phase after implementation and code review.${gateSection?" The full test suite already ran as the phase gate; review the recorded gate result below — do not re-run it.":""}\nPhase: ${phase.name}\n\nTasks:\n${scope}\n\nScoped implementation delta for THIS PHASE only (pre-existing repository changes made before this mission started, and changes from earlier phases, are excluded — do not evaluate or flag anything outside this delta; an empty delta means this phase made no repository changes):\n${scopedDeltaBeginMarker("PHASE")}\n${speckitBoundedDelta(repo,phaseBaselineKey,"PHASE_REVIEW")}\n${SCOPED_DELTA_END_MARKER}`}${gateSection?`\n\n${gateSection}`:""}${verifyDurations?`\n\n${verifyDurations}`:""}${heavyNoParallelVerify?`
-\n\n${heavyNoParallelVerify}`:""}\n\n${verifyDeadEndsText}\n\n${verifyHandoffNoteText}\n\n${verifyBudget.note}${browserVerifierNote(phaseTaskFacts)?`\n${browserVerifierNote(phaseTaskFacts)}`:""}\n${verifierRoundLines(s,codeReviewScopeKey("speckit-phase",s.phaseIndex)).join("\n")}\n${readOnlyHandoffNoteReminder({mission: missionIdentity, ref: verifyRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}`,
-          c,s,{readOnly:true,review:true,requirements:phaseRequirements,taskFacts:phaseTaskFacts,taskRef:verifyRef,timeoutMs:verifyBudget.timeoutMs,capEnabled:true});
+\n\n${heavyNoParallelVerify}`:""}\n\n${verifyDeadEndsText}\n\n${verifyHandoffNoteText}\n\n${verifyBudget.note}${browserVerifierNote(phaseTaskFacts)?`\n${browserVerifierNote(phaseTaskFacts)}`:""}\n${verifierRoundLines(s,codeReviewScopeKey("speckit-phase",s.phaseIndex)).join("\n")}\n${readOnlyHandoffNoteReminder({mission: missionIdentity, ref: verifyRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
+          cVerify,s,{readOnly:true,review:true,requirements:phaseRequirements,taskFacts:phaseTaskFacts,taskRef:verifyRef,timeoutMs:verifyBudget.timeoutMs,capEnabled:true});
         noteRoleDeadlineOutcome(s,"verifier",vv,verifyBudget.derived);
         {
           // Backlog #91: a red phase gate forces the recorded verdict to FAIL.
@@ -11784,14 +12218,22 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:vv.capped.type,used:vv.capped.used,limit:vv.capped.limit,tail:deadEndTail({summary:`Verification capped (${vv.capped.type} ${vv.capped.used}/${vv.capped.limit}); phase diff unchanged — re-verify the same phase diff.`,files:[]})});
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
           if(!cont.allowed){
+            // Backlog #27: record the continuation for bare `ap reset`, and
+            // end with the exact resume command.
+            recordLastContinuation(s,{contScope,taskId:null,missionName:missionIdentity,taskRef:verifyRef});
+            const lastNote=readHandoffNote(missionIdentity, verifyRef);
+            if(noteSaysOnlyGateLeft(lastNote) && !s.verdictOnlyTurns?.[contScope]){
+              s.verdictOnlyTurns=s.verdictOnlyTurns||{};
+              s.verdictOnlyTurns[contScope]="VERDICT-ONLY TURN: the previous sessions found no open findings and only the gate was left. Do not run any tests or the gate. Decide PASS or FAIL now from the hand-off note and the delta; the orchestrator runs the gate.";
+              saveState(s);
+              console.log(`SpecKit verification capped but handoff note reports only gate left; continuing for one verdict-only turn.`);
+              continue;
+            }
             // Dead ends are deliberately NOT cleared here: per-phase keys
             // cannot leak into another phase, and the entries are the
             // post-mortem record of why this phase never converged.
             s.phase="escalated";s.step="speckit_task_not_converging";
             s.phaseCheckpointError={code:"CONTINUATION_EXHAUSTED",evidence:{role:"verifier",used:cont.used,limit:cont.limit,breach:vv.capped.type}};
-            // Backlog #27: record the continuation for bare `ap reset`, and
-            // end with the exact resume command.
-            recordLastContinuation(s,{contScope,taskId:null,missionName:missionIdentity,taskRef:verifyRef});
             s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
              die(`SpecKit verification did not converge after ${cont.used} capped generations (${vv.capped.type} cap ${vv.capped.used}/${vv.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
             }
@@ -11835,7 +12277,12 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             console.log(`SpecKit verification stopped voluntarily as incomplete; continuing as session ${cont.used+1} of ${cont.limit+1}.`);
           continue;
         }
+        if(vv.status==="completed"&&(vv.review?.decision==="PASS"||vv.review?.decision==="FAIL")){
+          clearContinuationRound(s,`task:speckit:phase-${s.phaseIndex}:verifier`);
+          deleteCarriedScratch(repo,missionIdentity,verifyRef);
+        }
         if(g.ok&&vv.status==="completed"&&vv.review?.decision==="PASS"){
+          { const bn=browserCheckNotes(vv.review); if(bn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:bn,at:new Date().toISOString()})) console.log(`Manual UI check recorded in MANUAL-CHECKS.md (${bn.length} note(s)).`); } }
           // Mission 025 task 3.2: never accept a SpecKit verifier PASS
           // while any linked verify/tool result exited non-zero or 124. The
           // joint gate+verdict check covers both evidence channels: the
@@ -11982,10 +12429,12 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
   // mission-final review prompt verbatim plus the shared
   // whole-mission-diff reviewer line (imported, never duplicated).
   // Explicit repo root — absent/unreadable yields the generic section.
+  const speckitFinalPassNotes=finalReviewPassNotesText(s);
   let final=await review("code_reviewer",
-    `${`Perform final repository review against the planning artifacts.${speckitFinalSpecParagraph}\n\nScoped implementation delta for THIS ENTIRE MISSION (pre-existing repository changes made before this mission started are excluded — do not evaluate or flag anything outside this delta; an empty delta means this mission made no repository changes):\n${scopedDeltaBeginMarker("MISSION")}\n${speckitBoundedDelta(repo,missionBaselineKey,"MISSION_FINAL")}\n${SCOPED_DELTA_END_MARKER}`}${speckitFinalNoParallel?`\n\n${speckitFinalNoParallel}`:""}\n\n${buildSecurityChecklistSection(repo)}\n${MISSION_FINAL_SECURITY_LINE}\n\n${speckitFinalBudget.note}`,
+    `${`Perform final repository review against the planning artifacts.${speckitFinalSpecParagraph}\n\nScoped implementation delta for THIS ENTIRE MISSION (pre-existing repository changes made before this mission started are excluded — do not evaluate or flag anything outside this delta; an empty delta means this mission made no repository changes):\n${scopedDeltaBeginMarker("MISSION")}\n${speckitBoundedDelta(repo,missionBaselineKey,"MISSION_FINAL")}\n${SCOPED_DELTA_END_MARKER}`}${speckitFinalNoParallel?`\n\n${speckitFinalNoParallel}`:""}${speckitFinalPassNotes?`\n\n${speckitFinalPassNotes}`:""}\n\n${buildSecurityChecklistSection(repo)}\n${MISSION_FINAL_SECURITY_LINE}\n\n${speckitFinalBudget.note}`,
     c,s,"",[],null,speckitFinalBudget.timeoutMs,false,codeReviewScopeKey("final","speckit"));
   noteRoleDeadlineOutcome(s,"code_reviewer",final,speckitFinalBudget.derived);
+  applyPlanPassNoteMarks(s, final, {phase:"final"}); saveState(s);
   if(final.status==="completed"&&!final.policyViolation&&final.review?.decision==="PASS"){
     // Mission 025 task 3.4: never complete the mission on a final-reviewer
     // PASS while any linked verify/tool result exited non-zero or 124. The
@@ -12046,12 +12495,14 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           const budget=roleDeadline(c,s,"code_reviewer");
           // 067 security section above; 071 no-work summary as answer/rebuttal.
           const answerSection=(typeof summary==="string"&&summary!=="")?`\n\nImplementer's answer/rebuttal (no files changed):\n${summary}`:"";
+          const rereviewPassNotes=finalReviewPassNotesText(s);
           const rereview=await review("code_reviewer",
-            `${`Perform final repository review against the planning artifacts.${speckitFinalSpecParagraph}\n\nScoped implementation delta for THIS ENTIRE MISSION (pre-existing repository changes made before this mission started are excluded — do not evaluate or flag anything outside this delta; an empty delta means this mission made no repository changes):\n${scopedDeltaBeginMarker("MISSION")}\n${speckitBoundedDelta(repo,missionBaselineKey,"MISSION_FINAL")}\n${SCOPED_DELTA_END_MARKER}`}${speckitFinalNoParallel?`\n\n${speckitFinalNoParallel}`:""}\n\n${buildSecurityChecklistSection(repo)}\n${MISSION_FINAL_SECURITY_LINE}${answerSection}\n\n${budget.note}`,
+            `${`Perform final repository review against the planning artifacts.${speckitFinalSpecParagraph}\n\nScoped implementation delta for THIS ENTIRE MISSION (pre-existing repository changes made before this mission started are excluded — do not evaluate or flag anything outside this delta; an empty delta means this mission made no repository changes):\n${scopedDeltaBeginMarker("MISSION")}\n${speckitBoundedDelta(repo,missionBaselineKey,"MISSION_FINAL")}\n${SCOPED_DELTA_END_MARKER}`}${speckitFinalNoParallel?`\n\n${speckitFinalNoParallel}`:""}${rereviewPassNotes?`\n\n${rereviewPassNotes}`:""}\n\n${buildSecurityChecklistSection(repo)}\n${MISSION_FINAL_SECURITY_LINE}${answerSection}\n\n${budget.note}`,
             c,s,"",[],null,budget.timeoutMs,false,codeReviewScopeKey("final","speckit"));
           noteRoleDeadlineOutcome(s,"code_reviewer",rereview,budget.derived);
           lastFinalReview=rereview;
           if(rereview?.review?.decision==="INCOMPLETE") console.log(`SpecKit mission-final final re-review round ${round} INCOMPLETE treated as FAIL (no continuation).`);
+          applyPlanPassNoteMarks(s, rereview, {phase:"final"}); saveState(s);
           return rereview;
         },
         checkEvidenceRefusal:({review:rereview})=>speckitCheckRefusal(rereview),
@@ -12059,7 +12510,10 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
       },
     });
     if(speckitFinalFix.outcome!=="escalate") clearCodeReviewHistory(s,codeReviewScopeKey("final","speckit"));
-    if(speckitFinalFix.outcome==="passed"){final=speckitFinalFix.review;}
+    if(speckitFinalFix.outcome==="passed"){
+      final=speckitFinalFix.review;
+      applyPlanPassNoteMarks(s, final, {phase:"final"}); saveState(s);
+    }
     else{s.phase="escalated";s.step=speckitFinalFix.step||"final_review";saveState(s);die(speckitFinalFix.message||"Final review failed.");}
   }
 
@@ -12137,8 +12591,47 @@ async function main(){
     return code;
   }
   if(command==="reset"){
-    const i=commandArgs.indexOf("--scope");
-    const code=resetCommand(i>=0?commandArgs[i+1]||null:null);
+    let scopeArg=null;
+    let dryRun=false;
+    let errorArg=null;
+    for(let i=0;i<commandArgs.length;i++){
+      const a=commandArgs[i];
+      if(a==="--dry-run"){
+        dryRun=true;
+        continue;
+      }
+      if(a==="--yes"){
+        continue;
+      }
+      if(a==="--scope"){
+        const next=commandArgs[i+1];
+        if(next!==undefined&&!next.startsWith("--")){
+          scopeArg=next;
+          i++;
+          continue;
+        }
+        errorArg=a;
+        break;
+      }
+      if(a==="--repo"){
+        const next=commandArgs[i+1];
+        if(next!==undefined&&!next.startsWith("--")){
+          i++;
+          continue;
+        }
+        errorArg=a;
+        break;
+      }
+      errorArg=a;
+      break;
+    }
+    if(errorArg){
+      console.error(`ap reset: unknown option '${errorArg}'`);
+      console.error("Usage: ap reset [--scope <key>] [--dry-run] [--repo <path>]");
+      process.exitCode=2;
+      return 2;
+    }
+    const code=resetCommand(scopeArg,{dryRun});
     process.exitCode=code;
     return code;
   }
@@ -12161,7 +12654,7 @@ async function main(){
     process.exitCode=code;
     return code;
   }
-  const c=cfg();await preflightConfiguredRoles(c);const s=loadState();
+  const c=cfg();liveConfigMtimeMs=fs.existsSync(cfgPath)?fs.statSync(cfgPath).mtimeMs:0;const s=loadState();await preflightConfiguredRoles(c,s);
   if(command==="plan"||command==="spec")return runSpec(c,s);
   if(command==="review")return reviewPlanCommand(c,s);
   if(command==="implement"||command==="run"||command==="resume"||command==="full") {

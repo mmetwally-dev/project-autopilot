@@ -151,8 +151,40 @@ export function consumeEscalationFor(state, reviewerRole) {
   return fixer;
 }
 
+// ---- no-progress escalation (backlog #8) ----
+// Pure helper: schedule one run on the escalation model when a task made no
+// file progress in consecutive sessions. Returns null when the role has no
+// escalation_model, or when this scope already used its escalation.
+export function scheduleNoProgressEscalation(state, config, { role, scopeKey, taskId, consecutive, from } = {}) {
+  if (!isRecord(state) || !role || !scopeKey) return null;
+  const to = normalizeEscalationModel(config?.roles?.[role]?.escalation_model);
+  if (!to) return null;
+  if (isRecord(state.noProgressEscalations) && state.noProgressEscalations[scopeKey]) return null;
+  state.noProgressEscalations = { ...(isRecord(state.noProgressEscalations) ? state.noProgressEscalations : {}), [scopeKey]: { role, taskId, at: new Date().toISOString() } };
+  state.escalationPending = { ...(isRecord(state.escalationPending) ? state.escalationPending : {}), [role]: { scopeKey, to, from: from ?? null, reason: "no_progress" } };
+  return { role, to, from: from ?? null, taskId, consecutive };
+}
+
+function displayModel(e) {
+  return isRecord(e) && e.model ? (String(e.model).startsWith(`${e.adapter}/`) ? e.model : `${e.adapter}/${e.model}`) : "configured model";
+}
+
 export function formatEscalationLog({ role, from, to, finding, source } = {}) {
-  const d = e => (isRecord(e) && e.model ? (String(e.model).startsWith(`${e.adapter}/`) ? e.model : `${e.adapter}/${e.model}`) : "configured model");
   const f = String(finding || "").replace(/\s+/g, " ").slice(0, 160);
-  return `escalation: ${role} ${d(from)} → ${d(to)} for one fix round (${source || "reviewer"} reported the same finding not fixed: ${f})`;
+  return `escalation: ${role} ${displayModel(from)} → ${displayModel(to)} for one fix round (${source || "reviewer"} reported the same finding not fixed: ${f})`;
+}
+
+export function formatNoProgressEscalationLog({ role, from, to, taskId, consecutive } = {}) {
+  return `escalation: ${role} ${displayModel(from)} → ${displayModel(to)} for task ${taskId} (no file changed in ${consecutive} sessions)`;
+}
+
+// Pure decision helper for stopOnNoProgress: decide whether to continue,
+// escalate to the stronger model, or stop (die).
+export function noProgressDecision({ consecutive, limit, isTaskSite, escalatedForScope, pendingForScope } = {}) {
+  const c = Number(consecutive) || 0;
+  const l = Number(limit) || 0;
+  if (isTaskSite && pendingForScope && c > 0) return "stop";
+  if (c < l) return "continue";
+  if (isTaskSite && !escalatedForScope) return "escalate";
+  return "stop";
 }

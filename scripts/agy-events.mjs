@@ -23,6 +23,7 @@ import path from "node:path";
 export const AGY_SETTINGS_RELATIVE_PATH = ".gemini/antigravity-cli/settings.json";
 import {equivalentEventPath, eventReferencesPath} from "./event-paths.mjs";
 import {resolveRunModel} from "./model-extract.mjs";
+export {agyModelEffortConflict} from "./agy-model-effort.mjs";
 
 // NDJSON decode shared with the driver: one parsed object per non-empty line;
 // unparseable lines and stderr lines become typed sentinel events (mirrors
@@ -136,6 +137,38 @@ export function detectAgyRateLimited(events) {
   return observations;
 }
 
+// Invalid model selection: antigravity rejects a model/effort conflict before
+// the first turn ("invalid model selection ... conflicts with --effort=medium").
+// Produces a structured observation so the classifier marks it INVOCATION_MISMATCH
+// (non-retryable adapter failure).
+export const AGY_INVALID_MODEL_TEXT = /invalid model selection/i;
+
+export function detectAgyInvalidModel(events) {
+  const observations = [];
+  for (const event of events) {
+    if (!event || typeof event !== "object") continue;
+    let message = "";
+    if (event.type === "stderr" || event.type === "unparsed_stdout") {
+      message = String(event.text || "");
+    } else {
+      const result = resultOf(event);
+      if (result) {
+        message = `${result.error || ""} ${result.message || ""}`;
+      } else if (event.error) {
+        message = typeof event.error === "string" ? event.error : `${event.error.type || ""} ${event.error.message || ""}`;
+      } else if (typeof event.message === "string") {
+        message = event.message;
+      } else {
+        message = JSON.stringify(event);
+      }
+    }
+    if (AGY_INVALID_MODEL_TEXT.test(message)) {
+      observations.push(observation("invalid_model", event, {reason: "agy_invalid_model_selection", message: message.slice(0, 200)}));
+    }
+  }
+  return observations;
+}
+
 // Canonical observation vocabulary (the same types failure-contract.mjs's
 // classifyObservedFailure consumes): tool ACTIVE/DONE/ERROR step states map to
 // attempted/observed/failed, denials to permission_denied, quota pressure to
@@ -143,7 +176,7 @@ export function detectAgyRateLimited(events) {
 // DONE emits attempted plus the completed marker; ERROR emits attempted, the
 // failed marker, and permission_denied when the tool error is denial-shaped.
 export function observeAgyEvents(events, probe = {}) {
-  const observations = [...detectAgyRateLimited(events), ...agyDeniedActions(events)];
+  const observations = [...detectAgyRateLimited(events), ...agyDeniedActions(events), ...detectAgyInvalidModel(events)];
   const emit = (type, event, details = {}) => observations.push(observation(type, event, details));
   for (const event of events) {
     const step = stepOf(event);

@@ -7,10 +7,11 @@ import { peekSummary } from "./watch-summary.mjs";
 import { defaultIsPidAlive } from "./run-recovery.mjs";
 import { growingTerm } from "./per-task-budget.mjs";
 import { readOwnerPid, ownerPidAlive } from "./owner-pid.mjs";
-import { buildReportModel, renderReport, formatStamp, readBriefExtras } from "./watch-report.mjs";
+import { buildReportModel, renderReport, formatStamp, readBriefExtras, parseVitestGateLog } from "./watch-report.mjs";
 import { detectUiProject } from "./e2e-detect.mjs";
 import { formatNotRunInMissions } from "./command-probe.mjs";
 import { phases as standalonePhases } from "../adapters/standalone.mjs";
+import { phases as speckitPhases } from "../adapters/speckit.mjs";
 
 // true = alive, false = provably gone, null = could not tell (no/invalid pid, or
 // the probe itself failed). "Could not tell" is never reported as dead: a
@@ -550,6 +551,78 @@ export function readGateLogTail(repo, mission, phase = null, { bytes = 8192 } = 
   }
 }
 
+export function gateLogLabel(filename) {
+  const base = path.basename(filename, ".log");
+  const phaseMatch = base.match(/phase-(\d+)/i);
+  const phase = phaseMatch ? phaseMatch[1] : null;
+
+  let attempt = null;
+  const attemptExplicit = base.match(/attempt[-_ ]?(\d+)/i);
+  if (attemptExplicit) {
+    attempt = attemptExplicit[1];
+  } else {
+    const nm = base.match(/phase-\d+[-_](\d+)(?:[-_.]|$)/i);
+    if (nm && nm[1].length <= 6) {
+      attempt = nm[1];
+    }
+  }
+
+  if (phase && attempt) return `phase ${phase} attempt ${attempt}`;
+  if (phase) return `phase ${phase}`;
+  return base;
+}
+
+// Find expected total and label from the newest finished gate log other than the
+// open one that has a `Test Files` summary (backlog #9).
+export function findPreviousGateExpected(repo, mission, openPhase = null) {
+  if (!repo || !mission) return null;
+  const dir = path.join(repo, ".autopilot", "missions", String(mission), "gates");
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(".log")); } catch { return null; }
+  if (!names.length) return null;
+  const files = names
+    .map((name) => {
+      const file = path.join(dir, name);
+      try { return { name, file, mtime: fs.statSync(file).mtimeMs }; } catch { return null; }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.mtime - a.mtime);
+
+  let openFile = null;
+  if (openPhase != null && openPhase !== "") {
+    const prefix = `phase-${Number(openPhase)}-`;
+    const phaseFiles = files.filter((f) => f.name.startsWith(prefix));
+    if (phaseFiles.length) openFile = phaseFiles[0].name;
+  }
+  if (!openFile && files.length) openFile = files[0].name;
+
+  const previous = files.filter((f) => f.name !== openFile);
+  for (const item of previous) {
+    try {
+      const size = fs.statSync(item.file).size;
+      const readLen = Math.min(size, 4 * 1024 * 1024);
+      const buf = Buffer.alloc(readLen);
+      const fd = fs.openSync(item.file, "r");
+      try {
+        fs.readSync(fd, buf, 0, readLen, Math.max(0, size - readLen));
+      } finally {
+        fs.closeSync(fd);
+      }
+      const text = buf.toString("utf8");
+      const parsed = parseVitestGateLog(text);
+      if (parsed?.summary?.files?.total != null) {
+        return {
+          total: parsed.summary.files.total,
+          label: gateLogLabel(item.name),
+        };
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 // The old layout printed a standalone `Last reset:` line from `state.lastReset`;
 // in the 094 layout an operator change shows on the `Events:` line, which the
 // model builds from `operator` events. The CLI reset paths append such an event
@@ -701,14 +774,32 @@ export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAl
     if (e?.type === "gate_start") { openGate = true; openGatePhase = e.phase ?? null; }
     else if (e?.type === "gate_result") { openGate = false; openGatePhase = null; }
   }
-  const gateLogText = gateLog !== undefined
-    ? gateLog
-    : (openGate ? readGateLogTail(repo, mission, openGatePhase) : null);
+  let gateLogText = gateLog;
+  if (gateLogText === undefined) {
+    if (openGate) {
+      gateLogText = readGateLogTail(repo, mission, openGatePhase, { bytes: 8192 });
+      if (gateLogText && !/\[\d+\/\d+\]/.test(gateLogText)) {
+        gateLogText = readGateLogTail(repo, mission, openGatePhase, { bytes: 4 * 1024 * 1024 });
+      }
+    } else {
+      gateLogText = null;
+    }
+  }
+  let expectedGateTotal = null;
+  let expectedGateLabel = null;
+  if (openGate && gateLogText && !/\[\d+\/\d+\]/.test(gateLogText)) {
+    const prev = findPreviousGateExpected(repo, mission, openGatePhase);
+    if (prev) {
+      expectedGateTotal = prev.total;
+      expectedGateLabel = prev.label;
+    }
+  }
+  const resolvedPhases = phases ?? resolveMissionPhases(repo, mission, config, state);
   const model = buildReportModel({
     state,
     runs,
     events: eventList,
-    phases: phases ?? [],
+    phases: resolvedPhases,
     policy: policy ?? (config && typeof config.policy === "object" ? config.policy : {}),
     layout: configResult?.layout ?? null,
     progress,
@@ -720,10 +811,79 @@ export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAl
     ownerAlive,
     notRunText: formatNotRunInMissions(config?.gates?.not_run_in_missions),
     isAlive,
+    expectedGateTotal,
+    expectedGateLabel,
   });
   const e2eNote = noE2eReportNote(repo, configResult?.layout ?? null);
   const out = renderReport(model, { stamp });
   return e2eNote ? `${out.replace(/\n+$/, "")}\nNote: ${e2eNote}\n` : out;
+}
+
+// Resolve authoritative phase list across frameworks for watch report rendering.
+export function resolveMissionPhases(repo, mission, config, state) {
+  const st = state ?? readJsonFile(path.join(repo, ".autopilot", "state.json"));
+  const cfg = config ?? loadAndMigrateConfig(path.join(repo, ".autopilot", "config.json"), {persist: false})?.config;
+
+  const isSpeckit = st?.phaseExecutionCheckpoint?.framework === "speckit"
+    || st?.planningDetection?.framework === "speckit"
+    || st?.planApproval?.framework === "speckit"
+    || Boolean(st?.speckitFeatureDir)
+    || cfg?.project?.planning_framework === "speckit"
+    || (cfg?.project?.planning_framework !== "standalone" && fs.existsSync(path.join(repo, ".specify", "workflows", "speckit", "workflow.yml")));
+
+  if (isSpeckit) {
+    let scoped = null;
+    if (st?.speckitFeatureDir && fs.existsSync(path.join(repo, "specs", st.speckitFeatureDir))) {
+      scoped = path.join("specs", st.speckitFeatureDir);
+    }
+    if (!scoped) {
+      try {
+        const feature = JSON.parse(fs.readFileSync(path.join(repo, ".specify", "feature.json"), "utf8"));
+        if (typeof feature?.feature_directory === "string" && feature.feature_directory.trim()) {
+          const dir = path.resolve(repo, feature.feature_directory);
+          if (dir.startsWith(path.resolve(repo) + path.sep)) scoped = path.relative(repo, dir);
+        }
+      } catch {}
+    }
+    if (!scoped && mission) {
+      if (fs.existsSync(path.join(repo, "specs", String(mission)))) {
+        scoped = path.join("specs", String(mission));
+      } else {
+        try {
+          const missionName = String(mission).replace(/^\d+-/, "");
+          const entries = fs.readdirSync(path.join(repo, "specs"), {withFileTypes: true});
+          for (const e of entries) {
+            if (e.isDirectory() && (e.name === mission || e.name.replace(/^\d+-/, "") === missionName)) {
+              scoped = path.join("specs", e.name);
+              break;
+            }
+          }
+        } catch {}
+      }
+    }
+    const candidates = scoped
+      ? [path.join(scoped, "tasks.md"), path.join(scoped, "tasks", "*.md")]
+      : (cfg?.planning?.speckit?.task_candidates || [".specify/tasks.md", "specs/*/tasks.md", "specs/*/tasks/*.md"]);
+    try {
+      const p = speckitPhases(repo, candidates);
+      if (p && p.length) return p;
+    } catch {}
+  }
+
+  try {
+    const p = standalonePhases(repo, mission);
+    if (p && p.length) return p;
+  } catch {}
+
+  if (!isSpeckit) {
+    try {
+      const candidates = cfg?.planning?.speckit?.task_candidates || [".specify/tasks.md", "specs/*/tasks.md", "specs/*/tasks/*.md"];
+      const p = speckitPhases(repo, candidates);
+      if (p && p.length) return p;
+    } catch {}
+  }
+
+  return [];
 }
 
 // Direct-write the watch report file (same principle as progress.log: the
@@ -736,13 +896,16 @@ export function writeWatchReportFile(repo, mission, { tail = 40, outFile, ...opt
   const file = outFile || (mission
     ? path.join(repo, ".autopilot", "missions", String(mission), "WATCH-REPORT.md")
     : path.join(repo, ".autopilot", "WATCH-REPORT.md"));
-  // Backlog #8: the file write gets the mission's real phase list (the same
-  // standalone adapter parse the orchestrator uses) and policy, so the
+  // Backlog #8 / #6: the file write gets the mission's real phase list (the same
+  // adapter parse the orchestrator uses) and policy, so the
   // Implementation stage names its phases and totals instead of counting runs.
   const configResult = loadAndMigrateConfig(path.join(repo, ".autopilot", "config.json"), {persist: false});
   const config = configResult?.config ?? null;
-  let missionPhases = [];
-  try { missionPhases = standalonePhases(repo, mission); } catch { missionPhases = []; }
+  const state = readJsonFile(path.join(repo, ".autopilot", "state.json"));
+  let missionPhases = opts.phases;
+  if (!missionPhases) {
+    missionPhases = resolveMissionPhases(repo, mission, config, state);
+  }
   const text = renderWatchReport(repo, mission, {
     tail,
     phases: missionPhases,

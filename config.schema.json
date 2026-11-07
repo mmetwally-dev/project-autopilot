@@ -1332,6 +1332,7 @@
         "gate_commands": [],
         "gate_network": false,
         "gate_env_allowlist": [],
+        "offline_test_tools": "",
         "not_run_in_missions": [],
         "not_run_in_missions_original_command": "",
         "require_reviewer": true,
@@ -1360,6 +1361,11 @@
           "items": {
             "type": "string"
           }
+        },
+        "offline_test_tools": {
+          "type": "string",
+          "description": "In-process test fakes the project has (e.g. PGlite for PostgreSQL); named in agent briefs because the gate runs offline. Empty = none detected.",
+          "default": ""
         },
         "not_run_in_missions": {
           "type": "array",

@@ -360,6 +360,7 @@ export function gitSnapshot(startCwd){
   // Object database: `git commit-tree` / `git hash-object -w` can create an
   // object with no ref ever pointing at it. count-objects is the cheap,
   // standard way to see the store grew even when refs/config/worktree did not.
+  const takenAtMs=Date.now();
   const objects=gitOut(cwd,["count-objects","-v"]).toString("utf8");
 
   // Index state: `git update-index --assume-unchanged` and `--skip-worktree`
@@ -551,7 +552,9 @@ export function gitSnapshot(startCwd){
     diff:diff.toString("utf8"),
     files
   })));
-  return {head,headSymbolic,refs,config,sequencer,reflogs,objects,indexState,hooksDigest,administrativeDigest,status:statusFiltered,diff,files,fingerprint};
+  const snap={head,headSymbolic,refs,config,sequencer,reflogs,objects,indexState,hooksDigest,administrativeDigest,status:statusFiltered,diff,files,fingerprint};
+  Object.defineProperty(snap,"takenAtMs",{value:takenAtMs,enumerable:false,writable:true,configurable:true});
+  return snap;
 }
 
 // Snapshot scope (backlog #9 / TASK-31). Single place defining which
@@ -807,6 +810,91 @@ export function redactedGitSnapshot(snapshot){
     administrativeDigest:String(snapshot?.administrativeDigest??"")
   };
 }
+
+function parseCountObjects(text){
+  if(typeof text!=="string") return null;
+  const countMatch=text.match(/^count:\s*(\d+)$/m);
+  const inPackMatch=text.match(/^in-pack:\s*(\d+)$/m);
+  const packsMatch=text.match(/^packs:\s*(\d+)$/m);
+  if(!countMatch||!inPackMatch||!packsMatch) return null;
+  return {
+    count:Number(countMatch[1]),
+    inPack:Number(inPackMatch[1]),
+    packs:Number(packsMatch[1])
+  };
+}
+
+export function looseObjectGrowthHasCommit(cwd,before,after){
+  if(before?.takenAtMs==null||typeof before.takenAtMs!=="number"){
+    return {commitOrTag:true,reason:"no-start-time"};
+  }
+  const beforeParsed=parseCountObjects(before?.objects);
+  const afterParsed=parseCountObjects(after?.objects);
+  if(!beforeParsed||!afterParsed||beforeParsed.inPack!==afterParsed.inPack||beforeParsed.packs!==afterParsed.packs){
+    return {commitOrTag:true,reason:"pack-changed-or-unparsed"};
+  }
+  let objectsDir;
+  try{
+    const raw=gitOut(cwd,["rev-parse","--git-path","objects"]).toString("utf8").trim();
+    objectsDir=path.resolve(cwd,raw);
+  }catch{
+    return {commitOrTag:true,reason:"pack-changed-or-unparsed"};
+  }
+  const thresholdMs=before.takenAtMs-2000;
+  const hex2=/^[0-9a-f]{2}$/i;
+  const hex38=/^[0-9a-f]{38}$/i;
+  const shas=[];
+  try{
+    const entries=fs.readdirSync(objectsDir,{withFileTypes:true});
+    for(const entry of entries){
+      if(!entry.isDirectory()||!hex2.test(entry.name)) continue;
+      const subDirPath=path.join(objectsDir,entry.name);
+      let fileEntries;
+      try{
+        fileEntries=fs.readdirSync(subDirPath,{withFileTypes:true});
+      }catch{
+        continue;
+      }
+      for(const fe of fileEntries){
+        if(!fe.isFile()||!hex38.test(fe.name)) continue;
+        const filePath=path.join(subDirPath,fe.name);
+        try{
+          const st=fs.statSync(filePath);
+          if(st.mtimeMs>=thresholdMs){
+            shas.push(`${entry.name}${fe.name}`);
+          }
+        }catch{}
+      }
+    }
+  }catch{
+    return {commitOrTag:true,reason:"pack-changed-or-unparsed"};
+  }
+  const counts={blob:0,tree:0,commit:0,tag:0};
+  if(shas.length===0){
+    return {commitOrTag:true,reason:"no-new-loose-objects-found",counts};
+  }
+  const catResult=run("git",["cat-file","--batch-check"],{cwd,input:shas.join("\n")+"\n"});
+  if(catResult.status!==0){
+    return {commitOrTag:true,reason:"cat-file-failed",counts};
+  }
+  const lines=String(catResult.stdout||"").split(/\r?\n/);
+  for(const line of lines){
+    const trimmed=line.trim();
+    if(!trimmed) continue;
+    const parts=trimmed.split(/\s+/);
+    const type=parts[1];
+    if(type in counts){
+      counts[type]+=1;
+    }
+  }
+  const commitOrTag=counts.commit>0||counts.tag>0;
+  return {
+    commitOrTag,
+    reason:commitOrTag?"commit-or-tag-detected":"blob/tree only",
+    counts
+  };
+}
+
 export function touchedFilesBetween(before,after,cwd){
   const set=new Set();
   const beforeFiles=before.files||{};

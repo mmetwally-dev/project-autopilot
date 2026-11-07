@@ -239,6 +239,9 @@ export function classifyObservedFailure(observation) {
   // a provider limit and not an idle hang: name it explicitly and do not
   // retry the same invocation.
   if (eventTypes.has("agent_not_found")) return failure("INVOCATION_MISMATCH", "adapter", false, evidence);
+  // Invalid model reference (OpenCode, bare id) or Antigravity model/effort
+  // conflict ("invalid model selection ... conflicts with --effort=medium").
+  if (eventTypes.has("invalid_model")) return failure("INVOCATION_MISMATCH", "adapter", false, evidence);
   // 4c. Backlog #106: structured provider-side error (opencode UnknownError,
   // and 2.x provider.no-route / "Model unavailable"). Retryable (one
   // same-model retry may be spent) but also a role-fallback trigger like
@@ -268,6 +271,8 @@ export function classifyObservedFailure(observation) {
     // classify PERMISSION_DENIED. Genuine permission_denied evidence above
     // is untouched — only this text-fallback branch is skipped.
     const isAutoRejectStderr = autoRejectStderrPattern.test(stderrText);
+    const invalidModelPattern = /invalid model selection/i;
+    if (invalidModelPattern.test(stderrText)) return textFallbackFailure("INVOCATION_MISMATCH", "adapter", false, evidence, "invalid_model", stderrText);
     if (!isAutoRejectStderr && permissionPattern.test(stderrText)) return textFallbackFailure("PERMISSION_DENIED", "adapter", false, evidence, "permission", stderrText);
     if (pathPattern.test(stderrText)) return textFallbackFailure("PATH_UNSUPPORTED", "infrastructure", false, evidence, "path", stderrText);
     if (serverPattern.test(stderrText)) return textFallbackFailure("SERVER_UNAVAILABLE", "infrastructure", true, evidence, "server", stderrText);
@@ -376,7 +381,7 @@ export function verdictFailure(roleName, verdict) {
 // deliberately absent here — so a warning-only observation set on a clean
 // exit classifies to null below and the relay mapping falls through to the
 // missing-sentinel STRUCTURED_OUTPUT_MISSING path.
-const TRUSTED_FAILURE_EVENT_TYPES = new Set(["rate_limited", "auth_required", "agent_not_found", "provider_error", "permission_denied", "path_unsupported", "server_unavailable"]);
+const TRUSTED_FAILURE_EVENT_TYPES = new Set(["rate_limited", "auth_required", "agent_not_found", "invalid_model", "provider_error", "permission_denied", "path_unsupported", "server_unavailable"]);
 // Reviewer FAIL verdicts live in the failure class (their findings are plain
 // strings, not typed events), so they are exempt from the evidence check.
 const VERDICT_FAILURE_CLASSES = new Set(["IMPLEMENTATION_REJECTED", "VERIFICATION_REJECTED", "PLANNING_REJECTED"]);
@@ -690,8 +695,9 @@ export function recordFailureBudget(state, policy, observedFailure, scope) {
   // counter is never incremented, so the key stays unset and every such
   // failure reports allowed:false. AUTH_REQUIRED is the same shape — logging
   // in again is an operator action, not a retry — so it must not burn the
-  // adapter budget either.
-  if (observedFailure?.class === "RATE_LIMITED" || observedFailure?.class === "AUTH_REQUIRED") return {allowed: false, budget: name, used: 0, limit, scope};
+  // adapter budget either. INVOCATION_MISMATCH (invalid model/effort pair or
+  // unknown agent) is non-retryable and must not consume the retry budget.
+  if (observedFailure?.class === "RATE_LIMITED" || observedFailure?.class === "AUTH_REQUIRED" || observedFailure?.class === "INVOCATION_MISMATCH") return {allowed: false, budget: name, used: 0, limit, scope};
   const key = `${name}:${scope}`;
   state.failureBudgets = state.failureBudgets || {};
   state.failureBudgets[key] = (state.failureBudgets[key] || 0) + 1;

@@ -168,20 +168,20 @@ const reportState = {
 const modelWithNotes = buildReportModel({ state: reportState });
 check("buildReportModel carries planPassNotes into the report model",
   Array.isArray(modelWithNotes.planPassNotes)
-  && modelWithNotes.planPassNotes.includes("unapplied minor point 1")
-  && modelWithNotes.planPassNotes.includes("unapplied minor point 2"),
+  && modelWithNotes.planPassNotes.some((e) => (e.text || e) === "unapplied minor point 1")
+  && modelWithNotes.planPassNotes.some((e) => (e.text || e) === "unapplied minor point 2"),
   modelWithNotes.planPassNotes);
 
 const renderedNotesSection = renderPlanPassNotes(modelWithNotes);
 check("renderPlanPassNotes renders heading and numbered list",
-  renderedNotesSection.startsWith("=== Plan-review notes not applied ===\n")
+  renderedNotesSection.startsWith("=== Plan-review notes ===\n")
   && renderedNotesSection.includes("1. unapplied minor point 1")
   && renderedNotesSection.includes("2. unapplied minor point 2"),
   renderedNotesSection);
 
 const fullReport = renderReport(modelWithNotes);
-check("renderReport includes '=== Plan-review notes not applied ===' section",
-  fullReport.includes("=== Plan-review notes not applied ===")
+check("renderReport includes '=== Plan-review notes ===' section",
+  fullReport.includes("=== Plan-review notes ===")
   && fullReport.includes("1. unapplied minor point 1")
   && fullReport.includes("2. unapplied minor point 2"));
 
@@ -191,8 +191,8 @@ check("renderPlanPassNotes returns empty string when model has no notes",
   renderPlanPassNotes(emptyReportModel) === "");
 
 const emptyFullReport = renderReport(emptyReportModel);
-check("renderReport omits 'Plan-review notes not applied' heading when no notes",
-  !emptyFullReport.includes("Plan-review notes not applied"));
+check("renderReport omits 'Plan-review notes' heading when no notes",
+  !emptyFullReport.includes("Plan-review notes"));
 
 // ---------------------------------------------------------------------------
 // 5. Wiring assertions in autopilot.mjs

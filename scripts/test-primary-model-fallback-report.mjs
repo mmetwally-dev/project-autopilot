@@ -47,11 +47,11 @@ function fakeOpenCodeSource() {
     "ROLE=$(printf '%s\\n' \"$PROMPT\" | sed -n '1s/^ROLE=//p')",
     'if [ "$ROLE" = "implementer" ]; then',
     '  case " $* " in',
-    `    *" --model ${PRIMARY} "*)`,
+    `    *" --model ${PRIMARY} "*|*" --model opencode/${PRIMARY} "*)`,
     `      printf '%s\\n' 'ProviderModelNotFoundError: Model not found: opencode/${PRIMARY}' >&2`,
     "      exit 1",
     "      ;;",
-    `    *" --model ${FALLBACK} "*)`,
+    `    *" --model ${FALLBACK} "*|*" --model opencode/${FALLBACK} "*)`,
     "      mkdir -p output",
     "      printf 'fallback implementation\\n' > output/fallback-implementation.txt",
     "      printf 'implementer ok\\n'",
@@ -114,18 +114,18 @@ try {
     impl.length === 2, impl.map((r) => ({ status: r.status, failure: r.failure?.class, model: r.model })));
   if (impl.length >= 2) {
     check("harness: first run failed on the primary model",
-      impl[0].model === PRIMARY && impl[0].status !== "completed", { model: impl[0].model, status: impl[0].status });
+      impl[0].model === `opencode/${PRIMARY}` && impl[0].status !== "completed", { model: impl[0].model, status: impl[0].status });
     check("harness: first run recorded the CLI's model-not-found diagnostic",
       impl[0].modelNotFound === true, { modelNotFound: impl[0].modelNotFound, failure: impl[0].failure });
     check("harness: first run recorded the fallback it moved to",
-      impl[0].primaryModelMissing?.fallback?.model === FALLBACK, impl[0].primaryModelMissing);
+      impl[0].primaryModelMissing?.fallback?.model === `opencode/${FALLBACK}`, impl[0].primaryModelMissing);
     check("harness: second run completed on the fallback model",
-      impl[1].status === "completed" && impl[1].model === FALLBACK, { status: impl[1].status, model: impl[1].model });
+      impl[1].status === "completed" && impl[1].model === `opencode/${FALLBACK}`, { status: impl[1].status, model: impl[1].model });
   }
 
   const record = state.primaryModelFallbacks?.implementer;
   check("state: the mission records the primary/fallback pair",
-    record?.primary?.model === PRIMARY && record?.fallback?.model === FALLBACK, record);
+    record?.primary?.model === `opencode/${PRIMARY}` && record?.fallback?.model === `opencode/${FALLBACK}`, record);
 
   check("console: the switch prints the loud line", /primary model not found → using opencode\/fallback-model/.test(output),
     output.slice(-2500));

@@ -167,6 +167,7 @@ export const DEFAULTS = {
     gate_commands: [],
     gate_network: false,
     gate_env_allowlist: [],
+    offline_test_tools: "",
     // Backlog #4 Part A: failing files setup excluded from mission gates,
     // with the reason and the exact command to run them by hand.
     not_run_in_missions: [],
@@ -390,6 +391,7 @@ const FAILURE_BUDGET_MAP = [
 const GATES_MAP = [
   ["gate_commands", "commands"],
   ["gate_env_allowlist", "env_allowlist"],
+  ["offline_test_tools", "offline_test_tools"],
   ["not_run_in_missions", "not_run_in_missions"],
   ["not_run_in_missions_original_command", "not_run_in_missions_original_command"],
   ["require_reviewer", "require_reviewer"],

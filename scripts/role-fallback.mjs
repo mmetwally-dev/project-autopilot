@@ -62,7 +62,7 @@ function sameModelEntry(a, b) {
 // (`opencode/beam-free`), so `${adapter}/${model}` must never be applied
 // blindly — that produced `opencode/opencode/beam-free` in exhausted-model
 // keys and config-change comparisons. One canonical spelling everywhere.
-function canonicalModelId(entry) {
+export function canonicalModelId(entry) {
   if (!isRecord(entry)) return null;
   const adapter = entry.adapter ?? "";
   const model = entry.model ?? "";
@@ -70,7 +70,7 @@ function canonicalModelId(entry) {
   return model.startsWith(`${adapter}/`) ? model : `${adapter}/${model}`;
 }
 
-function describeModel(entry) {
+export function describeModel(entry) {
   return canonicalModelId(entry) ?? "unconfigured";
 }
 
@@ -299,15 +299,27 @@ export function resetRoleFallbacks() {
 // a changed primary (operator edited the config) or an entry older than the
 // retry window ends it so the primary is tried again.
 export const FALLBACK_RETRY_PRIMARY_MINUTES = 60;
+export const FREE_QUOTA_REASON = "free_quota_exhausted"; // same value as idle-hang-watchdog.mjs FREE_QUOTA_REASON; kept local because this module must stay import-free
 
 const primaryId = (roleConfig) => canonicalModelId(roleConfig);
 
+function nextLocal0300(sinceMs) {
+  const d = new Date(sinceMs);
+  const reset = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 3, 0, 0, 0);
+  if (d.getTime() >= reset.getTime()) {
+    reset.setDate(reset.getDate() + 1);
+  }
+  return reset.getTime();
+}
+
 // Stamp a fresh sticky entry (the chosen fallback) with its provenance.
-export function stampStickyFallback(next, roleConfig, nowIso) {
+export function stampStickyFallback(next, roleConfig, nowIso, reasonOrOpts = null) {
   const out = copyModelEntry(next);
   if (!out) return out;
   if (isRecord(roleConfig)) out.derivedFrom = {adapter: roleConfig.adapter, model: roleConfig.model};
   out.since = nowIso;
+  const reason = typeof reasonOrOpts === "string" ? reasonOrOpts : reasonOrOpts?.reason;
+  if (reason) out.reason = reason;
   return out;
 }
 
@@ -322,6 +334,20 @@ export function staleStickyFallback({role, roleConfig, activeModel, policy, nowM
     const was = canonicalModelId(df);
     const now = primaryId(roleConfig);
     if (now && was !== now) return {why: "config", message: `fallback cleared: ${role} config primary changed (${was} → ${now})`};
+    const activeId = canonicalModelId(activeModel);
+    if (activeId) {
+      const primary = primaryId(roleConfig);
+      const fallbacks = Array.isArray(roleConfig?.fallbacks) ? roleConfig.fallbacks : [];
+      const inFallbacks = fallbacks.some((entry) => canonicalModelId(entry) === activeId);
+      const escalation = roleConfig?.escalation ?? roleConfig?.escalation_model ?? null;
+      const isEscalation = Boolean(escalation && canonicalModelId(escalation) === activeId);
+      if (activeId !== primary && !inFallbacks && !isEscalation) {
+        return {
+          why: "config",
+          message: `fallback cleared: ${role} active fallback ${describeModel(activeModel)} is no longer in the config's fallbacks; retrying primary ${describeModel(roleConfig)}`,
+        };
+      }
+    }
   } else {
     // Backlog #42: pre-#17 sticky entries recorded no `derivedFrom`, so a
     // primary change could never be proven. Clear one when the config file
@@ -335,10 +361,15 @@ export function staleStickyFallback({role, roleConfig, activeModel, policy, nowM
   const mins = Number(policy?.fallback_retry_primary_minutes);
   const windowMin = Number.isFinite(mins) && mins > 0 ? mins : FALLBACK_RETRY_PRIMARY_MINUTES;
   const since = Date.parse(activeModel.since);
-  if (Number.isFinite(since) && nowMs - since >= windowMin * 60000) {
-    // Backlog #5: opencode model ids already carry their `opencode/`
-    // provider prefix, so `${adapter}/${model}` would print it twice.
-    return {why: "age", message: `fallback cleared: ${role} retrying primary ${describeModel(roleConfig)} (fallback active ${windowMin}+ min)`};
+  if (Number.isFinite(since)) {
+    if (activeModel.reason === FREE_QUOTA_REASON && nowMs < nextLocal0300(since)) {
+      return null;
+    }
+    if (nowMs - since >= windowMin * 60000) {
+      // Backlog #5: opencode model ids already carry their `opencode/`
+      // provider prefix, so `${adapter}/${model}` would print it twice.
+      return {why: "age", message: `fallback cleared: ${role} retrying primary ${describeModel(roleConfig)} (fallback active ${windowMin}+ min)`};
+    }
   }
   return null;
 }

@@ -15,6 +15,7 @@ import { pathToFileURL } from "node:url";
 import { DEFAULTS, migrateTimeLimitNames, migratePlanApprovalKey } from "./config-layout.mjs";
 import { schemaReferenceFor, schemaReferenceResolves } from "./config-schema-ref.mjs";
 import { loadAndMigrateConfig, CURRENT_SCHEMA } from "./config-migration.mjs";
+import { normalizeAgyModelEffort } from "./agy-model-effort.mjs";
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -106,6 +107,38 @@ export function fillLayout(layout, configPath) {
     if (key === "runtime") continue;
     if (own(source, key)) continue;
     out[key] = clone(value);
+  }
+
+  if (out.roles && typeof out.roles === "object") {
+    for (const rObj of Object.values(out.roles)) {
+      if (rObj && typeof rObj === "object") {
+        if (rObj.adapter === "antigravity" || rObj.cli === "antigravity") {
+          const res = normalizeAgyModelEffort(rObj.model, rObj.reasoning || rObj.effort);
+          if (res.changed) {
+            console.log(`[agy] model ${res.conflict.model} conflicts with effort ${res.conflict.effort}; using ${res.model}`);
+            rObj.model = res.model;
+          }
+        }
+        if (Array.isArray(rObj.fallbacks)) {
+          for (const fb of rObj.fallbacks) {
+            if (fb && (fb.adapter === "antigravity" || fb.cli === "antigravity")) {
+              const res = normalizeAgyModelEffort(fb.model, fb.reasoning || fb.effort);
+              if (res.changed) {
+                console.log(`[agy] model ${res.conflict.model} conflicts with effort ${res.conflict.effort}; using ${res.model}`);
+                fb.model = res.model;
+              }
+            }
+          }
+        }
+        if (rObj.escalation_model && (rObj.escalation_model.adapter === "antigravity" || rObj.escalation_model.cli === "antigravity")) {
+          const res = normalizeAgyModelEffort(rObj.escalation_model.model, rObj.escalation_model.reasoning || rObj.escalation_model.effort);
+          if (res.changed) {
+            console.log(`[agy] model ${res.conflict.model} conflicts with effort ${res.conflict.effort}; using ${res.model}`);
+            rObj.escalation_model.model = res.model;
+          }
+        }
+      }
+    }
   }
 
   if (configPath) return withSchemaReference(out, configPath);

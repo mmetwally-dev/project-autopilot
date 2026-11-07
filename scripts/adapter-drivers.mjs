@@ -4,7 +4,7 @@ import {spawnAgentSync, resolveAgentBinary, resolveCodexNativeBinary} from "./ag
 import {equivalentEventPath, eventReferencesPath} from "./event-paths.mjs";
 // agy stream-json event helpers (decode/observe/accumulate) plus the per-run
 // permissions allow-rule writer. Imported for driver dispatch.
-import {decodeAgyEvents, observeAgyEvents, accumulateAgyUsage, agyRunModelPatch, writeAgyAllowRule, AGY_SETTINGS_RELATIVE_PATH} from "./agy-events.mjs";
+import {decodeAgyEvents, observeAgyEvents, accumulateAgyUsage, agyRunModelPatch, writeAgyAllowRule, AGY_SETTINGS_RELATIVE_PATH, agyModelEffortConflict} from "./agy-events.mjs";
 import {resolveRunModel} from "./model-extract.mjs";
 import {updateRunModel} from "./run-observability.mjs";
 import {FREE_QUOTA_REASON, PROVIDER_BALANCE_REASON, OPENCODE_TITLE_MODEL_LINE_RE} from "./idle-hang-watchdog.mjs";
@@ -174,7 +174,7 @@ const SENTINEL_TOKEN = "AUTOPILOT_REVIEW";
 // (file_read_*, write_*, outside_write_*, git_mutation_*, command_*,
 // timeout_child_command_started, permission_denied).
 function observeOpenCodeEvents(events, probe = {}) {
-  const observations = [...detectOpenCodeRateLimited(events), ...detectOpenCodeProviderError(events), ...detectOpenCodeAgentNotFound(events)];
+  const observations = [...detectOpenCodeRateLimited(events), ...detectOpenCodeProviderError(events), ...detectOpenCodeAgentNotFound(events), ...detectOpenCodeInvalidModel(events)];
   const emit = (type, event, details = {}) => observations.push({type, source: "cli_event", ...details, event});
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
@@ -389,6 +389,30 @@ function detectOpenCodeAgentNotFound(events) {
   return observations;
 }
 
+const OPENCODE_INVALID_MODEL_MESSAGE = /invalid model reference/i;
+function detectOpenCodeInvalidModel(events) {
+  const observations = [];
+  for (const event of events) {
+    if (!event || typeof event !== "object") continue;
+    if (event.type === "error") {
+      const err = event.error && typeof event.error === "object" ? event.error : {};
+      const data = err.data && typeof err.data === "object" ? err.data : {};
+      const message = String(data.message ?? err.message ?? event.message ?? "");
+      if (OPENCODE_INVALID_MODEL_MESSAGE.test(message)) {
+        observations.push(observation("invalid_model", event, {message}));
+      }
+      continue;
+    }
+    if (event.type === "stderr") {
+      const text = String(event.text ?? "");
+      if (openCodeEngineErrorLine(text) && OPENCODE_INVALID_MODEL_MESSAGE.test(text)) {
+        observations.push(observation("invalid_model", event, {message: text}));
+      }
+    }
+  }
+  return observations;
+}
+
 // Whether a later event is a successful tool call, derived from the CLI's own
 // status plus, where a shell exit was recorded, that exit code — the same
 // derivation the observer's own `failed` uses. Only successful calls suppress a
@@ -536,7 +560,10 @@ function agyInvocation(request) {
   // --conversation resume continues the role session in-process.
   const args = ["--mode", ["write", "scratch"].includes(request.mode) ? "accept-edits" : "plan", "--input-format", "stream-json", "--output-format", "stream-json", "-p", "", "--conversation", "resume", "--print-timeout", "45m0s"];
   
-  if (request.model) args.push("--model", request.model);
+  let model = request.model;
+  const conflict = agyModelEffortConflict(model, request.reasoning);
+  if (conflict) model = conflict.suggested;
+  if (model) args.push("--model", model);
   if (request.reasoning) args.push("--effort", request.reasoning);
   if (request.scratchDir) args.push("--add-dir", request.scratchDir);
   // Per-run permissions, never --dangerously-skip-permissions. agy applies
@@ -914,8 +941,47 @@ function decodeJsonLines(stdout, stderr) {
   return events;
 }
 
+const CODEX_RATE_LIMIT_PATTERN = /usage limit|rate limit|too many requests|quota/i;
+
+function parseCodexRetryAt(text, probe = {}) {
+  const match = String(text || "").match(/try again at\s+(\d{1,2}):(\d{2})\s*(AM|PM)\b/i);
+  if (!match) return null;
+  let hours = parseInt(match[1], 10);
+  const minutes = parseInt(match[2], 10);
+  const meridiem = match[3].toUpperCase();
+  if (meridiem === "PM" && hours < 12) hours += 12;
+  else if (meridiem === "AM" && hours === 12) hours = 0;
+  const now = probe?.now ? new Date(probe.now) : (probe?.nowMs ? new Date(probe.nowMs) : new Date());
+  const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes, 0, 0);
+  if (target.getTime() <= now.getTime()) {
+    target.setDate(target.getDate() + 1);
+  }
+  return target.toISOString();
+}
+
+function detectCodexRateLimited(events, probe = {}) {
+  for (const event of events) {
+    if (!event || typeof event !== "object") continue;
+    let text = null;
+    if (event.type === "error" && typeof event.message === "string") {
+      text = event.message;
+    } else if (event.type === "turn.failed") {
+      text = typeof event.error?.message === "string" ? event.error.message : (typeof event.message === "string" ? event.message : null);
+    }
+    if (text && CODEX_RATE_LIMIT_PATTERN.test(text)) {
+      const retryAt = parseCodexRetryAt(text, probe);
+      return [observation("rate_limited", event, {
+        reason: "codex_usage_limit",
+        message: text.slice(0, 200),
+        retryAt,
+      })];
+    }
+  }
+  return [];
+}
+
 function observeCodexEvents(events, probe = {}) {
-  const observations = [];
+  const observations = [...detectCodexRateLimited(events, probe)];
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
     const item = event?.item || event;

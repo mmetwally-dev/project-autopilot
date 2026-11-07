@@ -222,3 +222,34 @@ export function formatGateFailureEscalation({failures, phaseName, mission} = {})
     "To resume after fixing or skipping them: ap run",
   ].join("\n");
 }
+
+const NETWORK_FAILURE_PATTERNS = [
+  "EAI_AGAIN",
+  "ENOTFOUND",
+  "ECONNREFUSED",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "ETIMEDOUT",
+  "getaddrinfo",
+];
+
+const NETWORK_FAILURE_REGEX = new RegExp(
+  `\\b(${NETWORK_FAILURE_PATTERNS.join("|")})\\b`,
+  "g"
+);
+
+export function networkGateFailureSignals(text) {
+  if (typeof text !== "string" || !text) return [];
+  const matches = text.match(NETWORK_FAILURE_REGEX);
+  if (!matches) return [];
+  const seen = new Set();
+  const out = [];
+  for (const m of matches) {
+    if (!seen.has(m)) {
+      seen.add(m);
+      out.push(m);
+    }
+  }
+  return out;
+}
+

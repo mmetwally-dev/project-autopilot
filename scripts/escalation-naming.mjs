@@ -22,6 +22,21 @@
 //    which makes `used >= limit` a satisfied `0 >= 0`. Count-first would render
 //    that as "null_exhausted" / "null exhausted (0/0)" and leave this branch
 //    unreachable.
+function formatLocalTime(isoString) {
+  try {
+    const ms = Date.parse(isoString);
+    if (!Number.isFinite(ms)) return String(isoString);
+    const d = new globalThis.Date(ms);
+    let hours = d.getHours();
+    const minutes = String(d.getMinutes()).padStart(2, "0");
+    const ampm = hours >= 12 ? "PM" : "AM";
+    hours = hours % 12 || 12;
+    return `${hours}:${minutes} ${ampm}`;
+  } catch {
+    return String(isoString);
+  }
+}
+
 export function decideEscalationName({failureClass, retryable, used, limit, budget, evidence} = {}) {
   // Required, because the non-retryable branch names it in the detail.
   if (typeof failureClass !== "string" || failureClass === "") {
@@ -37,6 +52,7 @@ export function decideEscalationName({failureClass, retryable, used, limit, budg
       let provider = null;
       let model = null;
       let balanceExhausted = false;
+      let retryAt = null;
       if (Array.isArray(evidence)) {
         for (const entry of evidence) {
           if (!entry || typeof entry !== "object") continue;
@@ -46,6 +62,7 @@ export function decideEscalationName({failureClass, retryable, used, limit, budg
           // import-free; the value is PROVIDER_BALANCE_REASON in
           // idle-hang-watchdog.mjs.
           if (entry.reason === "provider_balance_exhausted") balanceExhausted = true;
+          if (retryAt == null && typeof entry.retryAt === "string" && entry.retryAt !== "") retryAt = entry.retryAt;
         }
       }
       const where = [provider, model].filter(Boolean).join("/");
@@ -59,9 +76,12 @@ export function decideEscalationName({failureClass, retryable, used, limit, budg
           detail: `RATE_LIMITED is not retryable${named} — the provider's paid balance is exhausted; top up the ${providerName} balance, or switch the role to another model (\`ap config\`), then \`ap run\``,
         };
       }
+      const resume = retryAt
+        ? `resume after ${formatLocalTime(retryAt)}`
+        : "resume with `ap run` after the limit lifts";
       const detail = where !== ""
-        ? `RATE_LIMITED is not retryable (${where}); resume with \`ap run\` after the limit lifts`
-        : "RATE_LIMITED is not retryable; resume with `ap run` after the limit lifts";
+        ? `RATE_LIMITED is not retryable (${where}); ${resume}`
+        : `RATE_LIMITED is not retryable; ${resume}`;
       return {step: "rate_limited_escalation", detail};
     }
     // The CLI's own credentials are unusable. Same-adapter retry (and any

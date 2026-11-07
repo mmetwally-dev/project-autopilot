@@ -283,8 +283,8 @@ check("no-progress: escalates with its own step and records the continuation",
   && /function stopOnNoProgress[\s\S]*?recordLastContinuation\(s,\{contScope,taskId,missionName,taskRef\}\)/.test(src));
 check("no-progress: stop message uses the pure noProgressDisplayLabel helper (068 1.2, never task null)",
   /noProgressDisplayLabel,/.test(src)
-  && /function stopOnNoProgress[\s\S]{0,2000}?noProgressDisplayLabel\(\{taskId,taskRef,framework\}\)/.test(src)
-  && !/function stopOnNoProgress[\s\S]{0,2000}?task \$\{taskId\} changed no file/.test(src));
+  && /function stopOnNoProgress[\s\S]{0,3500}?noProgressDisplayLabel\(\{taskId,taskRef,framework\}\)/.test(src)
+  && !/function stopOnNoProgress[\s\S]{0,3500}?task \$\{taskId\} changed no file/.test(src));
 check("no-progress: `ap reset` of a continuation also clears the counter (idle + queued)",
   /clearNoProgress\(s,contScope\);/.test(src)
   && /if\(s\.noProgressGenerations\) delete s\.noProgressGenerations\[fullKey\];/.test(src));
@@ -920,7 +920,8 @@ check("031 P10.3: plan_reviewer capped x2 (pre/post-retry) + incomplete x1 plann
   check("backlog #62: standalone verifier relayAsync() appends the reminder under verifyRef",
     reminderCall(/const verifyRef=allPhaseTaskRef\(phaseTasks\);/g, 0, /relayAsync\("verifier"/, "mission", "verifyRef"));
   check("backlog #62: speckit code_reviewer review() appends the reminder under reviewRef",
-    reminderCall(/const reviewRef=reviewTaskRef\(s,speckitPhaseFeedbackKey/g, 0, /review\("code_reviewer"/, "missionIdentity", "reviewRef"));
+    // phaseCodeReviewPassNotesText moves this call past the default anchor window; keep the bound tight.
+    reminderCall(/const reviewRef=reviewTaskRef\(s,speckitPhaseFeedbackKey/g, 0, /review\("code_reviewer"/, "missionIdentity", "reviewRef", 1200));
   check("backlog #62: speckit verifier relayAsync() appends the reminder under verifyRef",
     reminderCall(/const verifyRef=allPhaseTaskRef\(phaseTasks\);/g, 1, /relayAsync\("verifier"/, "missionIdentity", "verifyRef"));
   const finalCalls = [...src.matchAll(/let final=await review\("code_reviewer"/g)];

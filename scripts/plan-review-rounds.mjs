@@ -12,6 +12,7 @@ export { dedupeEarlierRounds, EARLIER_ROUNDS_RECHECK_LINE, scopeReviewRounds };
 const STATE_KEY = "planReviewHistory";
 const NOTES_KEY = "planReviewNotes";
 const PASS_NOTES_KEY = "planPassNotes";
+const PASS_NOTE_STATUS_KEY = "planPassNoteStatus";
 const TASK_HASHES_KEY = "planReviewTaskHashes";
 const MAX_CUMULATIVE_CHARS = 16000;
 
@@ -245,15 +246,133 @@ export function recordPlanPassNotes(state, key, notes) {
 }
 
 export function clearPlanPassNotes(state, key) {
-  if (!state?.[PASS_NOTES_KEY] || typeof state[PASS_NOTES_KEY] !== "object") return;
+  if (!state || typeof state !== "object") return;
+  if (!state[PASS_NOTES_KEY] || typeof state[PASS_NOTES_KEY] !== "object") {
+    delete state[PASS_NOTE_STATUS_KEY];
+    return;
+  }
   if (key) delete state[PASS_NOTES_KEY][key]; else delete state[PASS_NOTES_KEY];
-  if (state[PASS_NOTES_KEY] && !Object.keys(state[PASS_NOTES_KEY]).length) delete state[PASS_NOTES_KEY];
+  if (!state[PASS_NOTES_KEY] || !Object.keys(state[PASS_NOTES_KEY]).length) {
+    delete state[PASS_NOTES_KEY];
+    delete state[PASS_NOTE_STATUS_KEY];
+  } else if (!key) {
+    delete state[PASS_NOTE_STATUS_KEY];
+  }
+}
+
+export function planPassNoteEntries(state, keyFilter = null) {
+  const notes = allPlanPassNotes(state);
+  const statusMap = (state && typeof state === "object" && state[PASS_NOTE_STATUS_KEY] && typeof state[PASS_NOTE_STATUS_KEY] === "object")
+    ? state[PASS_NOTE_STATUS_KEY]
+    : {};
+  const filtered = keyFilter ? new Set(allPlanPassNotes(state, keyFilter)) : null;
+  const entries = [];
+  for (let i = 0; i < notes.length; i++) {
+    const text = notes[i];
+    if (filtered && !filtered.has(text)) continue;
+    const n = i + 1;
+    const record = statusMap[n] || statusMap[String(n)];
+    const status = (record?.status === "done" || record?.status === "skipped") ? record.status : "open";
+    const entry = { n, text, status };
+    if (record?.phase !== undefined && record?.phase !== null) entry.phase = record.phase;
+    if (record?.reason) entry.reason = record.reason;
+    entries.push(entry);
+  }
+  return entries;
+}
+
+export function markPlanPassNote(state, n, { status, phase, reason } = {}) {
+  if (!state || typeof state !== "object") return null;
+  const num = Number(n);
+  const notes = allPlanPassNotes(state);
+  if (!Number.isInteger(num) || num < 1 || num > notes.length) return null;
+  if (status !== "done" && status !== "skipped") return null;
+  if (status === "skipped" && (!reason || typeof reason !== "string" || !reason.trim())) return null;
+
+  if (!state[PASS_NOTE_STATUS_KEY] || typeof state[PASS_NOTE_STATUS_KEY] !== "object") {
+    state[PASS_NOTE_STATUS_KEY] = {};
+  }
+  const entry = { status };
+  if (phase !== undefined && phase !== null) entry.phase = phase;
+  if (status === "skipped" && reason) entry.reason = reason.trim();
+  state[PASS_NOTE_STATUS_KEY][num] = entry;
+  return entry;
+}
+
+export function parsePlanPassNoteMarks(text) {
+  if (typeof text !== "string" || !text) return [];
+  const lines = text.split(/\r?\n/);
+  const marks = [];
+  const appliedRe = /^\s*`?\s*PASS-NOTE\s+(\d+)\s*:\s*applied\s*`?\s*$/i;
+  const skippedRe = /^\s*`?\s*PASS-NOTE\s+(\d+)\s*:\s*skipped\s*(?:[\u2014\u2013\-:])\s*(.+?)\s*`?\s*$/i;
+  for (const line of lines) {
+    const appliedMatch = line.match(appliedRe);
+    if (appliedMatch) {
+      marks.push({ n: parseInt(appliedMatch[1], 10), status: "done" });
+      continue;
+    }
+    const skippedMatch = line.match(skippedRe);
+    if (skippedMatch) {
+      const reason = skippedMatch[2].trim();
+      if (reason) {
+        marks.push({ n: parseInt(skippedMatch[1], 10), status: "skipped", reason });
+      }
+    }
+  }
+  return marks;
+}
+
+export function applyPlanPassNoteMarks(state, result, { phase, allowSkip = true } = {}) {
+  const rawNotes = result?.review?.notes;
+  const notes = Array.isArray(rawNotes) ? rawNotes : (rawNotes ? [rawNotes] : []);
+  const text = [result?.finalMessage, result?.output, ...notes].filter(Boolean).join("\n");
+  let applied = 0;
+  for (const mark of parsePlanPassNoteMarks(text)) {
+    if (mark.status === "done") {
+      if (markPlanPassNote(state, mark.n, { status: "done", phase })) applied += 1;
+    } else if (mark.status === "skipped" && mark.reason && allowSkip) {
+      if (markPlanPassNote(state, mark.n, { status: "skipped", reason: mark.reason })) applied += 1;
+    }
+  }
+  return applied;
 }
 
 export function planPassNotesText(state, keyFilter = null) {
-  const notes = allPlanPassNotes(state, keyFilter);
-  if (!notes.length) return "";
-  return `Plan-review notes (optional — consider them only when they touch your task):\n${notes.map((note, i) => `${i + 1}. ${note}`).join("\n")}`;
+  const openEntries = planPassNoteEntries(state, keyFilter).filter((e) => e.status === "open");
+  if (!openEntries.length) return "";
+  return `Plan-review notes (optional — consider them only when they touch your task):\n${openEntries.map((e) => `${e.n}. ${e.text}`).join("\n")}\nIf your change applies a note, the code reviewer will record it.`;
+}
+
+export function phaseCodeReviewPassNotesText(state) {
+  const openNotes = planPassNoteEntries(state).filter((e) => e.status === "open");
+  if (!openNotes.length) return "";
+  return `Plan-review notes:\n${openNotes.map((e) => `${e.n}. ${e.text}`).join("\n")}\n\nFor each note the phase delta applies, add a line \`PASS-NOTE <n>: applied\` to your review text.`;
+}
+
+export function finalReviewPassNotesText(state) {
+  const openNotes = planPassNoteEntries(state).filter((e) => e.status === "open");
+  if (!openNotes.length) return "";
+  return `Plan-review notes:\n${openNotes.map((e) => `${e.n}. ${e.text}`).join("\n")}\n\nDecide every open note: \`PASS-NOTE <n>: applied\` if the code already does it, else \`PASS-NOTE <n>: skipped — <reason>\`.`;
+}
+
+export function formatPlanPassNotesLines(entries) {
+  const open = [];
+  const done = [];
+  const skipped = [];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    const norm = typeof e === "string" ? { n: i + 1, text: e, status: "open" } : e;
+    if (norm.status === "done") {
+      const p = norm.phase != null ? `, Phase ${norm.phase}` : "";
+      done.push(`✓ ${norm.n}. ${norm.text} (done${p})`);
+    } else if (norm.status === "skipped") {
+      const r = norm.reason ? ` — ${norm.reason}` : "";
+      skipped.push(`– ${norm.n}. ${norm.text} (skipped${r})`);
+    } else {
+      open.push(`${norm.n}. ${norm.text}`);
+    }
+  }
+  return [...open, ...done, ...skipped];
 }
 
 // Pass notes for the first implementer brief of a phase.

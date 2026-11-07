@@ -27,6 +27,26 @@ import {
 } from "./config-validation.mjs";
 import {toNewLayoutConfig, ROLE_NAMES} from "./config-layout.mjs";
 import {schemaReferenceFor} from "./config-schema-ref.mjs";
+import { detectOfflineTestTools } from "./detect-offline-test-tools.mjs";
+export { detectOfflineTestTools };
+import { agyModelEffortConflict, normalizeAgyModelEffort } from "./agy-model-effort.mjs";
+
+export function normalizeAgyRole(role, catalog = null) {
+  if (!role || (role.adapter !== "antigravity" && role.cli !== "antigravity")) {
+    return { role, changed: false, conflict: null };
+  }
+  const effort = role.reasoning || role.effort || "";
+  const normalized = normalizeAgyModelEffort(role.model, effort, catalog);
+  if (normalized.changed) {
+    console.log(`[agy] model ${normalized.conflict.model} conflicts with effort ${normalized.conflict.effort}; using ${normalized.model}`);
+    return {
+      role: { ...role, model: normalized.model },
+      changed: true,
+      conflict: normalized.conflict
+    };
+  }
+  return { role, changed: false, conflict: normalized.conflict };
+}
 import {
   detectRuntimeModeCapabilities,
   RUNTIME_MODE_IDS
@@ -158,16 +178,17 @@ const probe = id => {
   }).status === 0;
 };
 
+const isMainModule = Boolean(process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]));
 const forceInteractive = process.env.AUTOPILOT_SETUP_FORCE_INTERACTIVE === "1";
 let inputLines = [];
 let inputIndex = 0;
 
-if (forceInteractive) {
+if (isMainModule && forceInteractive) {
   const stdinContent = fs.readFileSync(0, "utf8");
   inputLines = stdinContent.split("\n");
 }
 
-const rl = forceInteractive ? null : readline.createInterface({
+const rl = (!isMainModule || forceInteractive) ? null : readline.createInterface({
   input: process.stdin,
   output: process.stdout
 });
@@ -871,7 +892,7 @@ async function roleConfig(  label,
     ? (prior.resume !== false)
     : false;
 
-  return {
+  let finalRole = {
     adapter,
     model: modelInfo.model,
     reasoning,
@@ -886,6 +907,13 @@ async function roleConfig(  label,
     capabilities_verified_at:
       new Date().toISOString()
   };
+
+  if (adapter === "antigravity") {
+    const catalog = (contractCache instanceof Map ? contractCache.get("antigravity") : contractCache)?.models?.items || null;
+    finalRole = normalizeAgyRole(finalRole, catalog).role;
+  }
+
+  return finalRole;
 }
 
 // Live variants/reasoning levels a catalog item supports, or null when the
@@ -1244,6 +1272,7 @@ async function printStartScreen(detectedFrameworks) {
 
 
 
+if (isMainModule) {
 (async () => {
   try {
     const current = existing;
@@ -1578,12 +1607,16 @@ async function printStartScreen(detectedFrameworks) {
                 { reasoning: roles[r]?.reasoning || "", variant: "" },
                 fallbackAdapter
               );
-              const candidate = {
+              let candidate = {
                 adapter: fallbackAdapter,
                 model: fallbackModelInfo.model || "",
                 reasoning: fallbackExtras.reasoning,
                 variant: fallbackExtras.variant
               };
+              if (fallbackAdapter === "antigravity") {
+                const catalog = (contractCache instanceof Map ? contractCache.get("antigravity") : contractCache)?.models?.items || null;
+                candidate = normalizeAgyRole(candidate, catalog).role;
+              }
               if (!probe(fallbackAdapter)) {
                 console.log(
                   `\nWarning: fallback CLI ${fallbackAdapter} probe failed; saving anyway.`
@@ -1702,12 +1735,16 @@ async function printStartScreen(detectedFrameworks) {
             { reasoning: roles[r]?.reasoning || "", variant: "" },
             fallbackAdapter
           );
-          const candidate = {
+          let candidate = {
             adapter: fallbackAdapter,
             model: fallbackModelInfo.model || "",
             reasoning: fallbackExtras.reasoning,
             variant: fallbackExtras.variant
           };
+          if (fallbackAdapter === "antigravity") {
+            const catalog = (contractCache instanceof Map ? contractCache.get("antigravity") : contractCache)?.models?.items || null;
+            candidate = normalizeAgyRole(candidate, catalog).role;
+          }
 
           // Warn-never-block per-pick checks: CLI probe plus model
           // membership against the cached/live contract catalog.
@@ -1826,12 +1863,16 @@ async function printStartScreen(detectedFrameworks) {
             { reasoning: roles[escRoles[0]]?.reasoning || "", variant: "" },
             escAdapter
           );
-          const candidate = normalizeEscalationModel({
+          let candidate = normalizeEscalationModel({
             adapter: escAdapter,
             model: escModelInfo.model || "",
             reasoning: escExtras.reasoning,
             variant: escExtras.variant
           });
+          if (candidate && candidate.adapter === "antigravity") {
+            const catalog = (contractCache instanceof Map ? contractCache.get("antigravity") : contractCache)?.models?.items || null;
+            candidate = normalizeAgyRole(candidate, catalog).role;
+          }
           if (candidate) {
             for (const r of escRoles) roles[r] = { ...roles[r], escalation_model: { ...candidate } };
             console.log(`  escalation model (${whoTag}): ${formatFallbackEntry(candidate)}`);
@@ -2085,6 +2126,18 @@ async function printStartScreen(detectedFrameworks) {
           true
         );
 
+    let offlineTestTools =
+      typeof current?.gates?.offline_test_tools === "string" && current.gates.offline_test_tools.trim()
+        ? current.gates.offline_test_tools.trim()
+        : "";
+    if (networkIsolation && !offlineTestTools) {
+      const detectedTools = detectOfflineTestTools(repo);
+      if (detectedTools) {
+        offlineTestTools = detectedTools;
+        console.log(`✓ Offline test tools found: ${detectedTools} (Change later: tests.offline_test_tools)`);
+      }
+    }
+
     // E2E question: same shared helper/prompt for first run and `ap config` (asked only when unset).
     const e2eChoice = await askE2eChoice(current, repo, interactive);
     const e2ePending = storedE2e(current) == null && (e2eChoice === "playwright" || e2eChoice === "cypress");
@@ -2250,6 +2303,7 @@ async function printStartScreen(detectedFrameworks) {
 
         ...(current?.gates ||
           {}),
+        ...(offlineTestTools ? {offline_test_tools: offlineTestTools} : {}),
 
         // Last key on purpose: the resolved value must win over whatever
         // gates.commands the config already held (an existing [] used to
@@ -2497,6 +2551,18 @@ async function printStartScreen(detectedFrameworks) {
 
     config.roles = roles;
 
+    for (const [rName, rObj] of Object.entries(config.roles || {})) {
+      if (rObj?.adapter === "antigravity") {
+        config.roles[rName] = normalizeAgyRole(rObj, contractCache instanceof Map ? contractCache.get("antigravity")?.models?.items : null).role;
+      }
+      if (Array.isArray(rObj?.fallbacks)) {
+        config.roles[rName].fallbacks = rObj.fallbacks.map(fb => fb?.adapter === "antigravity" ? normalizeAgyRole(fb, contractCache instanceof Map ? contractCache.get("antigravity")?.models?.items : null).role : fb);
+      }
+      if (rObj?.escalation_model?.adapter === "antigravity") {
+        config.roles[rName].escalation_model = normalizeAgyRole(rObj.escalation_model, contractCache instanceof Map ? contractCache.get("antigravity")?.models?.items : null).role;
+      }
+    }
+
     // config_metadata is machine-written; it belongs in config.meta.json, not the user's config.json.
     delete config.config_metadata;
 
@@ -2605,3 +2671,4 @@ async function printStartScreen(detectedFrameworks) {
 
   process.exit(2);
 });
+}

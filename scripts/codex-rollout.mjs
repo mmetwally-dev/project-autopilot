@@ -3,6 +3,36 @@ import os from "node:os";
 import path from "node:path";
 import { priceWeightedUsage } from "./adapter-drivers.mjs";
 
+export function resolveCodexHomes({ launchEnv, effectiveScratchDir, dir, defaultCodexHome } = {}) {
+  const homes = [];
+  const add = (h) => {
+    if (typeof h === "string" && h.trim()) {
+      const trimmed = h.trim();
+      if (!homes.includes(trimmed)) homes.push(trimmed);
+    }
+  };
+
+  if (launchEnv && typeof launchEnv === "object") {
+    if (launchEnv.CODEX_HOME) add(launchEnv.CODEX_HOME);
+    if (launchEnv.HOME) add(path.join(launchEnv.HOME, ".codex"));
+    if (launchEnv.USERPROFILE) add(path.join(launchEnv.USERPROFILE, ".codex"));
+  }
+  if (effectiveScratchDir) {
+    add(path.join(effectiveScratchDir, ".autopilot-home", ".codex"));
+  }
+  if (dir) {
+    add(path.join(dir, "scratch", ".autopilot-home", ".codex"));
+  }
+  if (defaultCodexHome) {
+    add(defaultCodexHome);
+  }
+  const defaultHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  add(defaultHome);
+  add(path.join(os.homedir(), ".codex"));
+
+  return homes;
+}
+
 export function findCodexRollout({ threadId, codexHome, codexHomes, scratchDir, startedAt } = {}) {
   try {
     if (!threadId || typeof threadId !== "string") return null;

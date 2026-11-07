@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { runGuardedCommand } from "./guarded-command.mjs";
 import { createGateShell } from "./gate-shell.mjs";
+import { withAutopilotExclude } from "./gate-autopilot-exclude.mjs";
 
 export const PROBE_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_COLLECTED_OUTPUT = 2 * 1024 * 1024;
@@ -236,7 +237,7 @@ export async function probeTestCommand({
   const cwd = path.resolve(repo);
   const { shellGuard, env } = createGateShell(cwd, cwd, networkIsolation !== false, envAllowlist);
   if (typeof onStart === "function") onStart(command);
-  const result = await runGuardedCommand(cwd, command, env, shellGuard, {
+  const result = await runGuardedCommand(cwd, withAutopilotExclude(command), env, shellGuard, {
     label: "setup.test-probe",
     capture: true,
     collectOutput: true,

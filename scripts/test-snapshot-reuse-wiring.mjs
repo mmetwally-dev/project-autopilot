@@ -421,7 +421,8 @@ if (process.exitCode) {
   );
 
   // Verdict derivations inside makeRelayResult consume before/after objects.
-  const relayBody = sigIdx !== -1 ? autopilotSource.slice(sigIdx, sigIdx + 4000) : "";
+  const relayEnd = sigIdx !== -1 ? autopilotSource.indexOf("\nfunction ", sigIdx + 1) : -1;
+  const relayBody = sigIdx !== -1 ? autopilotSource.slice(sigIdx, relayEnd !== -1 ? relayEnd : undefined) : "";
   check(
     "verdict-shape: touchedFiles verdict still receives (before,after,cwd)",
     relayBody.includes("touchedFilesBetween(before,after,cwd)")

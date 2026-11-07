@@ -116,7 +116,8 @@ and `ap watch` do not exist; the WATCH-REPORT is the status view.
 - **Smarter retries.** Planner/implementer may have an `escalation_model`, used
   for one fix round after a reviewer reports the same finding not fixed
   `retries.escalate_after_not_fixed` times (default 2). Continuation sessions
-  that change no file stop after `retries.no_progress_sessions` (default 2). A
+  that change no file stop after `retries.no_progress_sessions` (default 2),
+  after one session on the implementer's unused `escalation_model`, if set. A
   session silent for `time_limits.silent_run_minutes` (default 10) is stopped as
   `IDLE_HANG`; an opencode rate-limit storm as `RATE_LIMITED`; both consume
   `infrastructureRetryBudget` like a timeout.

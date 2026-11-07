@@ -127,6 +127,7 @@
     "gate_commands": [],
     "gate_network": false,
     "gate_env_allowlist": [],
+    "offline_test_tools": "",
     "not_run_in_missions": [],
     "not_run_in_missions_original_command": "",
     "require_reviewer": true,

@@ -39,9 +39,61 @@ export function mergeTaskLineFacts(tasks = []) {
   return mergeTaskFacts(tasks.map(task => ({taskFacts: deriveTaskFactsFromLine(task)})));
 }
 
-// Brief text for the verifier when the phase needs a browser. The orchestrator
-// does not launch a dev server; the verifier starts it or reports the gap.
+export const BROWSER_CHECK_NOTE_PREFIX = "BROWSER CHECK NOT POSSIBLE:";
+
+export const CODE_REVIEWER_BROWSER_LINE = `Browser checks are the verifier's job. Never report a missing or impossible browser/manual UI check as a finding. If UI flows need a manual check, add one note that starts with "${BROWSER_CHECK_NOTE_PREFIX}" naming the pages and what to check.`;
+
+export function isBrowserCheckFinding(text) {
+  if (typeof text !== "string") return false;
+  const trimmed = text.trim();
+  if (trimmed.toLowerCase().startsWith(BROWSER_CHECK_NOTE_PREFIX.toLowerCase())) {
+    return true;
+  }
+  return /not (?:been )?(?:checked|verified|tested) in a (?:real )?browser|no approved browser(?: or playwright)? command/i.test(trimmed);
+}
+
+export function splitBrowserFindings(review) {
+  const findings = Array.isArray(review)
+    ? review
+    : Array.isArray(review?.findings)
+    ? review.findings
+    : [];
+  const browser = [];
+  const rest = [];
+  for (const item of findings) {
+    const text = typeof item === "string" ? item : (item == null ? "" : JSON.stringify(item));
+    if (isBrowserCheckFinding(text)) {
+      browser.push(item);
+    } else {
+      rest.push(item);
+    }
+  }
+  return { browser, rest };
+}
+
+// Brief text for the verifier when the phase needs a browser.
 export function browserVerifierNote(facts = {}) {
   if (facts.browser !== true && facts.playwright !== true) return "";
-  return "Browser verification required: this phase changes UI files or verifies with Playwright. Start the project's dev server yourself (use the matching script in package.json, inside your allowed commands and scratch directory), open the changed page in the browser, and check the acceptance criteria there. If the dev server or browser cannot be started, report that check as NOT POSSIBLE with the reason — never skip it silently.";
+  return `Browser check: this phase changes UI files or verifies with Playwright. Do the check in a browser only if an application server is already running and an approved browser/Playwright command exists — never start a server yourself. If that is not available, do NOT return INCOMPLETE for it: decide PASS or FAIL on the rest of the evidence (gate, code, tests) and add one note that starts with "${BROWSER_CHECK_NOTE_PREFIX}" and names the changed pages/components and the acceptance criteria the operator must check by hand.`;
+}
+
+export function browserCheckNotes(review) {
+  try {
+    const prefix = BROWSER_CHECK_NOTE_PREFIX.toLowerCase();
+    const result = [];
+    const candidates = [];
+    if (Array.isArray(review?.notes)) candidates.push(...review.notes);
+    if (Array.isArray(review?.findings)) candidates.push(...review.findings);
+    for (const item of candidates) {
+      if (typeof item === "string") {
+        const trimmed = item.trim();
+        if (trimmed.toLowerCase().startsWith(prefix)) {
+          result.push(item);
+        }
+      }
+    }
+    return result;
+  } catch {
+    return [];
+  }
 }

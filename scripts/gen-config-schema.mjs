@@ -133,6 +133,7 @@ const DESCRIPTIONS = {
   "tests.gate_commands": "Commands run after each phase and at the end as the gate; a failing command fails the phase, and an empty list runs no gate.",
   "tests.gate_network": "Allow the gate commands to use the network (true); false keeps them network-isolated.",
   "tests.gate_env_allowlist": "Environment variable names allowed through to gate commands; empty passes no extra variables.",
+  "tests.offline_test_tools": "In-process test fakes the project has (e.g. PGlite for PostgreSQL); named in agent briefs because the gate runs offline. Empty = none detected.",
   "tests.not_run_in_missions": "Test files setup could not run in a mission gate (they need a running server, a database/.env or network); each entry records the files, a plain reason and the exact command to run them by hand after the mission.",
   "tests.not_run_in_missions[].files": "Repository-relative test files that are not run in mission gates.",
   "tests.not_run_in_missions[].reason": "Plain reason the files were excluded, for example server not reachable on 127.0.0.1:3000 or missing environment variable DATABASE_URL.",

@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
 import {buildRoleRequirements} from "./role-requirements.mjs";
-import {mergeTaskLineFacts, browserVerifierNote} from "./task-requirements.mjs";
+import {mergeTaskLineFacts, browserVerifierNote, BROWSER_CHECK_NOTE_PREFIX} from "./task-requirements.mjs";
 import * as standalone from "../adapters/standalone.mjs";
 import * as speckit from "../adapters/speckit.mjs";
 
@@ -43,7 +43,10 @@ try {
     assert.ok(hasBrowser(verifierReqs(load("mixed"))), `${loop}: mixed phase adds browser.*`);
     const backend = verifierReqs(load("backend"));
     assert.ok(!hasBrowser(backend), `${loop}: backend-only task adds no browser.*`);
-    assert.ok(browserVerifierNote(mergeTaskLineFacts(load("ui"))).includes("dev server"), `${loop}: UI brief names the dev server`);
+    const uiNote = browserVerifierNote(mergeTaskLineFacts(load("ui")));
+    assert.ok(uiNote.includes("never start a server yourself"), `${loop}: UI brief contains "never start a server yourself"`);
+    assert.ok(uiNote.includes("do NOT return INCOMPLETE"), `${loop}: UI brief contains "do NOT return INCOMPLETE"`);
+    assert.ok(uiNote.includes(BROWSER_CHECK_NOTE_PREFIX), `${loop}: UI brief contains BROWSER_CHECK_NOTE_PREFIX`);
     assert.equal(browserVerifierNote(mergeTaskLineFacts(load("backend"))), "", `${loop}: backend brief has no browser note`);
   }
 } finally {

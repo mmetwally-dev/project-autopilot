@@ -31,7 +31,7 @@ function usage() {
     '  ap cancel [reason] [--yes] [--dry-run] [--repo <path>]   end the active mission, stopping a live run first (one plan, one y/N; --dry-run previews, --yes skips)',
     '  ap stop [--yes] [--dry-run] [--repo <path>]   stop the live run but keep the mission (resume with ap run; asks y/N unless --yes)',
     '  ap uninstall [--dry-run] [--yes] [--keep-missions] [--repo <path>]   remove Autopilot from this project: deletes .autopilot/ (--keep-missions archives missions/ at the repo root instead); --dry-run previews, --yes skips the y/N',
-    '  ap reset [--scope <key>] [--repo <path>]   bare: clear ALL spent counters; --scope: one key (failure key, continuation scope, standalone-plan-revision, or fallback:<role>; resume after)',
+    '  ap reset [--scope <key>] [--dry-run] [--repo <path>]   bare: clear ALL spent counters; --scope: one key (failure key, continuation scope, standalone-plan-revision, or fallback:<role>; resume after)',
     '  ap rebase [--note "<why>"] [--yes] [--repo <path>]   accept a phase-checkpoint drift after an operator edit (keeps the stage position)',
     '  ap finding list [--scope <key>] [--repo <path>]   list the open review findings the mission is carrying',
     '  ap finding drop <n> [--scope <key>] [--note "<why>"] [--yes] [--repo <path>]   drop finding number <n> (recorded with the note)',

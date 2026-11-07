@@ -4,7 +4,8 @@ import path from "node:path";
 import {spawnSync} from "node:child_process";
 import {withoutOuterGitGuard} from "./test-fixtures/workflow-order-harness.mjs";
 import {ensureBaseline, scopedDeltaChunks, SCOPED_DELTA_END_MARKER} from "./implementation-baseline.mjs";
-import {buildStandaloneHandoff, sanitizeSummary, truncationWarning, PHASE_DELTA_BUDGET, PHASE_HANDOFF_BUDGET, MISSION_DELTA_BUDGET, MISSION_HANDOFF_BUDGET} from "./standalone-handoff.mjs";
+import {buildStandaloneHandoff, formatGateResult, sanitizeSummary, truncationWarning, PHASE_DELTA_BUDGET, PHASE_HANDOFF_BUDGET, MISSION_DELTA_BUDGET, MISSION_HANDOFF_BUDGET} from "./standalone-handoff.mjs";
+import {networkGateFailureSignals} from "./gate-failure-locality.mjs";
 
 function makeRepo(){
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),"ap-ho-"));
@@ -240,6 +241,38 @@ const CHUNKS=[{path:"a.js",text:"diff --git a/a.js b/a.js\n+one"}];
     check("chunks: path matches loop rel, not re-parsed",chunks[0].path==="a.js");
     check("chunks: text is the diff",chunks[0].text.includes("a.js"));
   }finally{fs.rmSync(repo,{recursive:true,force:true});}
+}
+
+// ── formatGateResult & networkGateFailureSignals ──
+{
+  const gateWithNetworkErr = {
+    ok: false,
+    command: "npm test",
+    exitCode: 1,
+    tail: "getaddrinfo EAI_AGAIN aws-0-eu-west-1.pooler.supabase.com",
+  };
+  const res = formatGateResult(gateWithNetworkErr);
+  check("formatGateResult with network error has Network: line", res.includes("Network:"));
+  check("formatGateResult with network error mentions EAI_AGAIN", res.includes("EAI_AGAIN"));
+
+  const gateNoNet = {
+    ok: false,
+    command: "npm test",
+    exitCode: 1,
+    tail: "AssertionError: expected true",
+  };
+  check("formatGateResult without network codes has NO Network: line", !formatGateResult(gateNoNet).includes("Network:"));
+
+  const gatePass = {
+    ok: true,
+    command: "npm test",
+    exitCode: 0,
+    tail: "all ok",
+  };
+  check("formatGateResult on PASS has NO Network: line", !formatGateResult(gatePass).includes("Network:"));
+
+  check("networkGateFailureSignals returns [] on empty input", networkGateFailureSignals("").length === 0);
+  check("networkGateFailureSignals dedupes codes", networkGateFailureSignals("EAI_AGAIN EAI_AGAIN").length === 1);
 }
 
 console.log(`\n${ok} passed, ${failed} failed`);

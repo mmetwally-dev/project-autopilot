@@ -113,7 +113,7 @@ function normalizeRelPath(value) {
 //      so it stays distinct from a T1 fallback too).
 // Total: returns null rather than throwing, so observability can never break
 // a run.
-const OWNED_ID_PATTERN = /^T(\d+(?:\.\d+)?)\b/;
+const OWNED_ID_PATTERN = /^T(\d+(?:\.\d+)*(?:[a-z])?)\b/i;
 const PLAN_NUMBER_PATTERN = /^\*{0,2}(\d+\.\d+)\b/;
 function firstContentLine(task) {
   const text = String(task?.text ?? task?.title ?? "")

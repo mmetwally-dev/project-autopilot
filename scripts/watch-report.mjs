@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { normalizeFindings } from "./review-feedback.mjs";
 import { formatPrimaryModelFallbackLine, primaryModelFallbackEntries } from "./primary-model-fallback.mjs";
-import { allPlanPassNotes } from "./plan-review-rounds.mjs";
+import { allPlanPassNotes, planPassNoteEntries, formatPlanPassNotesLines } from "./plan-review-rounds.mjs";
 import { defaultIsPidAlive } from "./run-recovery.mjs";
 
 // Mission 094 Phase 1 task 1.1 — the core report model.
@@ -258,7 +258,7 @@ export function enrichRun(run) {
 // The task ref a display row can use: an explicit ref/id, else the leading
 // `T…` token of the task text (standalone/speckit task lists carry it there).
 function taskRefFromText(text) {
-  const m = String(text ?? "").match(/\bT\d+(?:\.\d+)?\b/);
+  const m = String(text ?? "").match(/\bT\d+(?:\.\d+)*(?:[a-z])?\b/i);
   return m ? m[0] : null;
 }
 
@@ -1383,14 +1383,178 @@ export function parseGateLogProgress(text) {
   return { position, total, passed, failed: failedCount };
 }
 
+function stripAnsi(text) {
+  return String(text ?? "")
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
+}
+
+// Parse live vitest / jest test files progress (backlog #9). Strips ANSI codes
+// and counts top-level file lines only (ignoring deeper-indented per-test lines).
+// Returns null when no file line and no summary is present.
+export function parseVitestGateLog(text) {
+  if (text == null) return null;
+  const clean = stripAnsi(text);
+  let passed = 0;
+  let failed = 0;
+  let skipped = 0;
+  let lastFile = null;
+  let lastMark = null;
+  let lastTests = null;
+  const failedFiles = [];
+  const seenFiles = new Set();
+  let filesSummary = null;
+  let testsSummary = null;
+  let stopCounting = false;
+
+  for (const raw of clean.split(/\r?\n/)) {
+    if (!raw.trim()) continue;
+
+    const filesMatch = raw.match(/^\s*Test Files\s+(.+)$/i);
+    if (filesMatch) {
+      const rest = filesMatch[1];
+      const p = rest.match(/(\d+)\s+passed/i);
+      const f = rest.match(/(\d+)\s+failed/i);
+      const s = rest.match(/(\d+)\s+skipped/i);
+      const t = rest.match(/\((\d+)\)/) || rest.match(/(\d+)\s+total/i);
+      const pCount = p ? Number(p[1]) : 0;
+      const fCount = f ? Number(f[1]) : 0;
+      const sCount = s ? Number(s[1]) : 0;
+      const total = t ? Number(t[1]) : (pCount + fCount + sCount);
+      filesSummary = { passed: pCount, failed: fCount, skipped: sCount, total };
+      continue;
+    }
+
+    const testsMatch = raw.match(/^\s*Tests\s+(.+)$/i);
+    if (testsMatch) {
+      const rest = testsMatch[1];
+      const p = rest.match(/(\d+)\s+passed/i);
+      const f = rest.match(/(\d+)\s+failed/i);
+      const s = rest.match(/(\d+)\s+skipped/i);
+      const t = rest.match(/\((\d+)\)/) || rest.match(/(\d+)\s+total/i);
+      const pCount = p ? Number(p[1]) : 0;
+      const fCount = f ? Number(f[1]) : 0;
+      const sCount = s ? Number(s[1]) : 0;
+      const total = t ? Number(t[1]) : (pCount + fCount + sCount);
+      testsSummary = { passed: pCount, failed: fCount, skipped: sCount, total };
+      continue;
+    }
+
+    // Stop counting file lines after a `Failed Tests` separator line
+    if (/Failed Tests/i.test(raw)) {
+      stopCounting = true;
+      continue;
+    }
+    if (stopCounting) continue;
+
+    // Ignore deeper-indented per-test lines (2 or more spaces, or tab)
+    if (/^[ ]{2,}|\t/.test(raw)) continue;
+
+    // Vitest top-level line: symbol then path then `(N test...` group
+    // e.g. ` ✓ path (21 tests) 2733ms`, ` ❯ path (3 tests | 3 failed) 56ms`, ` ↓ path (2 tests | 2 skipped)`
+    const vitestMatch = raw.match(/^[ ]?([✓✔×✕✗❯↓])\s+(\S+)\s+\((\d+)\s+test/i);
+    if (vitestMatch) {
+      const symbol = vitestMatch[1];
+      const file = vitestMatch[2];
+      const testCount = Number(vitestMatch[3]);
+
+      if (seenFiles.has(file)) continue;
+      seenFiles.add(file);
+
+      lastFile = file;
+      lastTests = testCount;
+
+      if (symbol === "✓" || symbol === "✔") {
+        passed++;
+        lastMark = "✓";
+      } else if (symbol === "↓") {
+        skipped++;
+        lastMark = "↓";
+      } else {
+        failed++;
+        lastMark = "×";
+        failedFiles.push(file);
+      }
+      continue;
+    }
+
+    // Vitest ` FAIL  path > test name` lines are per-test failure details, not jest file lines: ignore them.
+    if (raw.includes(" > ")) continue;
+
+    // Jest top-level line: 0 or 1 leading space then PASS/FAIL (no ` > `)
+    const jestMatch = raw.match(/^[ ]?(PASS|FAIL)\s+(\S+)(.*)$/);
+    if (jestMatch) {
+      const verdict = jestMatch[1];
+      const file = jestMatch[2];
+      const rest = jestMatch[3] || "";
+      const testMatch = rest.match(/\((\d+)\s+test/i);
+      const testCount = testMatch ? Number(testMatch[1]) : null;
+
+      if (seenFiles.has(file)) continue;
+      seenFiles.add(file);
+
+      lastFile = file;
+      lastTests = testCount;
+
+      if (verdict === "PASS") {
+        passed++;
+        lastMark = "PASS";
+      } else {
+        failed++;
+        lastMark = "FAIL";
+        failedFiles.push(file);
+      }
+      continue;
+    }
+  }
+
+  const done = passed + failed + skipped;
+  const summary = (filesSummary || testsSummary)
+    ? {
+        files: filesSummary || { passed, failed, skipped, total: done },
+        tests: testsSummary || { passed: 0, failed: 0, skipped: 0, total: 0 },
+      }
+    : null;
+
+  if (done === 0 && !summary) return null;
+
+  return {
+    done,
+    passed,
+    failed,
+    skipped,
+    lastFile,
+    lastMark,
+    lastTests,
+    failedFiles,
+    summary,
+  };
+}
+
 // The single live CURRENT RUN (watcher.md): the open orchestrator gate wins
 // while it runs, else the newest run recorded `running`. Nothing is current
 // once the mission is finished/cancelled/escalated or stopped.
-export function detectCurrent({ runs = [], gates = [], status = "RUNNING", gateLog = null } = {}) {
+export function detectCurrent({ runs = [], gates = [], status = "RUNNING", gateLog = null, expectedTotal = null, expectedLabel = null } = {}) {
   if (status !== "RUNNING") return null;
   const openGate = [...gates].reverse().find((g) => g.status === "running");
   if (openGate) {
     const logProgress = parseGateLogProgress(gateLog);
+    let progress;
+    if (logProgress) {
+      progress = { ...logProgress, unit: "files" };
+    } else {
+      const vitestProgress = parseVitestGateLog(gateLog);
+      if (vitestProgress) {
+        progress = {
+          ...vitestProgress,
+          unit: "test files",
+          expectedTotal: expectedTotal ?? null,
+          expectedLabel: expectedLabel ?? null,
+        };
+      } else {
+        progress = { ...openGate.progress };
+      }
+    }
     return {
       kind: "gate",
       phase: openGate.phase,
@@ -1398,7 +1562,7 @@ export function detectCurrent({ runs = [], gates = [], status = "RUNNING", gateL
       status: "running",
       startedAt: openGate.at,
       pid: openGate.pid ?? null,
-      progress: logProgress ? { ...logProgress, unit: "files" } : { ...openGate.progress },
+      progress,
     };
   }
   const running = runs.filter((r) => String(r?.status || "") === "running");
@@ -1571,7 +1735,7 @@ function missionStartedAt(state, runs) {
   return earliest;
 }
 
-export function buildReportModel({ state = null, runs = [], events = [], phases = [], policy = {}, layout = null, workflow = null, progress = [], gateLog = null, now = null, skill = null, command = null, missionFallback = null, ownerAlive, notRunText = "", isAlive } = {}) {
+export function buildReportModel({ state = null, runs = [], events = [], phases = [], policy = {}, layout = null, workflow = null, progress = [], gateLog = null, now = null, skill = null, command = null, missionFallback = null, ownerAlive, notRunText = "", isAlive, expectedGateTotal = null, expectedGateLabel = null } = {}) {
   const eventList = Array.isArray(events) ? events : [];
   const progressList = Array.isArray(progress) ? progress : [];
   const phaseDefs = normalizePhases(phases);
@@ -1788,10 +1952,10 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
     // after start. Rendered as a loud line in PIPELINE STATE (and therefore
     // in the final WATCH-REPORT too).
     primaryModelFallbacks: primaryModelFallbackEntries(state),
-    // Backlog #4: minor notes preserved from the PASSing plan-review round.
-    planPassNotes: allPlanPassNotes(state),
+    // Backlog #4 / #12: minor notes preserved from the PASSing plan-review round.
+    planPassNotes: planPassNoteEntries(state),
     liveProgress: decodeLiveProgress({ events: eventList, progress: progressList, gateCommand, limit: 10 }),
-    current: detectCurrent({ runs: enrichedRuns, gates, status: statusInfo.status, gateLog }),
+    current: detectCurrent({ runs: enrichedRuns, gates, status: statusInfo.status, gateLog, expectedTotal: expectedGateTotal, expectedLabel: expectedGateLabel }),
     planning,
     phases: phasesOut,
     finalReview,
@@ -3522,7 +3686,40 @@ export function renderCurrentRun(model) {
     const elapsed = elapsedSince(current.startedAt, now);
     out.push(label("started") + (started || "-") + (elapsed ? ` · elapsed ${elapsed}` : ""));
     const p = current.progress || {};
-    if (Number.isFinite(Number(p.total)) && Number.isFinite(Number(p.passed))) {
+    if (p.unit === "test files" || p.done != null || p.summary != null) {
+      const indent = " ".repeat(label("progress").length);
+      if (p.summary?.files) {
+        const f = p.summary.files;
+        out.push(label("progress") + `${f.total}/${f.total} test files · ${f.passed} passed · ${f.failed} failed · ${f.skipped} skipped`);
+        if (p.summary.tests) {
+          const t = p.summary.tests;
+          const parts = [`${Number(t.passed || 0)} passed`];
+          if (Number(t.failed) > 0) parts.push(`${Number(t.failed)} failed`);
+          if (Number(t.skipped) > 0) parts.push(`${Number(t.skipped)} skipped`);
+          out.push(`${indent}tests: ${parts.join(" · ")} (${Number(t.total ?? t.passed)})`);
+        }
+      } else if (p.expectedTotal != null && Number(p.expectedTotal) > 0) {
+        out.push(label("progress") + `${p.done}/~${p.expectedTotal} test files · ${p.passed} passed · ${p.failed} failed · ${p.skipped} skipped`);
+        out.push(`${indent}(~${p.expectedTotal} = total from the last gate${p.expectedLabel ? `, ${p.expectedLabel}` : ""})`);
+        if (p.lastFile) {
+          const mark = p.lastMark === "PASS" ? "✓" : (p.lastMark === "FAIL" ? "×" : (p.lastMark || "✓"));
+          const testsStr = p.lastTests != null ? ` (${p.lastTests} test${p.lastTests === 1 ? "" : "s"})` : "";
+          out.push(`${indent}last: ${mark} ${p.lastFile}${testsStr}`);
+        }
+      } else {
+        out.push(label("progress") + `${p.done} test files done · ${p.passed} passed · ${p.failed} failed · ${p.skipped} skipped (total unknown yet)`);
+        if (p.lastFile) {
+          const mark = p.lastMark === "PASS" ? "✓" : (p.lastMark === "FAIL" ? "×" : (p.lastMark || "✓"));
+          const testsStr = p.lastTests != null ? ` (${p.lastTests} test${p.lastTests === 1 ? "" : "s"})` : "";
+          out.push(`${indent}last: ${mark} ${p.lastFile}${testsStr}`);
+        }
+      }
+      if (Array.isArray(p.failedFiles) && p.failedFiles.length) {
+        for (const file of p.failedFiles.slice(0, 5)) {
+          out.push(`${indent}failed: × ${file}`);
+        }
+      }
+    } else if (Number.isFinite(Number(p.total)) && Number(p.total) > 0 && Number.isFinite(Number(p.passed))) {
       const failed = Number.isFinite(Number(p.failed)) ? Number(p.failed) : 0;
       out.push(label("progress") + `${Number(p.position ?? p.passed)}/${Number(p.total)} ${p.unit === "files" ? "files" : "runs"} · ${Number(p.passed)} passed · ${failed} failed`);
     }
@@ -3603,13 +3800,14 @@ export function renderLiveProgress(model) {
   return out.join("\n");
 }
 
-// Backlog #4: unapplied plan-review notes from the PASSing round.
+// Backlog #4 / #12: plan-review notes tracked with status.
 export function renderPlanPassNotes(model) {
   const notes = Array.isArray(model?.planPassNotes) ? model.planPassNotes : [];
   if (!notes.length) return "";
+  const lines = formatPlanPassNotesLines(notes);
   return [
-    "=== Plan-review notes not applied ===",
-    ...notes.map((note, i) => `${i + 1}. ${note}`),
+    "=== Plan-review notes ===",
+    ...lines,
   ].join("\n");
 }
 

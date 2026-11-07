@@ -563,6 +563,7 @@ const LEGACY_KEY_TARGETS = {
     network_isolation: "tests.gate_network",
     require_reviewer: "tests.require_reviewer",
     env_allowlist: "tests.gate_env_allowlist",
+    offline_test_tools: "tests.offline_test_tools",
   },
   execution: {
     runtime_mode: "runtime.mode",
@@ -653,6 +654,7 @@ const TESTS_KEYS = new Set([
   "gate_commands",
   "gate_network",
   "gate_env_allowlist",
+  "offline_test_tools",
   "not_run_in_missions",
   "not_run_in_missions_original_command",
   "require_reviewer",
@@ -1027,6 +1029,7 @@ function validateTestsConfig(tests, path, errors, warnings) {
       }
     }
   }
+  if (tests.offline_test_tools !== undefined) validateType(tests.offline_test_tools, "string", `${path}.offline_test_tools`, errors);
   if (tests.not_run_in_missions !== undefined) {
     if (!Array.isArray(tests.not_run_in_missions)) {
       errors.push(`${path}.not_run_in_missions: must be an array.`);

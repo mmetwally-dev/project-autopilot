@@ -290,7 +290,10 @@ The messages name the exact command when one is needed, for example
   its normal model.
 - **No-progress stop.** A continuation session that changes no project file is
   "no progress". After `retries.no_progress_sessions` of them in a row
-  (default 2) the task stops early instead of using up all its sessions. The next
+  (default 2) the task stops early instead of using up all its sessions. If the
+  implementer has an `escalation_model` not yet used for that task, the task
+  first gets one more session on it; if that session also changes nothing, the
+  task stops. The next task is back on the normal model. The next
   session's brief quotes the code lines the hand-off note points at, so it can
   edit right away.
 - **Hung sessions.** A session that prints nothing, runs nothing and writes
@@ -743,6 +746,12 @@ Settings live in `.autopilot/config.json`, in the v4 layout
 `frameworks`, `advanced`. Every setting, its default and its allowed values are
 listed in the [Configuration reference](docs/configuration.md) at the end
 of this page, generated from `config.schema.json`.
+
+Editing `config.json` while a mission runs is fine: the change is picked up
+before the next role run (`config reloaded:` lists what changed; an invalid
+edit is skipped with a warning and the running config is kept). A run already
+in progress is not affected, and gate/test command changes apply from the next
+gate run.
 
 - **`ap config`** edits the file interactively: it shows the current roles,
   then lets you change all of them or one (`ap config --role <role>`). It edits

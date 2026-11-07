@@ -2,6 +2,7 @@ import path from "node:path";
 import {buildSecurityChecklistSection} from "./security-checklist.mjs";
 import {scopedDeltaBeginMarker, SCOPED_DELTA_END_MARKER} from "./implementation-baseline.mjs";
 import {taskLabel} from "./finding-task-locality.mjs";
+import {networkGateFailureSignals} from "./gate-failure-locality.mjs";
 import {formatLinkedTestDurations, formatHeavySuiteNoParallelNote, formatRedGateVerdictRule} from "./verifier-brief.mjs";
 
 // Task 4: shared standalone handoff builder + prompt-size guard.
@@ -223,6 +224,10 @@ export function formatGateResult(gateResult) {
   lines.push("");
   if (failed) {
     lines.push(`Instructions: the full suite has already run as the phase gate. Do not re-run the whole suite; re-run a single test only if a specific claim is in doubt. ${formatRedGateVerdictRule(gateResult)}`);
+    const networkSignals = networkGateFailureSignals(failed.tail + " " + (gateResult?.tail || ""));
+    if (networkSignals.length) {
+      lines.push(`Network: the gate output shows network errors (${networkSignals.join(", ")}) and the gate runs offline. For each test that fails only because it reaches the network or a remote service, report the finding as "<file>: needs network/a remote service, but the gate is offline — make it use an in-process fake or mock (or skip only when no offline option exists)". Never ask to restore connectivity or rerun with network.`);
+    }
   } else {
     lines.push("Instructions: the full suite has already run as the phase gate. Do not re-run the whole suite; re-run a single test only if a specific claim is in doubt. On gate FAIL, analyse the provided output and name the cause.");
   }
