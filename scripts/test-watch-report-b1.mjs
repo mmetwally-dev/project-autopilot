@@ -78,8 +78,8 @@ const row = (text, needle) => lines(text).find((l) => l.includes(needle)) || "";
   })];
   const model = buildReportModel({ state: { phase: "implementing", step: "implement", phaseIndex: 3, attempt: 1 }, runs, events: [], phases: [{ number: 4, name: "Phase 4", done: false, tasks: [{ text: "T4.1" }] }], policy: {}, now: "2026-10-19T10:02:00+00:00" });
   const text = renderCurrentRun(model);
-  check("d: run line uses the row name", text.includes("run:     77-implementer-0022b8e2"), row(text, "run:"));
-  check("d: run line does not use the bare uuid", !text.includes("run:     0022b8e2-af81"), row(text, "run:"));
+  check("d: run line uses the row name", text.includes("run:            77-implementer-0022b8e2"), row(text, "run:"));
+  check("d: run line does not use the bare uuid", !text.includes("run:            0022b8e2-af81"), row(text, "run:"));
   check("b: sub-minute snapshot uses seconds", snapshotSpanText(900) === "0.9s");
   check("b: current run omits snapshot", !text.includes("snapshot"), row(text, "started:"));
   const long = buildReportModel({
@@ -106,7 +106,7 @@ const row = (text, needle) => lines(text).find((l) => l.includes(needle)) || "";
     gateLog: log, now: "2026-10-19T10:05:00+00:00",
   });
   const text = renderCurrentRun(model);
-  check("h: CURRENT RUN prints files/passed/failed", text.includes("progress: 73/365 files · 72 passed · 1 failed"), row(text, "progress:"));
+  check("h: CURRENT RUN prints files/passed/failed", text.includes("progress:       73/365 files · 72 passed · 1 failed"), row(text, "progress:"));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "autopilot-b1-gate-"));
   const gateDir = path.join(root, ".autopilot", "missions", "m", "gates");
   fs.mkdirSync(gateDir, { recursive: true });

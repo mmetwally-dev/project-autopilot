@@ -2329,8 +2329,8 @@ if (isMainModule) {
           no_progress_generations: NO_PROGRESS_GENERATIONS_DEFAULT,
           backstop_raw_tokens: BACKSTOP_RAW_TOKENS_DEFAULT,
           failure_budgets: {
-            implementationFailureBudget: 4,
-            verificationFailureBudget: 4,
+            implementationFailureBudget: 5,
+            verificationFailureBudget: 5,
             adapterRetryBudget: 3,
             infrastructureRetryBudget: 3
           },

@@ -379,31 +379,95 @@ function phaseTaskRefs(phase) {
   return [...new Set(ordered.map((r) => r.ref))];
 }
 
-function taskRange(refs) {
+export function taskRange(refs) {
   const list = Array.isArray(refs) ? refs : [];
   if (!list.length) return null;
   if (list.length === 1) return list[0];
   return `${list[0]} > ${list[list.length - 1]}`;
 }
 
-// The TASK cell of a review/verify row. A run that covers every task of the
-// phase is shown as the first-to-last range; a run that covers only some tasks
-// keeps its comma list (`T1.1, T1.3, T1.5`); a single contiguous range already
-// recorded stays as it is. A long `>` chain (never produced by a real run) is
-// reduced to its endpoints.
-function normalizeRunTaskRef(ref, allRefs) {
+// The TASK cell of a review/verify row: full range when the run covers all phase
+// tasks, else phase tasks ordered by phase order with 3+ consecutive tasks
+// collapsed into `first > last`, shorter runs comma-separated, and non-phase
+// refs kept at the end in their original order.
+export function normalizeRunTaskRef(ref, allRefs) {
   const text = String(ref ?? "").trim();
   if (!text) return null;
   const all = Array.isArray(allRefs) ? allRefs : [];
   const allSet = new Set(all);
-  const tokens = text.split(/[>,]/).map((t) => t.trim()).filter(Boolean);
-  const unique = [...new Set(tokens)];
-  const coversAll = all.length > 0 && unique.length === all.length && unique.every((t) => allSet.has(t));
+
+  const rawParts = text.split(",").map((p) => p.trim()).filter(Boolean);
+  const phaseRefs = [];
+  const nonPhaseRefs = [];
+
+  for (const part of rawParts) {
+    if (part.includes(">")) {
+      const tokens = part.split(">").map((t) => t.trim()).filter(Boolean);
+      if (tokens.length >= 2) {
+        const start = tokens[0];
+        const end = tokens[tokens.length - 1];
+        const startIdx = all.indexOf(start);
+        const endIdx = all.indexOf(end);
+        if (startIdx !== -1 && endIdx !== -1) {
+          const [min, max] = startIdx <= endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+          for (let i = min; i <= max; i++) {
+            if (!phaseRefs.includes(all[i])) phaseRefs.push(all[i]);
+          }
+          continue;
+        }
+      }
+      if (tokens.every((t) => !allSet.has(t))) {
+        if (!nonPhaseRefs.includes(part)) nonPhaseRefs.push(part);
+      } else {
+        for (const t of tokens) {
+          if (allSet.has(t)) {
+            if (!phaseRefs.includes(t)) phaseRefs.push(t);
+          } else {
+            if (!nonPhaseRefs.includes(t)) nonPhaseRefs.push(t);
+          }
+        }
+      }
+    } else {
+      if (allSet.has(part)) {
+        if (!phaseRefs.includes(part)) phaseRefs.push(part);
+      } else {
+        if (!nonPhaseRefs.includes(part)) nonPhaseRefs.push(part);
+      }
+    }
+  }
+
+  const coversAll = all.length > 0 && phaseRefs.length === all.length && nonPhaseRefs.length === 0;
   if (coversAll) return taskRange(all);
-  if (text.includes(",")) return text.split(",").map((t) => t.trim()).filter(Boolean).join(", ");
-  const gtCount = (text.match(/>/g) || []).length;
-  if (gtCount > 1) return `${tokens[0]} > ${tokens[tokens.length - 1]}`;
-  return text;
+
+  phaseRefs.sort((a, b) => all.indexOf(a) - all.indexOf(b));
+
+  const collapsed = [];
+  if (phaseRefs.length > 0) {
+    let currentRun = [phaseRefs[0]];
+    for (let i = 1; i < phaseRefs.length; i++) {
+      const prevIdx = all.indexOf(phaseRefs[i - 1]);
+      const currIdx = all.indexOf(phaseRefs[i]);
+      if (currIdx === prevIdx + 1) {
+        currentRun.push(phaseRefs[i]);
+      } else {
+        if (currentRun.length >= 3) {
+          collapsed.push(`${currentRun[0]} > ${currentRun[currentRun.length - 1]}`);
+        } else {
+          collapsed.push(...currentRun);
+        }
+        currentRun = [phaseRefs[i]];
+      }
+    }
+    if (currentRun.length >= 3) {
+      collapsed.push(`${currentRun[0]} > ${currentRun[currentRun.length - 1]}`);
+    } else {
+      collapsed.push(...currentRun);
+    }
+  }
+
+  const allResult = [...collapsed, ...nonPhaseRefs];
+  if (!allResult.length) return null;
+  return allResult.join(", ");
 }
 
 // A carried-forward entry is recorded as the internal stable id
@@ -524,12 +588,13 @@ function phaseHasVerifyPass(runs) {
 
 function phaseStatus(def, runs, { state, phaseIndex, status: missionStatus } = {}) {
   const terminal = terminalStageStatus(missionStatus);
-  if (runs.some(isRunning) && !terminal) return "in_progress";
+  if (runs.some(isRunning) && !terminal && missionStatus !== "COMPLETED") return "in_progress";
   if (def.done) return "passed";
   if (phaseHasVerifyPass(runs)) return "passed";
   // GSD phases carry no checklist in the descriptor: a completed phase review
   // PASS is the completion signal there.
   if (def.tasks.length === 0 && runs.length > 0 && phaseHasPassReview(runs)) return "passed";
+  if (missionStatus === "COMPLETED") return "passed";
   if (runs.length > 0) return terminal || "in_progress";
   if (phaseIndex != null && Number.isFinite(Number(phaseIndex)) && def.number === Number(phaseIndex) + 1
       && typeof state?.phase === "string" && /implement|verif|review/i.test(state.phase)) {
@@ -538,13 +603,27 @@ function phaseStatus(def, runs, { state, phaseIndex, status: missionStatus } = {
   return "not_started";
 }
 
+function isPostImplementationInterruptedPlanningRun(run, phaseCount = 0, allRuns = []) {
+  if (String(run?.status || "").toLowerCase() !== "interrupted") return false;
+  const p = phaseNumberOf(run);
+  if (phaseCount > 0 && p != null && p > phaseCount) return true;
+  const start = Date.parse(run?.started_at ?? run?.startedAt) || 0;
+  return allRuns.some((r) => {
+    const role = roleOf(r);
+    if (!IMPLEMENTATION_ROLES.has(role) && !REVIEW_ROLES.has(role)) return false;
+    const t = Date.parse(r?.started_at ?? r?.startedAt) || 0;
+    return t > 0 && start > 0 && t < start;
+  });
+}
+
 // Planning rounds: each planner run opens a new round; the plan_reviewer runs
 // that follow (until the next planner) belong to it. `revision` is the
 // planner's recorded planRevision (the generation being reviewed).
-function buildPlanningRuns(runs, { status: missionStatus } = {}) {
+function buildPlanningRuns(runs, { status: missionStatus, phaseCount = 0, allRuns = [] } = {}) {
+  const stageRuns = runs.filter((r) => !isPostImplementationInterruptedPlanningRun(r, phaseCount, allRuns));
   const rounds = [];
   let current = null;
-  for (const run of runs) {
+  for (const run of stageRuns) {
     if (current == null || roleOf(run) === "planner") {
       current = {
         number: rounds.length + 1,
@@ -559,26 +638,27 @@ function buildPlanningRuns(runs, { status: missionStatus } = {}) {
   }
   const terminal = terminalStageStatus(missionStatus);
   let status;
-  if (!runs.length) status = "not_started";
-  else if (runs.some(isRunning) && !terminal) status = "in_progress";
+  if (!stageRuns.length) status = "not_started";
+  else if (stageRuns.some(isRunning) && !terminal && missionStatus !== "COMPLETED") status = "in_progress";
   else {
-    const reviewers = runs.filter((r) => roleOf(r) === "plan_reviewer");
+    const reviewers = stageRuns.filter((r) => roleOf(r) === "plan_reviewer");
     const passed = reviewers.length && isDecision(reviewers[reviewers.length - 1], "PASS");
     if (passed) status = "passed";
     else if (terminal) status = terminal;
+    else if (missionStatus === "COMPLETED") status = "passed";
     else status = "in_progress";
   }
   return {
     status,
     rounds,
-    runs,
-    findings: aggregateFindings(runs),
-    revision: runs.reduce((max, r) => {
+    runs: stageRuns,
+    findings: aggregateFindings(stageRuns),
+    revision: stageRuns.reduce((max, r) => {
       if (typeof r.planRevision !== "number") return max;
       if (r.taskRef && r.taskRef.startsWith("standalone-") && !r.taskRef.startsWith("standalone-planning-")) return max;
       return max == null || r.planRevision > max ? r.planRevision : max;
     }, null),
-    specRevision: runs.reduce((max, r) => {
+    specRevision: stageRuns.reduce((max, r) => {
       if (typeof r.planRevision !== "number") return max;
       if (!r.taskRef || !r.taskRef.startsWith("standalone-spec-")) return max;
       return max == null || r.planRevision > max ? r.planRevision : max;
@@ -632,12 +712,13 @@ function buildFinalReview(runs, { status: missionStatus, skipped } = {}) {
   let status;
   if (skipped && !runs.length) status = "skipped";
   else if (!runs.length) status = "not_started";
-  else if (runs.some(isRunning) && !terminal) status = "in_progress";
+  else if (runs.some(isRunning) && !terminal && missionStatus !== "COMPLETED") status = "in_progress";
   else {
     const reviewers = runs.filter((r) => REVIEW_ROLES.has(roleOf(r)));
     const passed = reviewers.length && isDecision(reviewers[reviewers.length - 1], "PASS");
     if (passed) status = "passed";
     else if (terminal) status = terminal;
+    else if (missionStatus === "COMPLETED") status = "passed";
     else status = "in_progress";
   }
   const fixRoundsUsed = rounds.filter((r) => (r.runs || []).some((x) => IMPLEMENTATION_ROLES.has(roleOf(x)))).length;
@@ -648,10 +729,15 @@ function buildFinalReview(runs, { status: missionStatus, skipped } = {}) {
 // carries no phase taskRef (phase reviews/verifies always carry a range), and
 // does not map to a known phase number. The final review's fix-pass implementer
 // runs (no mapped phase, no taskRef) belong to it too.
-function isFinalReviewRun(run, phaseCount) {
+export function isFinalReviewRun(run, phaseCount) {
   const role = roleOf(run);
   if (!REVIEW_ROLES.has(role) && !IMPLEMENTATION_ROLES.has(role)) return false;
-  if (runRef(run) != null) return false;
+  const ref = typeof run?.taskRef === "string" ? run.taskRef : "";
+  if (ref.startsWith("final-review-") || ref.startsWith("final-fix-")) return true;
+  // With a known phase list, `task` is a stale grouping field (it can carry
+  // the last phase task, e.g. T037, onto the final review): only the recorded
+  // taskRef is a real scope. Without a list, legacy `task` still counts.
+  if ((phaseCount > 0 ? run?.taskRef || null : runRef(run)) != null) return false;
   const p = phaseNumberOf(run);
   if (phaseCount > 0 && p != null && p >= 1 && p <= phaseCount) return false;
   return true;
@@ -697,6 +783,12 @@ export function classifyStage(state, planning, phases, finalReview, runs = []) {
   if (statePhase === "final_review") return "FINAL REVIEW";
   if (statePhase === "planning" || statePhase === "plan_approval" || /plan/i.test(stateStep)) return "PLANNING";
   if (planningOnlyDone(state, runs)) return "PLANNING";
+  // When final-review runs exist and every real phase passed, the mission is in
+  // its final review, never in a `Phase N+1/N` of implementation.
+  const pastLastPhase = phases.length > 0
+    && finalReview.runs.length > 0
+    && phases.every((p) => p.status === "passed");
+  if (pastLastPhase) return "FINAL REVIEW";
   if (statePhase === "implementing" || statePhase === "verifying" || statePhase === "tasks_ready") return "IMPLEMENTATION";
   if (finalReview.status === "skipped") return "FINAL REVIEW";
   if (finalReview.runs.length > 0 && (finalReview.status === "in_progress" || finalReview.status === "passed")) return "FINAL REVIEW";
@@ -1609,8 +1701,8 @@ const BUDGET_DOMAINS = [
   ["infrastructure", "infrastructureRetryBudget", "infrastructure"],
 ];
 const DEFAULT_BUDGET_LIMITS = {
-  implementationFailureBudget: 4,
-  verificationFailureBudget: 4,
+  implementationFailureBudget: 5,
+  verificationFailureBudget: 5,
   adapterRetryBudget: 3,
   infrastructureRetryBudget: 3,
 };
@@ -1770,7 +1862,13 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
   for (const run of enrichedRuns) {
     const role = roleOf(run);
     if (PLANNING_ROLES.has(role)) planningRuns.push(run);
-    else if (isFinalReviewRun(run, phaseDefs.length)) finalReviewRuns.push(run);
+    else if (isFinalReviewRun(run, phaseDefs.length)) {
+      run.task = null; // a final-review row never shows a task ref
+      if (typeof run.taskRef === "string" && (run.taskRef.startsWith("final-review-") || run.taskRef.startsWith("final-fix-"))) {
+        run.taskRef = null;
+      }
+      finalReviewRuns.push(run);
+    }
     else if (IMPLEMENTATION_ROLES.has(role) || REVIEW_ROLES.has(role)) implementationRuns.push(run);
     else unclassified.push(run);
   }
@@ -1849,7 +1947,7 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
     }
   }
 
-  const planning = buildPlanningRuns(planningRuns, { status: statusInfo.status });
+  const planning = buildPlanningRuns(planningRuns, { status: statusInfo.status, phaseCount: phaseDefs.length, allRuns: enrichedRuns });
   const finalReview = buildFinalReview(finalReviewRuns, { status: statusInfo.status, skipped: Boolean(state?.finalReviewSkipped) });
 
   const mission = typeof state?.mission === "string" && state.mission ? state.mission : null;
@@ -1898,22 +1996,15 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
     }
   }
 
-  // Display attempt: the budget-shaped attempt count of the current phase
-  // (one attempt per denial plus the live one), never the recorded counter that
-  // also advances on every stop/resume. An operator reset keeps its explicit
-  // past-the-limit number (rule 17).
+  // Display attempt: the table's attempt number (review/verify cycles of the
+  // current phase), never the recorded counter that also advances on every
+  // stop/resume, implementer relaunch or operator reset. Fall back to the
+  // recorded number only when no phase runs exist yet.
   const rawAttempt = Number(state?.attempt);
   const currentAttempts = phaseIndex != null ? phasesOut[phaseIndex]?.attempts?.length : null;
-  const implementationLimitRaw = Number(policy?.failure_budgets?.implementationFailureBudget);
-  const implementationLimit = Number.isInteger(implementationLimitRaw) && implementationLimitRaw >= 0 ? implementationLimitRaw + 1 : 4;
-  const resetAttempt = operatorResetBudgetDomains.has("implementation") && Number.isFinite(rawAttempt) && rawAttempt > implementationLimit;
-  // Always show the budget-shaped count of the current phase: the recorded
-  // counter also advances on every stop/resume or crash restart, which is NOT
-  // a new attempt. Fall back to the recorded number only when no phase runs
-  // exist; an operator reset keeps its explicit past-the-limit number.
-  const displayAttempt = resetAttempt
-    ? rawAttempt
-    : (Number.isInteger(currentAttempts) && currentAttempts > 0 ? currentAttempts : (Number.isFinite(rawAttempt) ? rawAttempt : null));
+  const displayAttempt = Number.isInteger(currentAttempts) && currentAttempts > 0
+    ? currentAttempts
+    : (Number.isFinite(rawAttempt) ? rawAttempt : null);
 
   return {
     mission,
@@ -2281,7 +2372,7 @@ export function planningNote(run, model) {
 
 // The single table column order shared by planning, implementation and final
 // review (watcher.md Table columns): ROLE MODEL TASK STATUS TURNS CONTEXT TOKENS
-// STARTED DURATION NOTE.
+// DURATION STARTED NOTE.
 const TABLE_COLUMNS = [
   { header: "ROLE", cell: (r) => r.role ?? "-" },
   { header: "MODEL", cell: (r) => r.model ?? "-" },
@@ -2290,8 +2381,8 @@ const TABLE_COLUMNS = [
   { header: "TURNS", cell: (r) => r.turns ?? "-" },
   { header: "CONTEXT", cell: (r) => r.context ?? "-" },
   { header: "TOKENS", cell: (r) => r.tokens ?? r.price ?? "-" },
-  { header: "STARTED", cell: (r) => r.started ?? "-" },
   { header: "DURATION", cell: (r) => r.duration ?? "-" },
+  { header: "STARTED", cell: (r) => r.started ?? "-" },
   { header: "NOTE", cell: (r) => r.note ?? "" },
 ];
 
@@ -2521,8 +2612,9 @@ export function renderPlanningStage(model, { widths = null, collectRows = null, 
   const dayTracker = tracker || { lastDay: dateDay(model?.missionStartedAt) };
   const runs = Array.isArray(planning.runs) ? planning.runs : [];
   const rounds = Array.isArray(planning.rounds) ? planning.rounds : [];
-  const price = sumPrice(runs);
-  const duration = sumDurationMs(runs);
+  const stageRuns = runs.filter((r) => !isPostImplementationInterruptedPlanningRun(r, model?.phases?.length, model?.runs));
+  const price = sumPrice(stageRuns);
+  const duration = sumDurationMs(stageRuns);
   const roundsCount = rounds.length;
   const revision = typeof planning.revision === "number" ? planning.revision : 0;
   const maxRevisions = Number(model?.layout?.retries?.plan_revisions ?? model?.policy?.max_plan_revisions);
@@ -2531,24 +2623,38 @@ export function renderPlanningStage(model, { widths = null, collectRows = null, 
   // with no runs renders nothing, so no `○ NOT STARTED` placeholder.
   if (planning.status === "not_started" && !runs.length) return "";
 
-  let marker;
-  let atText = "";
-  let detail = "";
-  if (planning.status === "passed") {
-    marker = "✓ PASSED";
-    const ends = runs
+  const passedAtText = () => {
+    const approvingReviewer = [...stageRuns].reverse().find((r) => roleOf(r) === "plan_reviewer" && isDecision(r, "PASS"));
+    const approveEnd = approvingReviewer ? runEndAt(approvingReviewer) : null;
+    if (approveEnd) return ` at ${formatStamp(approveEnd)}`;
+    const ends = stageRuns
       .map((run) => runEndAt(run))
       .filter(Boolean)
       .map((stamp) => ({ stamp, at: Date.parse(stamp) }))
       .filter((e) => Number.isFinite(e.at));
     if (ends.length) {
       const last = ends.reduce((max, e) => (e.at > max.at ? e : max), ends[0]);
-      atText = ` at ${formatStamp(last.stamp)}`;
+      return ` at ${formatStamp(last.stamp)}`;
     }
+    return "";
+  };
+
+  let marker;
+  let atText = "";
+  let detail = "";
+  if (planning.status === "passed") {
+    marker = "✓ PASSED";
+    atText = passedAtText();
     detail = ` · ${formatTokens(price)} · ${formatClock(duration)}`;
   } else if (planning.status === "in_progress") {
-    marker = "● IN PROGRESS";
-    detail = ` · ${formatTokens(price)} so far`;
+    if (model?.status === "COMPLETED") {
+      marker = "✓ PASSED";
+      atText = passedAtText();
+      detail = ` · ${formatTokens(price)} · ${formatClock(duration)}`;
+    } else {
+      marker = "● IN PROGRESS";
+      detail = ` · ${formatTokens(price)} so far`;
+    }
   } else {
     const terminal = terminalStageMarker(planning.status, price);
     if (terminal) {
@@ -2593,6 +2699,11 @@ function label(text) {
   return `${text}:`.padEnd(8) + " ";
 }
 
+const CURRENT_RUN_LABEL_PAD = 15;
+function currentRunLabel(text) {
+  return `${text}:`.padEnd(CURRENT_RUN_LABEL_PAD) + " ";
+}
+
 function statusText(model) {
   if (model?.status && model.status !== "RUNNING") return model.stopLine || model.status;
   return model?.status || "RUNNING";
@@ -2620,12 +2731,12 @@ function operatorResetBudget(model, domain) {
   return Array.isArray(model?.operatorResetBudgets) && model.operatorResetBudgets.includes(domain);
 }
 
-// `attempt 2 of 4`, or after an operator reset pushed the counter past the
-// limit: `attempt 5 (limit 4, reset by operator)`.
+// `attempt 2 of 4`, or `attempt 6` when a budget reset pushed the table
+// attempt past the limit.
 function attemptText(attempt, model) {
   const limit = attemptLimit(model);
-  if (operatorResetBudget(model, "implementation") && Number(attempt) > limit) {
-    return `attempt ${attempt} (limit ${limit}, reset by operator)`;
+  if (Number(attempt) > limit) {
+    return `attempt ${attempt}`;
   }
   return `attempt ${attempt} of ${limit}`;
 }
@@ -3386,6 +3497,9 @@ function phaseHeader(phase, model) {
   const terminal = terminalStageMarker(phase.status, sumPrice(phase.runs));
   if (terminal) return `${head}  ${terminal.marker}${terminal.detail}`;
   if (phase.status === "in_progress") {
+    if (model?.status === "COMPLETED") {
+      return `${head}  ✓ PASSED · ${formatTokens(sumPrice(phase.runs))} · ${formatClock(sumDurationMs(phase.runs))}`;
+    }
     let extra = "";
     if (model.stage === "IMPLEMENTATION" && phase.number === model.phaseNumber && model.attempt != null) {
       extra = ` (${attemptText(model.attempt, model)})`;
@@ -3416,7 +3530,8 @@ function attemptHeader(attempt, phase, index, model, isLast = false) {
     const by = denyingRole(prev.runs);
     const domain = by === "verifier" ? "verification" : "implementation";
     const budget = (model?.budgets || []).find((b) => b.domain === domain);
-    const detail = budget ? ` · ${domain} budget ${budget.used}/${budget.limit}` : "";
+    const reset = operatorResetBudget(model, domain) ? " (reset by operator)" : "";
+    const detail = budget ? ` · ${domain} budget ${budget.used}/${budget.limit}${reset}` : "";
     paren = ` (after ${by} DENIED${detail})`;
   }
   return `● IN PROGRESS${paren} · ${formatTokens(price)} so far`;
@@ -3548,7 +3663,11 @@ export function renderFinalReviewStage(model, { widths = null, collectRows = nul
     if (terminal) {
       head = `=== FINAL REVIEW STAGE ===  ${terminal.marker}${terminal.detail}`;
     } else if (fr.status === "in_progress" || runs.some(isRunning)) {
-      head = `=== FINAL REVIEW STAGE ===  ● IN PROGRESS · ${formatTokens(sumPrice(runs))} so far`;
+      if (model?.status === "COMPLETED") {
+        head = `=== FINAL REVIEW STAGE ===  ✓ PASSED · ${formatTokens(sumPrice(runs))} · ${stageSpanClock(runs)}${limit ? ` (fix rounds ${fixRoundsUsed} of ${limit})` : ` (fix rounds ${fixRoundsUsed})`}`;
+      } else {
+        head = `=== FINAL REVIEW STAGE ===  ● IN PROGRESS · ${formatTokens(sumPrice(runs))} so far`;
+      }
     } else {
       head = "=== FINAL REVIEW STAGE ===  ○ NOT STARTED";
     }
@@ -3557,7 +3676,11 @@ export function renderFinalReviewStage(model, { widths = null, collectRows = nul
   const range = missionTaskRange(model);
   const allRefs = missionTaskRefs(model);
   const finalGates = (model?.gates || []).filter((g) => g.phase == null);
-  const scopeOf = (run) => (runRef(run) ? (normalizeRunTaskRef(runRef(run), allRefs) ?? (range ?? "-")) : (range ?? "-"));
+  const scopeOf = (run) => {
+    const ref = runRef(run);
+    if (!ref || ref.startsWith("final-review-") || ref.startsWith("final-fix-")) return range ?? "-";
+    return normalizeRunTaskRef(ref, allRefs) ?? (range ?? "-");
+  };
   const roundApproved = (round) => (round.runs || []).some((r) => REVIEW_ROLES.has(roleOf(r)) && isDecision(r, "PASS"));
   const out = [head];
   let fix = 0;
@@ -3676,21 +3799,21 @@ export function renderCurrentRun(model) {
   const out = ["=== CURRENT RUN ==="];
 
   if (current.kind === "gate") {
-    out.push(label("stage") + currentStageText(model));
-    out.push(label("run") + "GATE (orchestrator full suite, no agent)");
-    if (current.command) out.push(label("command") + current.command);
+    out.push(currentRunLabel("stage") + currentStageText(model));
+    out.push(currentRunLabel("run") + "GATE (orchestrator full suite, no agent)");
+    if (current.command) out.push(currentRunLabel("command") + current.command);
     let status = "RUNNING";
     if (current.pid != null) status += ` · pid ${current.pid} (alive)`;
-    out.push(label("status") + status);
+    out.push(currentRunLabel("status") + status);
     const started = current.startedAt ? formatStamp(current.startedAt) : null;
     const elapsed = elapsedSince(current.startedAt, now);
-    out.push(label("started") + (started || "-") + (elapsed ? ` · elapsed ${elapsed}` : ""));
+    out.push(currentRunLabel("started") + (started || "-") + (elapsed ? ` · elapsed ${elapsed}` : ""));
     const p = current.progress || {};
     if (p.unit === "test files" || p.done != null || p.summary != null) {
-      const indent = " ".repeat(label("progress").length);
+      const indent = " ".repeat(currentRunLabel("progress").length);
       if (p.summary?.files) {
         const f = p.summary.files;
-        out.push(label("progress") + `${f.total}/${f.total} test files · ${f.passed} passed · ${f.failed} failed · ${f.skipped} skipped`);
+        out.push(currentRunLabel("progress") + `${f.total}/${f.total} test files · ${f.passed} passed · ${f.failed} failed · ${f.skipped} skipped`);
         if (p.summary.tests) {
           const t = p.summary.tests;
           const parts = [`${Number(t.passed || 0)} passed`];
@@ -3699,7 +3822,7 @@ export function renderCurrentRun(model) {
           out.push(`${indent}tests: ${parts.join(" · ")} (${Number(t.total ?? t.passed)})`);
         }
       } else if (p.expectedTotal != null && Number(p.expectedTotal) > 0) {
-        out.push(label("progress") + `${p.done}/~${p.expectedTotal} test files · ${p.passed} passed · ${p.failed} failed · ${p.skipped} skipped`);
+        out.push(currentRunLabel("progress") + `${p.done}/~${p.expectedTotal} test files · ${p.passed} passed · ${p.failed} failed · ${p.skipped} skipped`);
         out.push(`${indent}(~${p.expectedTotal} = total from the last gate${p.expectedLabel ? `, ${p.expectedLabel}` : ""})`);
         if (p.lastFile) {
           const mark = p.lastMark === "PASS" ? "✓" : (p.lastMark === "FAIL" ? "×" : (p.lastMark || "✓"));
@@ -3707,7 +3830,7 @@ export function renderCurrentRun(model) {
           out.push(`${indent}last: ${mark} ${p.lastFile}${testsStr}`);
         }
       } else {
-        out.push(label("progress") + `${p.done} test files done · ${p.passed} passed · ${p.failed} failed · ${p.skipped} skipped (total unknown yet)`);
+        out.push(currentRunLabel("progress") + `${p.done} test files done · ${p.passed} passed · ${p.failed} failed · ${p.skipped} skipped (total unknown yet)`);
         if (p.lastFile) {
           const mark = p.lastMark === "PASS" ? "✓" : (p.lastMark === "FAIL" ? "×" : (p.lastMark || "✓"));
           const testsStr = p.lastTests != null ? ` (${p.lastTests} test${p.lastTests === 1 ? "" : "s"})` : "";
@@ -3721,14 +3844,14 @@ export function renderCurrentRun(model) {
       }
     } else if (Number.isFinite(Number(p.total)) && Number(p.total) > 0 && Number.isFinite(Number(p.passed))) {
       const failed = Number.isFinite(Number(p.failed)) ? Number(p.failed) : 0;
-      out.push(label("progress") + `${Number(p.position ?? p.passed)}/${Number(p.total)} ${p.unit === "files" ? "files" : "runs"} · ${Number(p.passed)} passed · ${failed} failed`);
+      out.push(currentRunLabel("progress") + `${Number(p.position ?? p.passed)}/${Number(p.total)} ${p.unit === "files" ? "files" : "runs"} · ${Number(p.passed)} passed · ${failed} failed`);
     }
     return out.join("\n");
   }
 
-  out.push(label("stage") + currentStageText(model));
+  out.push(currentRunLabel("stage") + currentStageText(model));
   // Backlog #35d: use the run's table/folder name, never the bare uuid.
-  out.push(label("run") + (current.dirName ?? current.id ?? "-"));
+  out.push(currentRunLabel("run") + (current.dirName ?? current.id ?? "-"));
   const roleParts = [];
   if (current.role) roleParts.push(current.role);
   if (current.taskRef) roleParts.push(`task ${current.taskRef}`);
@@ -3738,7 +3861,7 @@ export function renderCurrentRun(model) {
     if (current.variant && current.variant !== current.reasoning) roleParts.push(`variant ${current.variant}`);
   }
   if (current.session) roleParts.push(current.session);
-  if (roleParts.length) out.push(label("role") + roleParts.join(" · "));
+  if (roleParts.length) out.push(currentRunLabel("role") + roleParts.join(" · "));
 
   let status = "RUNNING";
   if (current.pid != null) {
@@ -3753,15 +3876,15 @@ export function renderCurrentRun(model) {
       status += ` · ⚠ silent ${Math.floor(silenceMs / 60000)}m, no child process`;
     }
   }
-  out.push(label("status") + status);
+  out.push(currentRunLabel("status") + status);
 
   const started = current.startedAt ? formatStamp(current.startedAt) : null;
   const elapsed = elapsedSince(current.startedAt, now);
-  out.push(label("started") + (started || "-") + (elapsed ? ` · elapsed ${elapsed}` : ""));
+  out.push(currentRunLabel("started") + (started || "-") + (elapsed ? ` · elapsed ${elapsed}` : ""));
 
   if (current.updatedAt) {
     const ago = agoText(current.updatedAt, now);
-    out.push(label("last activity") + formatStamp(current.updatedAt) + (ago ? ` (${ago})` : ""));
+    out.push(currentRunLabel("last activity") + formatStamp(current.updatedAt) + (ago ? ` (${ago})` : ""));
   }
 
   const usageParts = [];
@@ -3773,7 +3896,7 @@ export function renderCurrentRun(model) {
   const turns = turnsCell(current);
   const turnsCap = turnsCapForRole(model, current.role);
   if (turns && turns !== "-") usageParts.push(turnsCap ? `${turns} of ${turnsCap} turns` : `${turns} turns`);
-  out.push(label("usage so far") + (usageParts.length ? usageParts.join(" · ") : "usage not recorded"));
+  out.push(currentRunLabel("usage so far") + (usageParts.length ? usageParts.join(" · ") : "usage not recorded"));
   return out.join("\n");
 }
 

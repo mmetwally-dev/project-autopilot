@@ -145,13 +145,13 @@ const POLICY = {
   const has = (name, frag) => check(`example: ${name}`, report.includes(frag), frag);
 
   has("current run header", "=== CURRENT RUN ===");
-  has("stage line", "stage:   IMPLEMENTATION · Phase 2/3 · attempt 2");
-  has("run line", "run:     17-implementer-db4d1811");
-  has("role line", "role:    implementer · task T2.3 · model muse-spark-1.3 · session 1 of 6");
-  has("status line", "status:  RUNNING · pid 81234 (alive)");
-  has("started line", "started: 2026-09-29 01:41:55 · elapsed 00:06:35");
-  has("last activity line", "last activity: 2026-09-29 01:48:22 (8s ago)");
-  has("usage line", "usage so far: ~52.0K tokens · context ~27.3K of 500K cap · 9 turns");
+  has("stage line", "stage:          IMPLEMENTATION · Phase 2/3 · attempt 2");
+  has("run line", "run:            17-implementer-db4d1811");
+  has("role line", "role:           implementer · task T2.3 · model muse-spark-1.3 · session 1 of 6");
+  has("status line", "status:         RUNNING · pid 81234 (alive)");
+  has("started line", "started:        2026-09-29 01:41:55 · elapsed 00:06:35");
+  has("last activity line", "last activity:  2026-09-29 01:48:22 (8s ago)");
+  has("usage line", "usage so far:   ~52.0K tokens · context ~27.3K of 500K cap · 9 turns");
 
   has("live header", "=== LIVE PROGRESS (last 10 actions) ===");
   has("live PREP", "2026-09-29 01:41:55  PREP    role=implementer · phase=2 · TASK=T2.3 · attempt=2 · pre-run snapshot started");
@@ -201,17 +201,17 @@ const POLICY = {
   check("gate: current is the gate", model.current && model.current.kind === "gate", model.current);
 
   has("current header", "=== CURRENT RUN ===");
-  has("stage line", "stage:   IMPLEMENTATION · Phase 2/3 · attempt 2");
-  has("run line", "run:     GATE (orchestrator full suite, no agent)");
-  has("command line", "command: node scripts/test-all.mjs --skip-live");
-  has("status line", "status:  RUNNING · pid 82011 (alive)");
-  has("started line", "started: 2026-09-29 02:01:10 · elapsed 00:07:42");
-  has("progress line", "progress: 96/204 runs · 96 passed · 0 failed");
+  has("stage line", "stage:          IMPLEMENTATION · Phase 2/3 · attempt 2");
+  has("run line", "run:            GATE (orchestrator full suite, no agent)");
+  has("command line", "command:        node scripts/test-all.mjs --skip-live");
+  has("status line", "status:         RUNNING · pid 82011 (alive)");
+  has("started line", "started:        2026-09-29 02:01:10 · elapsed 00:07:42");
+  has("progress line", "progress:       96/204 runs · 96 passed · 0 failed");
   has("live gate start", "GATE    orchestrator started the full test suite · node scripts/test-all.mjs --skip-live · 185 scripts in 204 runs");
   has("live gate progress", "GATE    full test suite 96/204 runs · 0 failed");
 
   check("gate: no raw JSON", !/\{\s*"/.test(report), report);
-  check("gate: no run role line", !report.includes("role:    GATE"), report);
+  check("gate: no run role line", !report.includes("role:           GATE"), report);
 }
 
 // ── 3. live-only: a completed mission shows no CURRENT RUN ──────────────────
@@ -244,8 +244,8 @@ const POLICY = {
   const running = run({ id: "01-implementer-abc", role: "implementer", phase: "1", attempt: "1", taskRef: "T1.1", status: "running", started_at: "2026-09-29T01:00:00+03:00" });
   const model = buildReportModel({ state, runs: [running], phases: [{ number: 1, name: "Phase 1", tasks: [] }], policy: {}, now: "2026-09-29T01:05:00+03:00" });
   const current = renderCurrentRun(model);
-  check("degrade: usage not recorded", current.includes("usage so far: usage not recorded"), current);
-  check("degrade: no crash, status running", current.includes("status:  RUNNING"), current);
+  check("degrade: usage not recorded", current.includes("usage so far:   usage not recorded"), current);
+  check("degrade: no crash, status running", current.includes("status:         RUNNING"), current);
 }
 
 // ── 5. mission 095 fixture (backlog #6) ─────────────────────────────────────

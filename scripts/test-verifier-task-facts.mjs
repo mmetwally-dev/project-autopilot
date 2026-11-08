@@ -19,9 +19,9 @@ const verifierReqs = tasks => buildRoleRequirements({
 });
 const hasBrowser = reqs => reqs.some(r => String(typeof r === "string" ? r : r.id).startsWith("browser."));
 
-const uiLine = "- [ ] **1.1** Build the patient form in `app/patients/form.tsx` — accept: form renders; verify: npm test -- patients";
+const uiLine = "- [ ] **1.1** Build the order form in `app/orders/form.tsx` — accept: form renders; verify: npm test -- orders";
 const pwLine = "- [ ] **1.2** Add checkout flow — accept: flow works; verify: npx playwright test checkout";
-const backendLine = "- [ ] **1.3** Add repository in src/services/patient.ts — accept: saves; verify: npm test -- patient";
+const backendLine = "- [ ] **1.3** Add repository in src/services/order.ts — accept: saves; verify: npm test -- order";
 
 const repo = fs.mkdtempSync(path.join(os.tmpdir(), "ap-verifier-facts-"));
 try {

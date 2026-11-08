@@ -187,9 +187,9 @@ const VITEST_ENV_OUTPUT = [
   " ❯ tests/integration/server.test.ts (2 tests | 2 failed) 12ms",
   "   → fetch failed",
   "",
-  " FAIL  tests/unit/patient-db.test.ts > loads a patient",
+  " FAIL  tests/unit/orders-db.test.ts > loads an order",
   "Error: Environment variable not found: DATABASE_URL",
-  " ❯ tests/unit/patient-db.test.ts (1 test | 1 failed) 5ms",
+  " ❯ tests/unit/orders-db.test.ts (1 test | 1 failed) 5ms",
   "   → Environment variable not found: DATABASE_URL",
   "",
   " Test Files  2 failed (2)"
@@ -229,7 +229,7 @@ await runCase("vitest environment failures are excluded", async ({ binDir, makeR
   const out = ok("vitest env", result);
   const tests = readTests(repo);
   checkEqual("saved vitest exclusion command", tests.gate_commands,
-    ['node test-run.mjs --exclude "tests/integration/server.test.ts" --exclude "tests/unit/patient-db.test.ts"']);
+    ['node test-run.mjs --exclude "tests/integration/server.test.ts" --exclude "tests/unit/orders-db.test.ts"']);
   checkEqual("original command recorded", tests.not_run_in_missions_original_command, "node test-run.mjs");
   const list = tests.not_run_in_missions ?? [];
   checkEqual("two not-run groups", list.map((entry) => entry.reason), [
@@ -238,7 +238,7 @@ await runCase("vitest environment failures are excluded", async ({ binDir, makeR
   ]);
   checkEqual("server group files", list[0]?.files, ["tests/integration/server.test.ts"]);
   checkEqual("server manual command", list[0]?.command, 'node test-run.mjs "tests/integration/server.test.ts"');
-  checkEqual("env group files", list[1]?.files, ["tests/unit/patient-db.test.ts"]);
+  checkEqual("env group files", list[1]?.files, ["tests/unit/orders-db.test.ts"]);
   check("output shows the server reason", out.includes("server not reachable on 127.0.0.1:3000"), out.slice(-2500));
   check("output shows the env reason", out.includes("missing environment variable DATABASE_URL"), out.slice(-2500));
   check("output shows the saved gate command", out.includes('--exclude "tests/integration/server.test.ts"'), out.slice(-2500));

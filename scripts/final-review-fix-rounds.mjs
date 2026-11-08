@@ -30,6 +30,14 @@
 import {
   resolveFinalReviewFixRounds,
   FINAL_REVIEW_FIX_ROUNDS_DEFAULT,
+  consumeContinuation,
+  clearTaskContinuation,
+  recordRolloverDeadEnd,
+  readRolloverDeadEnds,
+  clearRolloverDeadEnds,
+  deadEndTail,
+  resolveHandoffMaxChars,
+  capUnitLabel,
 } from "./per-task-budget.mjs";
 import {
   recordFindingTasks as defaultRecordFindingTasks,
@@ -205,6 +213,22 @@ export function isReviewerNoVerdict(review) {
   } catch { return false; }
 }
 
+// Backlog #13: what a mission-final review session leads to. A session that
+// ended capped or with an INCOMPLETE signal (`incomplete`, or decision
+// INCOMPLETE) never reaches the fix rounds: it continues while the
+// continuation allowance lasts, takes one verdict-only turn when the hand-off
+// note says only the gate is left, and otherwise escalates. Everything else
+// is a PASS or goes to the fix rounds (FAIL, or no verdict at all — the
+// reviewer-failure path inside them retries only the reviewer).
+export function finalReviewNextStep({status, decision, capped, incomplete, allowanceLeft, onlyGateLeft} = {}) {
+  const isIncomplete = Boolean(capped || incomplete || decision === "INCOMPLETE");
+  if (isIncomplete) {
+    if (allowanceLeft) return "continue";
+    return onlyGateLeft ? "verdict_only" : "escalate";
+  }
+  return status === "completed" && decision === "PASS" ? "pass" : "fix_rounds";
+}
+
 // Consume one fix round: increment the durable counter and persist it via
 // the injected `saveState` (a no-op default for pure unit use). Returns
 // `{allowed, used, limit}` — `allowed` is true while the consumed count is
@@ -219,6 +243,39 @@ export function consumeFinalReviewFixRound(state, policy = {}, {saveState = null
     try { saveState(); } catch { /* persistence is best-effort here; the counter is already in state */ }
   }
   return {allowed: used <= limit, used, limit};
+}
+
+// Capped fix-pass session loop (backlog #14): a fix-round implementer launch
+// runs under the same per-session caps as a phase-task implementer session
+// (the caller launches with `capEnabled:true` and `contScope: scopeKey`). When
+// a session ends capped, one continuation generation is consumed on the same
+// allowance as phase tasks, the dead end is recorded under `scopeKey`, and
+// `launch` runs again so the next session continues (its prompt carries the
+// dead ends and the hand-off note). When the allowance runs out the round ends
+// as a failed fix pass — the caller's fix-round accounting is unchanged.
+// `launch({deadEnds})` returns the relay result.
+export async function runCappedFixSessions({state, policy = {}, scopeKey, launch, log = console.log}) {
+  try {
+    for (;;) {
+      const fix = await launch({deadEnds: readRolloverDeadEnds(state, scopeKey)});
+      if (!fix?.capped) return fix;
+      const cont = consumeContinuation(state, policy, scopeKey);
+      const files = Array.isArray(fix.touchedFiles) ? fix.touchedFiles : [];
+      recordRolloverDeadEnd(state, scopeKey, {
+        generation: cont.used, reason: fix.capped.type, used: fix.capped.used, limit: fix.capped.limit,
+        tail: deadEndTail({files, outputTail: fix.workDigest ? fix.workDigest : "(no decoded activity)", maxChars: resolveHandoffMaxChars(policy)}),
+        maxChars: resolveHandoffMaxChars(policy),
+      });
+      if (!cont.allowed) {
+        log(`Final-review fix pass ${scopeKey} did not converge after ${cont.used} capped generations (${fix.capped.type} cap ${fix.capped.used}/${fix.capped.limit}); ending the fix round as failed.`);
+        return {...fix, status: "failed"};
+      }
+      log(`Final-review fix pass ${scopeKey} hit the ${fix.capped.type} cap (${fix.capped.used}/${fix.capped.limit} ${capUnitLabel(fix.capped.type)}); continuing as session ${cont.used + 1} of ${cont.limit + 1}.`);
+    }
+  } finally {
+    clearTaskContinuation(state, scopeKey);
+    clearRolloverDeadEnds(state, scopeKey);
+  }
 }
 
 // Thin wrapper so call sites import one module for the fix brief. Findings

@@ -175,8 +175,8 @@ async function main() {
 
     // retries section
     check('retries.plan_revisions', config.retries.plan_revisions === 8);
-    check('retries.implementation', config.retries.implementation === 4);
-    check('retries.verification', config.retries.verification === 4);
+    check('retries.implementation', config.retries.implementation === 5);
+    check('retries.verification', config.retries.verification === 5);
     check('retries.final_review_fix_rounds', config.retries.final_review_fix_rounds === 2);
     check('retries.cli_errors', config.retries.cli_errors === 3);
     check('retries.infrastructure', config.retries.infrastructure === 3);

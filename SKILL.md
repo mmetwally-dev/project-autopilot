@@ -106,7 +106,12 @@ and `ap watch` do not exist; the WATCH-REPORT is the status view.
   against its own evidence, never a group summary.
 - **Final review.** The code reviewer reads the whole mission change and, when a
   spec exists (`SPEC.md` / SpecKit `spec.md`), checks every FR against the code; up to
-  `retries.final_review_fix_rounds` fix rounds. Success prints
+  `retries.final_review_fix_rounds` fix rounds. A final-review session that hits
+  its cap continues like a phase review (hand-off note, same continuation
+  allowance) and only stops the mission when the allowance runs out; it never
+  sends "not checked" items to the fix rounds. Fix-round implementer sessions
+  run with the same per-session caps and continuation as phase tasks. Resuming
+  after every phase passed goes straight back to the final review. Success prints
   `ALL WORK COMPLETE — HUMAN COMMIT REQUIRED`.
 - **Escalation.** When a budget is spent, a task stops progressing, or a guard
   trips, the mission saves state and stops with `STOP — human intervention
@@ -118,8 +123,12 @@ and `ap watch` do not exist; the WATCH-REPORT is the status view.
   `retries.escalate_after_not_fixed` times (default 2). Continuation sessions
   that change no file stop after `retries.no_progress_sessions` (default 2),
   after one session on the implementer's `escalation_model` (once per fix
-  round), if set. Network tests the task itself env-gates are reviewed
-  statically and listed in MANUAL-CHECKS.md, not failed for needing the network. A
+  round), if set. When a phase's implementation or verification budget
+  (`retries.implementation` / `retries.verification`, default 5) has 2 attempts
+  left, the implementer switches to its `escalation_model` and stays on it until
+  the phase passes or the budget runs out (no counter reset). Network tests the task itself env-gates are reviewed
+  statically and listed in MANUAL-CHECKS.md, not failed for needing the network;
+  verifier network/browser checks it could not run go there too. A
   session silent for `time_limits.silent_run_minutes` (default 10) is stopped as
   `IDLE_HANG`; an opencode rate-limit storm as `RATE_LIMITED`; both consume
   `infrastructureRetryBudget` like a timeout.

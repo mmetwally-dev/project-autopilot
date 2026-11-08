@@ -74,7 +74,8 @@ function topArgs(call) {
 const sig = /function review\(([^)]*)\)/.exec(src)[1].split(",").map(x => x.split("=")[0].trim());
 assert.equal(sig[9], "roundKey");
 const keyed = callArgs(src, 'review("code_reviewer",').filter(c => c.includes("codeReviewScopeKey"));
-assert.ok(keyed.length >= 5, "keyed code_reviewer calls found: " + keyed.length);
+// All mission-final reviews go through runFinalReviewSessions (one keyed call; backlog #13).
+assert.ok(keyed.length >= 3, "keyed code_reviewer calls found: " + keyed.length);
 for (const c of keyed) {
   const a = topArgs(c);
   assert.ok(a.length <= sig.length, "too many args: " + a.length);

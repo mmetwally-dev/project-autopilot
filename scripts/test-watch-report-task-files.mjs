@@ -95,7 +95,7 @@ const report = renderReport(model, { stamp: "2026-10-26 09:35:00" });
 const headers = report.split("\n").filter((line) => line.trim().split(/\s+/)[0] === "ROLE" && line.includes("MODEL"));
 check("report has planning and implementation tables", headers.length >= 2, { count: headers.length });
 
-const words = ["ROLE", "MODEL", "TASK", "STATUS", "TURNS", "CONTEXT", "TOKENS", "STARTED", "DURATION", "NOTE"];
+const words = ["ROLE", "MODEL", "TASK", "STATUS", "TURNS", "CONTEXT", "TOKENS", "DURATION", "STARTED", "NOTE"];
 const offsets = Object.fromEntries(words.map((w) => [w, headers[0].indexOf(w)]));
 
 function getCell(line, colName) {

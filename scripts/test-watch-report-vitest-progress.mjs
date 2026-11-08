@@ -138,13 +138,13 @@ const row = (text, needle) => lines(text).find((l) => l.includes(needle)) || "";
   });
 
   const text = renderCurrentRun(model);
-  check("with previous total: progress line", text.includes("progress: 113/~188 test files · 111 passed · 1 failed · 1 skipped"), row(text, "progress:"));
+  check("with previous total: progress line", text.includes("progress:       113/~188 test files · 111 passed · 1 failed · 1 skipped"), row(text, "progress:"));
   check("with previous total: note line", text.includes("(~188 = total from the last gate, phase 10 attempt 14)"), text);
-  check("with previous total: note line indented", row(text, "(~188").startsWith("          (~188"));
+  check("with previous total: note line indented", row(text, "(~188").startsWith("                (~188"));
   check("with previous total: last line", text.includes("last: ✓ packages/db/src/shop-orders.restore-sql.test.ts (12 tests)"), row(text, "last:"));
-  check("with previous total: last line indented", row(text, "last:").startsWith("          last:"));
+  check("with previous total: last line indented", row(text, "last:").startsWith("                last:"));
   check("with previous total: failed line", text.includes("failed: × packages/api/src/auth.test.ts"), row(text, "failed:"));
-  check("with previous total: failed line indented", row(text, "failed:").startsWith("          failed:"));
+  check("with previous total: failed line indented", row(text, "failed:").startsWith("                failed:"));
 }
 
 // ── 3. Real renderer: mid-run WITHOUT previous total (first gate) ────────────
@@ -166,7 +166,7 @@ const row = (text, needle) => lines(text).find((l) => l.includes(needle)) || "";
   });
 
   const text = renderCurrentRun(model);
-  check("no previous total: progress line", text.includes("progress: 3 test files done · 1 passed · 1 failed · 1 skipped (total unknown yet)"), row(text, "progress:"));
+  check("no previous total: progress line", text.includes("progress:       3 test files done · 1 passed · 1 failed · 1 skipped (total unknown yet)"), row(text, "progress:"));
   check("no previous total: no ~ total note", !text.includes("total from the last gate"), text);
   check("no previous total: last line", text.includes("last: ↓ packages/legacy/src/skip.test.ts (1 test)"), row(text, "last:"));
   check("no previous total: failed line", text.includes("failed: × packages/api/src/bad.test.ts"), row(text, "failed:"));
@@ -215,9 +215,9 @@ const row = (text, needle) => lines(text).find((l) => l.includes(needle)) || "";
   });
 
   const text = renderCurrentRun(model);
-  check("finished summary: progress line", text.includes("progress: 188/188 test files · 183 passed · 0 failed · 5 skipped"), row(text, "progress:"));
+  check("finished summary: progress line", text.includes("progress:       188/188 test files · 183 passed · 0 failed · 5 skipped"), row(text, "progress:"));
   check("finished summary: tests line", text.includes("tests: 1749 passed · 20 skipped (1769)"), row(text, "tests:"));
-  check("finished summary: tests line indented", row(text, "tests:").startsWith("          tests:"));
+  check("finished summary: tests line indented", row(text, "tests:").startsWith("                tests:"));
 }
 
 // ── 6. Jest PASS/FAIL rendering ─────────────────────────────────────────────
@@ -238,7 +238,7 @@ const row = (text, needle) => lines(text).find((l) => l.includes(needle)) || "";
   });
 
   const text = renderCurrentRun(model);
-  check("jest: progress line", text.includes("progress: 2 test files done · 1 passed · 1 failed · 0 skipped (total unknown yet)"), row(text, "progress:"));
+  check("jest: progress line", text.includes("progress:       2 test files done · 1 passed · 1 failed · 0 skipped (total unknown yet)"), row(text, "progress:"));
   check("jest: failed line", text.includes("failed: × src/api.test.js"), row(text, "failed:"));
   check("jest: last line shows mark", text.includes("last: × src/api.test.js"), row(text, "last:"));
 }
@@ -279,7 +279,7 @@ const row = (text, needle) => lines(text).find((l) => l.includes(needle)) || "";
   });
 
   const text = renderCurrentRun(model);
-  check("test-all [n/total] keeps old progress line", text.includes("progress: 73/365 files · 72 passed · 1 failed"), row(text, "progress:"));
+  check("test-all [n/total] keeps old progress line", text.includes("progress:       73/365 files · 72 passed · 1 failed"), row(text, "progress:"));
   check("test-all does not render vitest note line", !text.includes("total from the last gate"), text);
 }
 
@@ -332,7 +332,7 @@ const row = (text, needle) => lines(text).find((l) => l.includes(needle)) || "";
 
   const report = renderWatchReport(tmpRepo, "002", { now: "2026-11-07T10:05:00+00:00" });
   check("e2e report carries previous total note", report.includes("(~188 = total from the last gate, phase 10 attempt 14)"), report);
-  check("e2e report carries mid-run progress", report.includes("progress: 2/~188 test files · 1 passed · 1 failed · 0 skipped"), report);
+  check("e2e report carries mid-run progress", report.includes("progress:       2/~188 test files · 1 passed · 1 failed · 0 skipped"), report);
   check("e2e report carries last file", report.includes("last: × packages/api/src/auth.test.ts (1 test)"), report);
   check("e2e report carries failed file", report.includes("failed: × packages/api/src/auth.test.ts"), report);
 

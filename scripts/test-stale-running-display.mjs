@@ -46,7 +46,7 @@ assert.ok(staleRow && /\bINTERRUPTED\b/.test(staleRow) && staleRow.includes("orc
 assert.ok(!/01-implementer\b.*?\bRUNNING\b/.test(report), "row must not render RUNNING");
 assert.ok(!report.includes("=== CURRENT RUN ==="), "a stale run must not be CURRENT");
 const liveReport = renderWatchReport(repo, null, { isOwnerAlive: live });
-assert.ok(liveReport.includes("=== CURRENT RUN ===") && /status:  RUNNING\b/.test(liveReport), "live owner -> running");
+assert.ok(liveReport.includes("=== CURRENT RUN ===") && /status: +RUNNING\b/.test(liveReport), "live owner -> running");
 assert.match(staleRunningNote(repo, null, { isOwnerAlive: dead }), /interrupted \(orchestrator not running\)/);
 assert.equal(staleRunningNote(repo, null, { isOwnerAlive: live }), null);
 assert.equal(fs.readFileSync(statusFile, "utf8"), before);

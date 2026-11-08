@@ -160,10 +160,10 @@ assert.equal(state.failureBudgets["adapterRetryBudget:adapter:codex:verifier"], 
 
 // Zero-aware failure budgets: each configured key accepts 0 as a real limit,
 // so the first failure is not retried, while absent keys keep the built-in
-// default (implementation/verification 4, cli_errors/infrastructure 3).
+// default (implementation/verification 5, cli_errors/infrastructure 3).
 for (const [label, failureClass, domain, key, absentDefault] of [
-  ["implementation", "IMPLEMENTATION_REJECTED", "implementation", "implementationFailureBudget", 4],
-  ["verification", "VERIFICATION_REJECTED", "verification", "verificationFailureBudget", 4],
+  ["implementation", "IMPLEMENTATION_REJECTED", "implementation", "implementationFailureBudget", 5],
+  ["verification", "VERIFICATION_REJECTED", "verification", "verificationFailureBudget", 5],
   ["cli_errors", "PROCESS_EXIT_NONZERO", "adapter", "adapterRetryBudget", 3],
   ["infrastructure", "TIMEOUT", "infrastructure", "infrastructureRetryBudget", 3],
 ]) {

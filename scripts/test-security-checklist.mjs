@@ -183,13 +183,14 @@ function genericOf(section) {
     missionFinalSites.length === 4, missionFinalSites.length - 1);
   check("Mission-final wiring: every MISSION_FINAL site passes repoRoot:repo",
     missionFinalSites.length === 4 && missionFinalSites.slice(1).every((seg) => seg.slice(0, 600).includes("repoRoot:repo")), false);
-  // Both SpecKit mission-final prompts append the helper with the shared line.
+  // The phase prompt plus the shared SpecKit mission-final prompt builder
+  // (speckitFinalPrompt, used by the first review and every re-review; backlog #13).
   const helperUses = autopilotSrc.match(/buildSecurityChecklistSection\(repo\)/g) || [];
-  check("Mission-final wiring: buildSecurityChecklistSection(repo) in phase + both mission-final prompts",
-    helperUses.length === 3, helperUses.length);
+  check("Mission-final wiring: buildSecurityChecklistSection(repo) in phase + the shared mission-final prompt",
+    helperUses.length === 2, helperUses.length);
   const lineUses = autopilotSrc.match(/\$\{MISSION_FINAL_SECURITY_LINE\}/g) || [];
-  check("Mission-final wiring: both SpecKit mission-final prompts use MISSION_FINAL_SECURITY_LINE",
-    lineUses.length === 2, lineUses.length);
+  check("Mission-final wiring: the shared SpecKit mission-final prompt uses MISSION_FINAL_SECURITY_LINE",
+    lineUses.length === 1, lineUses.length);
   check("Mission-final wiring: no duplicate whole-mission-diff literal in autopilot.mjs",
     !autopilotSrc.includes(MISSION_FINAL_SECURITY_LINE), false);
   // Phase prompts untouched: the phase append keeps its exact form with no

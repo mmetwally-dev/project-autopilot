@@ -28,11 +28,11 @@ function check(name, condition, detail) {
 // 1. isBrowserCheckFinding unit tests
 // ─────────────────────────────────────────────────────────────
 {
-  const clinixHubText =
+  const realBrowserText =
     "Settings services page, ServiceFormDialog, DeactivateServiceDialog, OrdersTab: Still not checked in a real browser: there is no approved browser or Playwright command, and the dev server needs a database and network access.";
   check(
     "isBrowserCheckFinding true for exact real-app text",
-    isBrowserCheckFinding(clinixHubText) === true
+    isBrowserCheckFinding(realBrowserText) === true
   );
 
   const prefixedNote = `${BROWSER_CHECK_NOTE_PREFIX} check manual checkout workflows`;
@@ -84,7 +84,7 @@ function check(name, condition, detail) {
 // 2. splitBrowserFindings unit tests
 // ─────────────────────────────────────────────────────────────
 {
-  const clinixHubText =
+  const realBrowserText =
     "Settings services page, ServiceFormDialog, DeactivateServiceDialog, OrdersTab: Still not checked in a real browser: there is no approved browser or Playwright command, and the dev server needs a database and network access.";
   const regularFinding1 =
     "ServiceFormDialog.test.tsx: Both tests pass even without the focus-restore code";
@@ -96,7 +96,7 @@ function check(name, condition, detail) {
     decision: "FAIL",
     findings: [
       regularFinding1,
-      clinixHubText,
+      realBrowserText,
       regularObjFinding,
       prefixedNote,
       browserObjFinding
@@ -113,7 +113,7 @@ function check(name, condition, detail) {
 
   check(
     "splitBrowserFindings isolates browser findings",
-    browser[0] === clinixHubText &&
+    browser[0] === realBrowserText &&
       browser[1] === prefixedNote &&
       browser[2] === browserObjFinding
   );
@@ -124,7 +124,7 @@ function check(name, condition, detail) {
   );
 
   // Direct array input
-  const fromArray = splitBrowserFindings([clinixHubText, regularFinding1]);
+  const fromArray = splitBrowserFindings([realBrowserText, regularFinding1]);
   check(
     "splitBrowserFindings accepts bare array of findings",
     fromArray.browser.length === 1 && fromArray.rest.length === 1
@@ -132,7 +132,7 @@ function check(name, condition, detail) {
 
   // All browser findings
   const allBrowser = splitBrowserFindings({
-    findings: [clinixHubText, prefixedNote]
+    findings: [realBrowserText, prefixedNote]
   });
   check(
     "splitBrowserFindings handles all browser findings (rest empty)",
@@ -269,7 +269,7 @@ function check(name, condition, detail) {
 {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "review-browser-test-"));
   try {
-    const clinixHubText =
+    const realBrowserText =
       "Settings services page, ServiceFormDialog, DeactivateServiceDialog, OrdersTab: Still not checked in a real browser: there is no approved browser or Playwright command, and the dev server needs a database and network access.";
     const regularFinding =
       "ServiceFormDialog.test.tsx: Both tests pass even without the focus-restore code";
@@ -280,7 +280,7 @@ function check(name, condition, detail) {
         status: "completed",
         review: {
           decision: "FAIL",
-          findings: [clinixHubText]
+          findings: [realBrowserText]
         }
       };
 
@@ -304,7 +304,7 @@ function check(name, condition, detail) {
       const manualChecksFile = path.join(tempDir, "MANUAL-CHECKS.md");
       check("scenario A: MANUAL-CHECKS.md created", fs.existsSync(manualChecksFile));
       const contentA = fs.readFileSync(manualChecksFile, "utf8");
-      check("scenario A: MANUAL-CHECKS.md contains clinixHubText", contentA.includes(clinixHubText));
+      check("scenario A: MANUAL-CHECKS.md contains realBrowserText", contentA.includes(realBrowserText));
     }
 
     // Scenario B: Review returned FAIL with mixed findings -> remains FAIL, findings has rest
@@ -313,7 +313,7 @@ function check(name, condition, detail) {
         status: "completed",
         review: {
           decision: "FAIL",
-          findings: [regularFinding, clinixHubText]
+          findings: [regularFinding, realBrowserText]
         }
       };
 

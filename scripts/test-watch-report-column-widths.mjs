@@ -35,7 +35,7 @@ check("report has the planning and implementation tables", headers.length >= 2, 
 check("planning round 1 is planner-only", !model.planning.rounds[0].runs.some((r) => r.role === "plan_reviewer"), model.planning.rounds[0].runs.map((r) => r.role));
 check("a later round holds the plan_reviewer", model.planning.rounds.slice(1).some((round) => round.runs.some((r) => r.role === "plan_reviewer")), model.planning.rounds.map((round) => round.runs.map((r) => r.role)));
 
-const words = ["ROLE", "MODEL", "TASK", "STATUS", "TURNS", "CONTEXT", "TOKENS", "STARTED", "DURATION", "NOTE"];
+const words = ["ROLE", "MODEL", "TASK", "STATUS", "TURNS", "CONTEXT", "TOKENS", "DURATION", "STARTED", "NOTE"];
 const expected = Object.fromEntries(words.map((word) => [word, headers[0].indexOf(word)]));
 headers.forEach((header, i) => {
   for (const word of words) {

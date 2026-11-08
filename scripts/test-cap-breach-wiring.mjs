@@ -68,8 +68,8 @@ check("threading: review() accepts capEnabled and passes to relay",
 check("implementer: GSD loop relayAsync passes capEnabled:true",
   /relayAsync\("implementer"[\s\S]{0,300}?capEnabled:true/.test(src));
 
-check("implementer: Standalone + SpecKit loops relay passes capEnabled:true (2 sites)",
-  count(/relay\("implementer",[^\n]*capEnabled:true/g) === 2);
+check("implementer: Standalone + SpecKit loops and the final-review fix helper relay pass capEnabled:true (3 sites)",
+  count(/relay\("implementer",[^\n]*capEnabled:true/g) === 3);
 
 // ── Wrap-up path: breach triggers the orchestrator fallback, no resume ──
 // Mission 045 (Backlog #46) phase 1: the capped session is NEVER resumed
@@ -119,7 +119,7 @@ check("outcome: breach is observed to progress", /CAP_BREACH \| TYPE=/.test(src)
 // ── Continuation hooks (both per-task implement loops) ──
 check("loops: capped branch in both loops", count(/if\(taskImpl\.capped\)\{/g) === 2);
 check("loops: allowance consumed at all four continuation sites (2 capped + 2 attempted)", count(/consumeContinuation\(s,c\.policy,contScope\)/g) === 4);
-check("loops: dead end recorded at all four continuation sites + standalone code_reviewer capped (031 P4.1) + standalone verifier capped (031 P4.2) + 2 voluntary (031 P4.3) + speckit code_reviewer capped (031 P5.1) + speckit verifier capped (031 P5.2) + 2 speckit voluntary (031 P5.3)", count(/recordRolloverDeadEnd\(s,contScope,/g) === 12);
+check("loops: dead end recorded at all four continuation sites + standalone code_reviewer capped (031 P4.1) + standalone verifier capped (031 P4.2) + 2 voluntary (031 P4.3) + speckit code_reviewer capped (031 P5.1) + speckit verifier capped (031 P5.2) + 2 speckit voluntary (031 P5.3) + final review continuation (#13)", count(/recordRolloverDeadEnd\(s,contScope,/g) === 13);
 check("loops: exhaustion escalates not-converging (both frameworks)",
   src.includes('s.step="standalone_task_not_converging"') && src.includes('s.step="speckit_task_not_converging"'));
 check("loops: cap breach continues the cursor loop (no commit, no failure path)", count(/Task \$\{taskId\} hit the/g) === 2);
@@ -171,7 +171,7 @@ check("wrapup: breach records wrapUp:true + trigger on the capped marker",
   /if\(capBreach\.wrapUp\) result\.capped\.wrapUp=true;/.test(src)
   && /if\(capBreach\.trigger\) result\.capped\.trigger=capBreach\.trigger;/.test(src));
 check("wrapup: cap/wrap-up figures worded via the capUnitLabel helper (turns names turns, tokens keep raw context tokens)",
-  /capUnitLabel,/.test(src) && /from "\.\/per-task-budget\.mjs"/.test(src) && count(/capUnitLabel\(\w+\.capped\.type\)/g) === 13 && capUnitLabel("turns") === "turns" && capUnitLabel("tokens") === "raw context tokens" && /CAP_BREACH \| TYPE=/.test(src));
+  /capUnitLabel,/.test(src) && /from "\.\/per-task-budget\.mjs"/.test(src) && count(/capUnitLabel\(\w+\.capped\.type\)/g) === 14 && capUnitLabel("turns") === "turns" && capUnitLabel("tokens") === "raw context tokens" && /CAP_BREACH \| TYPE=/.test(src));
 check("wrapup: fallback note is built from this session's changes plus the session work digest",
   /changedFilesStat\(cwd,\{paths:sessionPaths\}\)/.test(src)
   && /buildOrchestratorFallbackNote\(taskRef,events,role\.adapter,repo,diffStat,capBreach,sessionPaths\)/.test(src)
@@ -266,12 +266,12 @@ check("reset: continuation scope resolution accepts all three forms",
   /function resetContinuationScope\(s,scopeArg\)/.test(src)
   && /continuationBudgetKey\(scope\)/.test(src)
   && /lastContinuation\?\.scope/.test(src));
-check("reset: queued continuation reset applies at all four continuation decisions + standalone code_reviewer capped (031 P4.1) + standalone verifier capped (031 P4.2) + 2 voluntary P4.3 + speckit code_reviewer capped (031 P5.1) + speckit verifier capped (031 P5.2) + 2 speckit voluntary P5.3 + standalone planner capped (031 P6.2) + standalone planner voluntary (031 P6b.1) + 2 standalone plan_reviewer capped (031 P7.1) + standalone plan_reviewer voluntary (031 P7b.1)",
-  count(/maybeApplyPendingContinuationReset\(s,contScope\);/g) === 19);
+check("reset: queued continuation reset applies at all four continuation decisions + standalone code_reviewer capped (031 P4.1) + standalone verifier capped (031 P4.2) + 2 voluntary P4.3 + speckit code_reviewer capped (031 P5.1) + speckit verifier capped (031 P5.2) + 2 speckit voluntary P5.3 + standalone planner capped (031 P6.2) + standalone planner voluntary (031 P6b.1) + 2 standalone plan_reviewer capped (031 P7.1) + standalone plan_reviewer voluntary (031 P7b.1) + final review continuation (#13)",
+  count(/maybeApplyPendingContinuationReset\(s,contScope\);/g) === 20);
 check("reset: escalation records the continuation for bare `ap reset` (all four sites)",
   count(/recordLastContinuation\(s,\{contScope,taskId,missionName:(mission|missionIdentity),taskRef:taskDisplayRef\(phaseTasks\[taskIndex\],taskIndex\)\}\)/g) === 4);
 check("reset: every not-converging message ends with the exact resume command",
-  count(/Resume: ap reset --scope /g) === 26); // 4 not-converging sites + standalone code_reviewer capped (031 P4.1) + standalone verifier capped (031 P4.2) + 2 voluntary P4.3 + speckit code_reviewer capped (031 P5.1) + speckit verifier capped (031 P5.2) + 2 speckit voluntary P5.3 + standalone planner capped (031 P6.2) + standalone planner voluntary (031 P6b.1) + 2 standalone plan_reviewer capped (031 P7.1) + standalone plan_reviewer voluntary (031 P7b.1) + the shared no-progress stop (#32) + planner no-progress stop (031 P6b.2) + 5 standalone spec-stage sites (spec planner capped + incomplete, spec reviewer capped x2 + incomplete) (#7)
+  count(/Resume: ap reset --scope /g) === 27); // 4 not-converging sites + standalone code_reviewer capped (031 P4.1) + standalone verifier capped (031 P4.2) + 2 voluntary P4.3 + speckit code_reviewer capped (031 P5.1) + speckit verifier capped (031 P5.2) + 2 speckit voluntary P5.3 + standalone planner capped (031 P6.2) + standalone planner voluntary (031 P6b.1) + 2 standalone plan_reviewer capped (031 P7.1) + standalone plan_reviewer voluntary (031 P7b.1) + the shared no-progress stop (#32) + planner no-progress stop (031 P6b.2) + 5 standalone spec-stage sites (spec planner capped + incomplete, spec reviewer capped x2 + incomplete) (#7) + final review (#13)
 
 // ── Backlog #32: no-progress stop + note-cited code in the brief ──
 check("no-progress: checked at all four continuation decisions, after the allowance check (both loops)",
@@ -333,21 +333,21 @@ check("budgets: continuation consumed via the independent ledger module",
 // ── Mission 031 phase 3 task 3.5: INCOMPLETE-as-FAIL (no continuation) ──
 check("incomplete: remaining final-review paths name INCOMPLETE-as-FAIL explicitly",
   src.includes("INCOMPLETE-as-FAIL (no continuation): gsd-plan-final-review")
-  && src.includes("INCOMPLETE-as-FAIL (no continuation): gsd-loop-final-review")
-  && src.includes("INCOMPLETE-as-FAIL (no continuation): standalone-early-final-review")
-  && src.includes("INCOMPLETE-as-FAIL (no continuation): standalone-final-review")
-  && src.includes("INCOMPLETE-as-FAIL (no continuation): speckit-final-review"));
+  && src.includes("INCOMPLETE-as-FAIL (no continuation): gsd-loop-final-review"));
 check("incomplete: planning review paths now consume continuation instead of INCOMPLETE-as-FAIL",
   !src.includes("INCOMPLETE-as-FAIL (no continuation): speckit-gate-initial-review")
   && !src.includes("INCOMPLETE-as-FAIL (no continuation): speckit-gate-re-review")
-  && !src.includes("INCOMPLETE-as-FAIL (no continuation): existing-planning-review"));
+  && !src.includes("INCOMPLETE-as-FAIL (no continuation): existing-planning-review")
+  && !src.includes("INCOMPLETE-as-FAIL (no continuation): standalone-early-final-review")
+  && !src.includes("INCOMPLETE-as-FAIL (no continuation): standalone-final-review")
+  && !src.includes("INCOMPLETE-as-FAIL (no continuation): speckit-final-review"));
 {
   const parts = src.split("INCOMPLETE-as-FAIL (no continuation)").slice(1);
-  check("incomplete: no continuation consumed at INCOMPLETE-as-FAIL sites (5 sites)",
-    parts.length === 5 && parts.every((p) => !p.slice(0, 600).includes("consumeContinuation")),
+  check("incomplete: no continuation consumed at INCOMPLETE-as-FAIL sites (2 sites)",
+    parts.length === 2 && parts.every((p) => !p.slice(0, 600).includes("consumeContinuation")),
     parts.length);
   check("incomplete: failure budget unchanged at INCOMPLETE-as-FAIL sites",
-    parts.length === 5 && parts.every((p) => !p.slice(0, 600).includes("recordFailureBudget(")),
+    parts.length === 2 && parts.every((p) => !p.slice(0, 600).includes("recordFailureBudget(")),
     parts.length);
 }
 
@@ -413,7 +413,7 @@ check("031 P4.1: standalone code_reviewer capped branch exists (1 site standalon
   check("031 P5.3: voluntary incomplete stop consumes continuation at both review roles (rv + vv sites, speckit only)",
     (speckitPart.match(/parseIncompleteSignal\(rv\.review \?\? rv\)/g) ?? []).length === 1
     && (speckitPart.match(/parseIncompleteSignal\(vv\.review \?\? vv\)/g) ?? []).length === 1
-    && (standalonePart.match(/parseIncompleteSignal\(rv\.review \?\? rv\)/g) ?? []).length === 1
+    && (standalonePart.match(/parseIncompleteSignal\(rv\.review \?\? rv\)/g) ?? []).length >= 1
     && (standalonePart.match(/parseIncompleteSignal\(vv\.review \?\? vv\)/g) ?? []).length === 1);
   check("031 P5.3: speckit voluntary stops record a dead end with reason incomplete (reviewer + verifier sites)",
     (speckitPart.match(/reason:"incomplete",used:null,limit:null,tail:deadEndTail\(\{summary:`(Code review|Verification) incomplete/g) ?? []).length === 2);
@@ -829,12 +829,12 @@ check("031 P4.5: wrap-up note path stays the shared mission handoff path",
 // plus 5 standalone spec-stage sites (#7)). The task text
 // says "4 planning sites (capped + incomplete per role)"; the 5th is the
 // plan_reviewer pre-retry capped site already pinned in P7.1.
-check("031 P10.3: 12 consumeContinuation call sites total (4 implementer + 4 code_reviewer + 4 verifier)",
-  count(/consumeContinuation\(s,c\.policy,contScope/g) === 12);
+check("031 P10.3: 13 consumeContinuation call sites total (4 implementer + 5 code_reviewer + 4 verifier)",
+  count(/consumeContinuation\(s,c\.policy,contScope/g) === 13);
 check("031 P10.3: 4 implementer sites use the bare allowance form",
   count(/consumeContinuation\(s,c\.policy,contScope\)/g) === 4);
-check("031 P10.3: 4 code_reviewer sites pass explicit continuationAllowance",
-  count(/consumeContinuation\(s,c\.policy,contScope,resolvePerRoleLimits\('code_reviewer',c\.policy\)\.continuationAllowance\)/g) === 4);
+check("031 P10.3: 5 code_reviewer sites pass explicit continuationAllowance",
+  count(/consumeContinuation\(s,c\.policy,contScope,resolvePerRoleLimits\(["']code_reviewer["'],c\.policy\)\.continuationAllowance\)/g) === 5);
 check("031 P10.3: 4 verifier sites pass explicit continuationAllowance",
   count(/consumeContinuation\(s,c\.policy,contScope,resolvePerRoleLimits\('verifier',c\.policy\)\.continuationAllowance\)/g) === 4);
 check("031 P10.3: 12 handlePlanningContinuation call sites total (planner 2 + plan_reviewer 3 + 2 shared helpers + 5 standalone spec-stage sites (#7))",
@@ -924,10 +924,11 @@ check("031 P10.3: plan_reviewer capped x2 (pre/post-retry) + incomplete x1 plann
     reminderCall(/const reviewRef=reviewTaskRef\(s,speckitPhaseFeedbackKey/g, 0, /review\("code_reviewer"/, "missionIdentity", "reviewRef", 1200));
   check("backlog #62: speckit verifier relayAsync() appends the reminder under verifyRef",
     reminderCall(/const verifyRef=allPhaseTaskRef\(phaseTasks\);/g, 1, /relayAsync\("verifier"/, "missionIdentity", "verifyRef"));
-  const finalCalls = [...src.matchAll(/let final=await review\("code_reviewer"/g)];
-  check("backlog #62: mission-final review calls carry no per-task reminder",
+  const finalCalls = [...src.matchAll(/runFinalReviewSessions\(c,s,/g)];
+  check("backlog #13: mission-final review calls carry the per-task reminder via runFinalReviewSessions",
     finalCalls.length >= 2
-    && finalCalls.every((m) => !src.slice(m.index, m.index + 900).includes("readOnlyHandoffNoteReminder")),
+    && src.includes("runFinalReviewSessions")
+    && src.includes("readOnlyHandoffNoteReminder({mission, ref"),
     finalCalls.length);
 }
 

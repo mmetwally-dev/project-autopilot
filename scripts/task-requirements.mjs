@@ -61,12 +61,25 @@ export function isNetworkGatedTestFinding(text) {
   return text.trim().toLowerCase().startsWith(NETWORK_TEST_NOTE_PREFIX.toLowerCase());
 }
 
-const NETWORK_FINDING_FIELDS = ["problem", "finding", "text", "summary"];
+const MANUAL_FINDING_FIELDS = ["problem", "finding", "text", "summary", "message"];
+
+function isBrowserFindingItem(item, text) {
+  if (typeof item === "string") return isBrowserCheckFinding(item);
+  if (item && typeof item === "object") {
+    for (const field of MANUAL_FINDING_FIELDS) {
+      const val = item[field];
+      if (typeof val === "string" && isBrowserCheckFinding(val)) {
+        return true;
+      }
+    }
+  }
+  return isBrowserCheckFinding(text);
+}
 
 function isNetworkGatedFindingItem(item) {
   if (typeof item === "string") return isNetworkGatedTestFinding(item);
   if (item && typeof item === "object") {
-    for (const field of NETWORK_FINDING_FIELDS) {
+    for (const field of MANUAL_FINDING_FIELDS) {
       const val = item[field];
       if (typeof val === "string" && isNetworkGatedTestFinding(val)) {
         return true;
@@ -96,11 +109,70 @@ function splitFindings(review, predicate, key) {
 }
 
 export function splitBrowserFindings(review) {
-  return splitFindings(review, (_item, text) => isBrowserCheckFinding(text), "browser");
+  return splitFindings(review, (item, text) => isBrowserFindingItem(item, text), "browser");
 }
 
 export function splitNetworkTestFindings(review) {
   return splitFindings(review, (item) => isNetworkGatedFindingItem(item), "network");
+}
+
+export function moveManualCheckFindings(review) {
+  if (!review) return { moved: [] };
+  const findings = Array.isArray(review) ? review : review.findings;
+  if (!Array.isArray(findings)) return { moved: [] };
+  const { browser, rest: afterBrowser } = splitBrowserFindings(findings);
+  const { network, rest } = splitNetworkTestFindings(afterBrowser);
+  const moved = [...browser, ...network];
+  if (Array.isArray(review)) {
+    review.length = 0;
+    review.push(...rest);
+  } else {
+    review.findings = rest;
+  }
+  return { moved };
+}
+
+export function manualCheckNoteText(item) {
+  if (typeof item === "string") return item.trim();
+  if (item && typeof item === "object") {
+    for (const field of MANUAL_FINDING_FIELDS) {
+      const val = item[field];
+      if (typeof val === "string" && val.trim()) {
+        return val.trim();
+      }
+    }
+    try {
+      return JSON.stringify(item);
+    } catch {
+      return String(item);
+    }
+  }
+  return String(item || "").trim();
+}
+
+export function filterUnrecordedManualChecks(s, phaseKey, notes) {
+  if (!Array.isArray(notes) || notes.length === 0) return [];
+  if (s) s.recordedManualCheckNotes = s.recordedManualCheckNotes || {};
+  const recorded = s ? (s.recordedManualCheckNotes[phaseKey] = s.recordedManualCheckNotes[phaseKey] || []) : [];
+  const recSet = new Set(recorded.map(x => (typeof x === "string" ? x.trim() : manualCheckNoteText(x))));
+  const fresh = [];
+  for (const item of notes) {
+    const txt = typeof item === "string" ? item.trim() : manualCheckNoteText(item);
+    if (txt && !recSet.has(txt)) {
+      recSet.add(txt);
+      recorded.push(txt);
+      fresh.push(typeof item === "string" ? item : txt);
+    }
+  }
+  return fresh;
+}
+
+export function verifierVerdictAfterManualMove({ decision, remaining, gateOk, evidenceOk }) {
+  const remCount = Array.isArray(remaining) ? remaining.length : Number(remaining || 0);
+  if (decision === "FAIL" && remCount === 0 && gateOk === true && evidenceOk === true) {
+    return "PASS";
+  }
+  return decision;
 }
 
 // Brief text for the verifier when the phase needs a browser.

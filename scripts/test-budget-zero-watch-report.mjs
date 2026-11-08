@@ -26,24 +26,24 @@ const limits = (policy, state = {}, layout = null) =>
     infrastructureRetryBudget: 0,
   };
   check("legacy 0: all four budgets report 0", JSON.stringify(limits({ failure_budgets: zero })) === JSON.stringify([0, 0, 0, 0]), limits({ failure_budgets: zero }));
-  check("absent: defaults stay 4/4/3/3", JSON.stringify(limits({})) === JSON.stringify([4, 4, 3, 3]), limits({}));
-  check("absent policy: defaults stay 4/4/3/3", JSON.stringify(limits(null)) === JSON.stringify([4, 4, 3, 3]), limits(null));
+  check("absent: defaults stay 5/5/3/3", JSON.stringify(limits({})) === JSON.stringify([5, 5, 3, 3]), limits({}));
+  check("absent policy: defaults stay 5/5/3/3", JSON.stringify(limits(null)) === JSON.stringify([5, 5, 3, 3]), limits(null));
   const nulls = {
     implementationFailureBudget: null,
     verificationFailureBudget: null,
     adapterRetryBudget: null,
     infrastructureRetryBudget: null,
   };
-  check("legacy null: defaults stay 4/4/3/3 (null is absent, not 0)",
-    JSON.stringify(limits({ failure_budgets: nulls })) === JSON.stringify([4, 4, 3, 3]), limits({ failure_budgets: nulls }));
+  check("legacy null: defaults stay 5/5/3/3 (null is absent, not 0)",
+    JSON.stringify(limits({ failure_budgets: nulls })) === JSON.stringify([5, 5, 3, 3]), limits({ failure_budgets: nulls }));
   const blanks = {
     implementationFailureBudget: "",
     verificationFailureBudget: "  ",
     adapterRetryBudget: "",
     infrastructureRetryBudget: " ",
   };
-  check("legacy blank: defaults stay 4/4/3/3 (blank is absent, not 0)",
-    JSON.stringify(limits({ failure_budgets: blanks })) === JSON.stringify([4, 4, 3, 3]), limits({ failure_budgets: blanks }));
+  check("legacy blank: defaults stay 5/5/3/3 (blank is absent, not 0)",
+    JSON.stringify(limits({ failure_budgets: blanks })) === JSON.stringify([5, 5, 3, 3]), limits({ failure_budgets: blanks }));
 }
 
 // ── continuation_allowance: 0 still labels the session range ────────────────

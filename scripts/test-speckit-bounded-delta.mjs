@@ -11,7 +11,8 @@ const src=fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathna
 
 // Static: no SpecKit prompt inlines a raw scopedDelta(...) between the markers.
 check("no raw scopedDelta inlined in prompts",!/\$\{scopedDelta\(/.test(src));
-check("speckit sites use shared bounded helper",(src.match(/\$\{speckitBoundedDelta\(/g)||[]).length===4);
+// The SpecKit mission-final first review and re-reviews share speckitFinalPrompt (backlog #13).
+check("speckit sites use shared bounded helper",(src.match(/\$\{speckitBoundedDelta\(/g)||[]).length===3);
 check("helper warns on truncation",/function speckitBoundedDelta[\s\S]{0,300}truncationWarning\(meta\)/.test(src));
 
 const small=[{path:"a.js",text:"diff a\n+1"},{path:"b.js",text:"diff b\n+2"}];

@@ -719,5 +719,5 @@ function positiveInteger(value, fallback) {
 }
 
 function defaultBudget(name) {
-  return name === "implementationFailureBudget" || name === "verificationFailureBudget" ? 4 : 3;
+  return name === "implementationFailureBudget" || name === "verificationFailureBudget" ? 5 : 3;
 }

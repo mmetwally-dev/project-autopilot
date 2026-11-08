@@ -128,8 +128,8 @@ export const DEFAULTS = {
   retries: {
     plan_revisions: 8,
     spec_revisions: 3,
-    implementation: 4,
-    verification: 4,
+    implementation: 5,
+    verification: 5,
     final_review_fix_rounds: FINAL_REVIEW_FIX_ROUNDS_DEFAULT,
     cli_errors: 3,
     infrastructure: 3,

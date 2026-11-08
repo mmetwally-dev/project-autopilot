@@ -199,3 +199,73 @@ export function noProgressDecision({ consecutive, limit, isTaskSite, escalatedFo
   if (isTaskSite && !escalatedForScope) return "escalate";
   return "stop";
 }
+
+// Pure helper for failure-budget escalation: decide whether to switch to the
+// escalation model, keep running on it, or do nothing.
+export function budgetEscalationDecision({ used, limit, hasEscalationModel, alreadySwitched } = {}) {
+  if (alreadySwitched) return "keep";
+  if (!hasEscalationModel) return "none";
+  const remaining = Number(limit) - Number(used);
+  if (Number.isFinite(remaining) && remaining >= 1 && remaining <= 2) return "switch";
+  return "none";
+}
+
+export function formatBudgetEscalationLog({ role = "implementer", from, to, limit, used, budget } = {}) {
+  const remaining = Number(limit) - Number(used);
+  return `escalation: ${role} ${displayModel(from)} → ${displayModel(to)} for the last ${remaining} fix rounds before the budget runs out (${budget} ${used}/${limit})`;
+}
+
+export function budgetEscalationModel(state, config, scopeKey = null) {
+  if (!state?.budgetEscalations || typeof state.budgetEscalations !== "object") return null;
+  let key = scopeKey;
+  if (key) {
+    if (!state.budgetEscalations[key]) {
+      if (state.budgetEscalations[`task:${key}`]) {
+        key = `task:${key}`;
+      } else if (key.startsWith("task:") && state.budgetEscalations[key.slice(5)]) {
+        key = key.slice(5);
+      } else {
+        return null;
+      }
+    }
+  } else {
+    if (state.phaseIndex != null && state.budgetEscalations[`standalone:phase-${state.phaseIndex}`]) {
+      key = `standalone:phase-${state.phaseIndex}`;
+    } else if (state.currentPhase?.name && state.budgetEscalations[`speckit:${state.currentPhase.name}`]) {
+      key = `speckit:${state.currentPhase.name}`;
+    } else {
+      return null;
+    }
+  }
+  if (!key || !isRecord(state.budgetEscalations[key])) return null;
+  return normalizeEscalationModel(config?.roles?.implementer?.escalation_model);
+}
+
+export function implementerModelFor(state, config, scope = null) {
+  const pending = pendingEscalationModel(state, config, "implementer");
+  if (pending) return pending;
+  const budget = budgetEscalationModel(state, config, scope);
+  if (budget) return budget;
+  const raw = config?.roles?.implementer;
+  if (!raw) return null;
+  return { adapter: raw.adapter, model: raw.model, ...(raw.reasoning ? { reasoning: raw.reasoning } : {}), ...(raw.variant ? { variant: raw.variant } : {}) };
+}
+
+export function clearBudgetEscalation(state, scope) {
+  if (!state?.budgetEscalations || typeof state.budgetEscalations !== "object") return false;
+  if (!scope) return false;
+  let cleared = false;
+  if (scope in state.budgetEscalations) {
+    delete state.budgetEscalations[scope];
+    cleared = true;
+  }
+  const taskScope = scope.startsWith("task:") ? scope.slice(5) : `task:${scope}`;
+  if (taskScope in state.budgetEscalations) {
+    delete state.budgetEscalations[taskScope];
+    cleared = true;
+  }
+  if (!Object.keys(state.budgetEscalations).length) {
+    delete state.budgetEscalations;
+  }
+  return cleared;
+}

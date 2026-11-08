@@ -40,9 +40,9 @@ const VITEST_FAILURE = [
   " ❯ tests/integration/server.test.ts (2 tests | 2 failed) 12ms",
   "   → fetch failed",
   "",
-  " FAIL  tests/unit/patient-db.test.ts > loads a patient",
+  " FAIL  tests/unit/orders-db.test.ts > loads an order",
   "Error: Environment variable not found: DATABASE_URL",
-  " ❯ tests/unit/patient-db.test.ts (1 test | 1 failed) 5ms",
+  " ❯ tests/unit/orders-db.test.ts (1 test | 1 failed) 5ms",
   "   → Environment variable not found: DATABASE_URL",
   "",
   " FAIL  tests/unit/remote.test.ts > reaches the remote API",
@@ -58,14 +58,14 @@ const vitest = groupFailures(VITEST_FAILURE, { command: "npx vitest run" });
 checkEqual("runner is vitest", vitest.runner, "vitest");
 checkEqual("all three files found", vitest.files, [
   "tests/integration/server.test.ts",
-  "tests/unit/patient-db.test.ts",
+  "tests/unit/orders-db.test.ts",
   "tests/unit/remote.test.ts",
 ]);
 checkEqual("three groups", vitest.groups.map((group) => group.kind), ["server", "missing_env", "no_network"]);
 check("server reason names the port", vitest.groups[0].reason.includes("127.0.0.1:3000"), vitest.groups[0].reason);
 checkEqual("server group files", vitest.groups[0].files, ["tests/integration/server.test.ts"]);
 check("env reason names DATABASE_URL", vitest.groups[1].reason.includes("DATABASE_URL"), vitest.groups[1].reason);
-checkEqual("env group files", vitest.groups[1].files, ["tests/unit/patient-db.test.ts"]);
+checkEqual("env group files", vitest.groups[1].files, ["tests/unit/orders-db.test.ts"]);
 check("network reason names the host", vitest.groups[2].reason.includes("db.example.com"), vitest.groups[2].reason);
 checkEqual("network group files", vitest.groups[2].files, ["tests/unit/remote.test.ts"]);
 

@@ -1046,8 +1046,8 @@
       "default": {
         "plan_revisions": 8,
         "spec_revisions": 3,
-        "implementation": 4,
-        "verification": 4,
+        "implementation": 5,
+        "verification": 5,
         "final_review_fix_rounds": 2,
         "cli_errors": 3,
         "infrastructure": 3,
@@ -1070,14 +1070,14 @@
         },
         "implementation": {
           "type": "number",
-          "description": "Implementer fix rounds per phase before the phase stops; 0 stops the phase on the first fix-requiring review with no fix round, at the limit the mission stops and asks you, and an absent value uses the built-in default of 4.",
-          "default": 4,
+          "description": "Implementer fix rounds per phase before the phase stops; 0 stops the phase on the first fix-requiring review with no fix round, at the limit the mission stops and asks you, and an absent value uses the built-in default of 5.",
+          "default": 5,
           "minimum": 0
         },
         "verification": {
           "type": "number",
-          "description": "Verifier FAIL rounds per phase before the phase stops; 0 stops the phase on the first verifier FAIL with no retry, at the limit the mission stops and asks you, and an absent value uses the built-in default of 4.",
-          "default": 4,
+          "description": "Verifier FAIL rounds per phase before the phase stops; 0 stops the phase on the first verifier FAIL with no retry, at the limit the mission stops and asks you, and an absent value uses the built-in default of 5.",
+          "default": 5,
           "minimum": 0
         },
         "final_review_fix_rounds": {

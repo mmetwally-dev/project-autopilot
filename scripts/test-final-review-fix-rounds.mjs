@@ -42,7 +42,7 @@ const driverSlice = driverAt !== -1 ? src.slice(driverAt, driverEnd !== -1 ? dri
 check("wiring: driver loops through runFinalReviewFixRounds",
   driverSlice.includes("runFinalReviewFixRounds({"), driverSlice.slice(0, 200));
 check("wiring: driver wires an implementer fix pass (runFixPass relays findings)",
-  driverSlice.includes("runFixPass") && driverSlice.includes('relay("implementer"'),
+  driverSlice.includes("runFixPass") && driverSlice.includes('runCappedFinalFixImplementer(c,s,'),
   driverSlice.slice(0, 200));
 check("wiring: driver briefs the fix pass from findings (fixPassBriefExcerpts)",
   driverSlice.includes("runFixPass:async({brief,findings")
@@ -60,14 +60,14 @@ check("wiring: driver rebuilds the handoff fresh every round (no stale delta)",
     && !driverSlice.includes("${finalHandoff.text}"),
   driverSlice.slice(0, 200));
 check("wiring: driver re-reviews via the code_reviewer",
-  driverSlice.includes("runFinalReview:async(") && driverSlice.includes('review("code_reviewer"'));
+  driverSlice.includes("runFinalReview:async(") && (driverSlice.includes('review("code_reviewer"') || driverSlice.includes("runFinalReviewSessions")));
 check("wiring: driver re-checks linked evidence per round",
   driverSlice.includes("checkEvidenceRefusal") && driverSlice.includes("shouldRefusePassForEvidence"));
 
 // ── Static wiring: both standalone sites route through the driver ──
-const earlyMarker = "Standalone early final review INCOMPLETE treated as FAIL";
-const finalMarker = "Standalone final review INCOMPLETE treated as FAIL";
-const speckitMarker = "SpecKit final review INCOMPLETE treated as FAIL";
+const earlyMarker = "standalone early final review continuation chain";
+const finalMarker = "standalone mission-final review continuation chain";
+const speckitMarker = "speckit mission-final review continuation chain";
 const earlyAt = src.indexOf(earlyMarker);
 const finalAt = src.indexOf(finalMarker);
 const speckitAt = src.indexOf(speckitMarker);
@@ -102,7 +102,7 @@ const speckitSlice = speckitAt !== -1 ? src.slice(speckitAt, speckitNextFn !== -
   check(`wiring: ${label} site loops through runFinalReviewFixRounds`,
     speckitSlice.includes("runFinalReviewFixRounds({"), speckitSlice.slice(0, 200));
   check(`wiring: ${label} site wires an implementer fix pass (runFixPass relays findings)`,
-    /runFixPass:async\(/.test(speckitSlice) && speckitSlice.includes('relay("implementer"'),
+    /runFixPass:async\(/.test(speckitSlice) && speckitSlice.includes('runCappedFinalFixImplementer(c,s,'),
     speckitSlice.slice(0, 200));
   check(`wiring: ${label} fix pass relays the findings AND the brief`,
     speckitSlice.includes("runFixPass:async({brief,findings")
@@ -117,7 +117,7 @@ const speckitSlice = speckitAt !== -1 ? src.slice(speckitAt, speckitNextFn !== -
     speckitSlice.slice(0, 200));
   check(`wiring: ${label} site re-reviews via the code_reviewer`,
     /runFinalReview:async\(/.test(speckitSlice)
-      && /runFinalReview:async\([\s\S]{0,600}?review\("code_reviewer"/.test(speckitSlice),
+      && (/runFinalReview:async\([\s\S]{0,600}?review\("code_reviewer"/.test(speckitSlice) || /runFinalReview:async\([\s\S]{0,600}?runFinalReviewSessions/.test(speckitSlice)),
     speckitSlice.slice(0, 200));
   check(`wiring: ${label} site runs the gate dep (mission-final runs none → null)`,
     /runGate:async\(\)=>null/.test(speckitSlice), speckitSlice.slice(0, 200));

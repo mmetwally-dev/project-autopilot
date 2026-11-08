@@ -303,8 +303,9 @@ export function parsePlanPassNoteMarks(text) {
   if (typeof text !== "string" || !text) return [];
   const lines = text.split(/\r?\n/);
   const marks = [];
-  const appliedRe = /^\s*`?\s*PASS-NOTE\s+(\d+)\s*:\s*applied\s*`?\s*$/i;
-  const skippedRe = /^\s*`?\s*PASS-NOTE\s+(\d+)\s*:\s*skipped\s*(?:[\u2014\u2013\-:])\s*(.+?)\s*`?\s*$/i;
+  const lead = String.raw`^\s*(?:(?:[-*\u2022]|\d+\.)\s+)?(?:\*\*|` + "`" + String.raw`)*\s*PASS-NOTE\s+(\d+)\s*:\s*`;
+  const appliedRe = new RegExp(lead + String.raw`applied\b[*` + "`" + String.raw`]*(?:\s*[\u2014\u2013\-:\(]\s*.*|\s*)$`, "i");
+  const skippedRe = new RegExp(lead + String.raw`skipped[*` + "`" + String.raw`]*\s*(?:[\u2014\u2013\-:])\s*(.+?)[\s*` + "`" + String.raw`]*$`, "i");
   for (const line of lines) {
     const appliedMatch = line.match(appliedRe);
     if (appliedMatch) {

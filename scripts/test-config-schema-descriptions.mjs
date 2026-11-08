@@ -51,8 +51,8 @@ for (const role of ["planner", "plan_reviewer", "implementer", "code_reviewer", 
 // absent value does (it keeps the built-in default).
 const retryDescriptions = {
   "retries.plan_revisions": "an absent value uses the built-in default of 8.",
-  "retries.implementation": "an absent value uses the built-in default of 4.",
-  "retries.verification": "an absent value uses the built-in default of 4.",
+  "retries.implementation": "an absent value uses the built-in default of 5.",
+  "retries.verification": "an absent value uses the built-in default of 5.",
   "retries.cli_errors": "an absent value uses the built-in default of 3.",
   "retries.infrastructure": "an absent value uses the built-in default of 3.",
   "retries.extra_sessions_per_task": "an absent value uses the built-in default of 5.",

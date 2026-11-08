@@ -5,7 +5,7 @@ const ui = deriveTaskFacts({files: ["apps/web/src/app/settings/page.tsx"], verif
 assert.equal(ui.browser, true);
 assert.equal(ui.playwright, true);
 assert.equal(ui.commands, false, "trusted gate commands do not imply verifier command permission");
-const backend = deriveTaskFacts({files: ["src/services/patient.ts"], verify: "npm test"});
+const backend = deriveTaskFacts({files: ["src/services/order.ts"], verify: "npm test"});
 assert.equal(backend.browser, false);
 assert.equal(backend.playwright, false);
 const merged = mergeTaskFacts([{taskFacts: ui}, {taskFacts: backend}]);

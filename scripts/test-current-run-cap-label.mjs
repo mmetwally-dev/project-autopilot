@@ -73,7 +73,7 @@ const run = (o) => ({ status: "completed", decision: null, findings: [], ...o })
   );
   check(
     "full usage line matches expected layout",
-    usageLine === "usage so far: ~356.5K tokens · context ~85.0K of 200K cap · 21 of 30 turns",
+    usageLine === "usage so far:   ~356.5K tokens · context ~85.0K of 200K cap · 21 of 30 turns",
     usageLine
   );
 }
@@ -115,7 +115,7 @@ const run = (o) => ({ status: "completed", decision: null, findings: [], ...o })
   );
   check(
     "full line without turn cap",
-    usageLine === "usage so far: ~356.5K tokens · context ~85.0K of 200K cap · 21 turns",
+    usageLine === "usage so far:   ~356.5K tokens · context ~85.0K of 200K cap · 21 turns",
     usageLine
   );
 }
@@ -153,7 +153,7 @@ const run = (o) => ({ status: "completed", decision: null, findings: [], ...o })
   );
   check(
     "full line without caps",
-    usageLine === "usage so far: ~356.5K tokens · context ~85.0K · 21 turns",
+    usageLine === "usage so far:   ~356.5K tokens · context ~85.0K · 21 turns",
     usageLine
   );
 }

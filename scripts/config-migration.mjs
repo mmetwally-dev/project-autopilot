@@ -114,8 +114,8 @@ function migrateLegacyRuntime(input, existingMeta = {}) {
   out.policy = out.policy || {};
   if (!out.policy.failure_budgets) {
     out.policy.failure_budgets = {
-      implementationFailureBudget: 4,
-      verificationFailureBudget: 4,
+      implementationFailureBudget: 5,
+      verificationFailureBudget: 5,
       adapterRetryBudget: 3,
       infrastructureRetryBudget: 3
     };

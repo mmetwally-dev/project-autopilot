@@ -378,7 +378,7 @@ const run = (o) => ({ status: "completed", decision: null, findings: [], ...o })
   check("R1: planning TASK plan/tasks", planning.includes("plan/tasks"));
   const planningHeader = planning.split("\n").find((l) => l.trim().startsWith("ROLE"));
   const implHeader = impl.split("\n").find((l) => l.trim().startsWith("ROLE"));
-  const order = "ROLE MODEL TASK STATUS TURNS CONTEXT TOKENS STARTED DURATION NOTE";
+  const order = "ROLE MODEL TASK STATUS TURNS CONTEXT TOKENS DURATION STARTED NOTE";
   const columns = (header) => header.trim().split(/\s+/).join(" ");
   check("R1: shared column order", columns(planningHeader) === order && columns(implHeader) === order, { planningHeader, implHeader });
   check("R1: whole-phase TASK range", impl.includes("T1.1 > T1.5"));
@@ -391,7 +391,7 @@ const run = (o) => ({ status: "completed", decision: null, findings: [], ...o })
   const gateLine = impl.split("\n").find((l) => l.includes("GATE (orchestrator)"));
   const nextAttempt = impl.split("\n").find((l) => l.includes("Attempt 2"));
   check("R1: review gate stays in review attempt", impl.indexOf(gateLine) < impl.indexOf(nextAttempt), { gateLine, nextAttempt });
-  check("R1: reset attempt label", report.includes("attempt 5 (limit 4, reset by operator)"), report.split("\n").find((l) => l.startsWith("Stage:")));
+  check("R1: reset attempt label", report.includes("attempt 2 of 4"), report.split("\n").find((l) => l.startsWith("Stage:")));
   check("R1: reset budget label", report.includes("implementation=4 (limit 3, reset by operator)"), report.split("\n").find((l) => l.startsWith("Retries:")));
 }
 
@@ -613,7 +613,7 @@ const run = (o) => ({ status: "completed", decision: null, findings: [], ...o })
   check("new: no SNAPSHOT header anywhere in report", !rep8.split("\n").some((l) => l.trim().startsWith("ROLE") && l.includes("SNAPSHOT")), rep8);
 
   const tableHeader = lines8.find((l) => l.trim().startsWith("ROLE"));
-  const expectedHeaderWords = ["ROLE", "MODEL", "TASK", "STATUS", "TURNS", "CONTEXT", "TOKENS", "STARTED", "DURATION", "NOTE"];
+  const expectedHeaderWords = ["ROLE", "MODEL", "TASK", "STATUS", "TURNS", "CONTEXT", "TOKENS", "DURATION", "STARTED", "NOTE"];
   check("new: table header order exact",
     tableHeader && tableHeader.trim().split(/\s+/).join(" ") === expectedHeaderWords.join(" "), tableHeader);
 

@@ -38,7 +38,7 @@ export {buildRelayArgs as buildRelayArgsForTests, gates as gatesForTests};
 export {openCodeSandboxModelWarnings as openCodeSandboxModelWarningsForTests};
 // Exported for offline tests of the live reset-request application path, which
 // otherwise only runs inside a live mission.
-export {applyPendingBudgetReset as applyPendingBudgetResetForTests};
+export {applyPendingBudgetReset as applyPendingBudgetResetForTests, noteBudgetEscalationTrigger as noteBudgetEscalationTriggerForTests};
 export { stageFilesChangedSinceReview, stageFilesChangedLine, recordReviewFailSnapshot, clearReviewFailSnapshot, speckitStageFilePaths, speckitGateNote, standalonePlanFeedbackNote, standaloneSpecFeedbackNote } from "./revision-files-changed.mjs";
 // F2b #23b: test-callable handler that records an orchestrator_exit event
 // without re-raising the signal. Accepts (signal, repo, state) or an options
@@ -54,6 +54,7 @@ import {skillRoot} from "./paths.mjs";
 import {recordSkillCopy, recordCommand, resumeStageFor} from "./skill-copy.mjs";
 import {cleanMissionScratch} from "./mission-scratch-cleanup.mjs";
 import {planningArtifactDigest,canSkipPlanningStateReview} from "./planning-artifact-digest.mjs";
+import {resumeTarget} from "./resume-target.mjs";
 import {planUninstall, executeUninstall} from "./uninstall.mjs";
 import { applyAgentSelections, verifyAgentInvocation } from "./agent-invocation.mjs";
 import { validateAdapterContract, buildInvocationRecord, buildRuntimeResult } from "./agent-contract.mjs";
@@ -75,7 +76,7 @@ import {spawnRelayChild} from "./subprocess-relay.mjs";
 import {adapterDriver, finalAgentText, sessionIdFromEvents, accumulateUsage, recordRunModel, runModelPatch, applyClaudeReadOnlyScratchAllow, finalVerdictPrinted} from "./adapter-drivers.mjs";
 import {agyRelayExtraArgs} from "./agy-events.mjs";
 import {listAgyHubs, runHubsToStop, stopRunHubs} from "./agy-hub-cleanup.mjs";
-import {mergeTaskFacts,mergeTaskLineFacts,browserVerifierNote,browserCheckNotes,CODE_REVIEWER_BROWSER_LINE,isBrowserCheckFinding,splitBrowserFindings,NETWORK_GATED_TEST_LINE,splitNetworkTestFindings,networkCheckNotes} from "./task-requirements.mjs";
+import {mergeTaskFacts,mergeTaskLineFacts,browserVerifierNote,browserCheckNotes,CODE_REVIEWER_BROWSER_LINE,isBrowserCheckFinding,splitBrowserFindings,NETWORK_GATED_TEST_LINE,splitNetworkTestFindings,networkCheckNotes,moveManualCheckFindings,verifierVerdictAfterManualMove,filterUnrecordedManualChecks} from "./task-requirements.mjs";
 import {appendManualChecks} from "./manual-checks.mjs";
 import {buildRoleRequirements, requirementFailure} from "./role-requirements.mjs";
 import { classifyPlanningRequest } from "./planning-request.mjs";
@@ -89,11 +90,11 @@ import { nextRunSeq, writeWatchReportFile, noE2eReportNote, appendNoE2eNoteToRep
 import { updateSummary, updateSummaryForRunDir, scopeForRunDir } from "./watch-summary.mjs";
 import { recoverStaleRuns, markInterrupted } from "./run-recovery.mjs";
 import { recordCodeReviewRound, clearCodeReviewHistory, codeReviewerRoundLines, implementerEarlierRoundsText, codeReviewScopeKey } from "./code-review-rounds.mjs";
-import { scheduleEscalation, pendingEscalationModel, consumeEscalationFor, formatEscalationLog, recordVerifierRound, clearVerifierHistory, verifierRoundLines, scheduleNoProgressEscalation, formatNoProgressEscalationLog, noProgressDecision, endNoProgressRound } from "./escalation-model.mjs";
+import { normalizeEscalationModel, scheduleEscalation, pendingEscalationModel, consumeEscalationFor, formatEscalationLog, recordVerifierRound, clearVerifierHistory, verifierRoundLines, scheduleNoProgressEscalation, formatNoProgressEscalationLog, noProgressDecision, endNoProgressRound, budgetEscalationDecision, formatBudgetEscalationLog, budgetEscalationModel, implementerModelFor, clearBudgetEscalation } from "./escalation-model.mjs";
 import { recordPlanReviewRound, seedPlanReviewHistory, clearPlanReviewHistory, planReviewPassNeedsConfirmation, planReviewConfirmationPending, markPlanReviewConfirmationPending, clearPlanReviewConfirmation, planReviewRevisionCount, recordPlanReviewRevision, clearPlanReviewRevisions, planReviewerRoundLines, planReviewerConfirmationLines, plannerEarlierRoundsText, recordPlanReviewNotes, planReviewNotesText, recordPlanPassNotes, planPassNotesText, allPlanPassNotes, firstTaskPassNotes, firstGsdUnitPassNotes, planPassNoteEntries, applyPlanPassNoteMarks, phaseCodeReviewPassNotesText, finalReviewPassNotesText, formatPlanPassNotesLines, PLAN_REVIEW_FULL_LINE, PLAN_REVIEW_SEVERITY_LINE, demoteLowSeverityFindings, STANDALONE_SPEC_ANALYZE_LINE, isFullPlanReviewRound, REVIEW_CONTINUATION_LINE, formatReviewBriefForContinuation, hasReviewContinuationSignal, parseTaskBlocks, changedTaskIds, taskSizeConfirmationLine, demoteUnchangedTaskSizeFindings, recordPlanReviewTaskHashes, getPlanReviewTaskHashes } from "./plan-review-rounds.mjs";
 import { saveReviewFeedback, loadReviewFeedback, clearReviewFeedback, clearReviewFeedbackByPrefix, feedbackText } from "./review-feedback.mjs";
 import { taskLabel, recordFindingTasks, loadFindingTasks, carryDecision, findingsForTask, renderHandledFindings, fixPassBriefExcerpts, clearFindingTasks, clearFindingTasksByPrefix, FINDING_TASKS_STATE_KEY } from "./finding-task-locality.mjs";
-import { runFinalReviewFixRounds, parseGateGreenFiles, isNoWorkPerformed, isReviewerFeedbackFixPass, buildNoWorkAnswerSection } from "./final-review-fix-rounds.mjs";
+import { runFinalReviewFixRounds, finalReviewNextStep, runCappedFixSessions, parseGateGreenFiles, isNoWorkPerformed, isReviewerFeedbackFixPass, buildNoWorkAnswerSection } from "./final-review-fix-rounds.mjs";
 import { classifyGateFailures, parseGateFailures, taskLinkedTestFiles, formatGateFailureEscalation } from "./gate-failure-locality.mjs";
 import { importsDeltaFile } from "./gate-locality-imports.mjs";
 import { checkGateBaseline, resolveGateTestFile } from "./gate-baseline-locality.mjs";
@@ -347,6 +348,7 @@ function finalizeMissionComplete(s){
   // into the next mission run. Escalated/failed missions never reach this
   // function, so their counters and failure evidence are preserved.
   delete s.finalReviewFixRoundsUsed;
+  delete s.finalReviewStarted;
   // Mission 062 task 1.3: gate-green evidence (s.gateGreenFiles, sorted
   // array + s.gateGreenMission tie, see recordGateGreenFiles below) is
   // this mission's property too — never inherited by the next mission.
@@ -438,8 +440,12 @@ const MISSION_SCOPED_STATE_KEYS=Object.freeze([
   // Backlog #13: workflow.final_review=false recorded a skipped mission-final
   // review for THIS mission only — never inherited by the next one.
   "finalReviewSkipped",
+  // Backlog #9: mission-final review started for THIS mission only.
+  "finalReviewStarted",
   // Pending #22: one-round escalation model bookkeeping + verifier round history.
-  "escalationSwitches","escalationPending","verifierHistory","noProgressEscalations",
+  "escalationSwitches","escalationPending","verifierHistory","noProgressEscalations","budgetEscalations",
+  // Backlog #8: manual check notes already recorded this run (per phase)
+  "recordedManualCheckNotes",
   // Backlog #95: free models already rate-limited this mission (per role).
   "triedFreeModels",
   // Backlog #18: mission-wide models already found RATE_LIMITED by any role,
@@ -1516,6 +1522,7 @@ function applyPendingBudgetReset(s,scope){
       if(Number.isInteger(configured)&&configured>=0) limit=configured;
     }catch{ /* leave as "?" */ }
     delete s.failureBudgets[key];
+    clearBudgetEscalation(s, scope);
     const f=s.lastFailure||null;
     s.lastReset={at:now(),scope:key,clearedUsed:used,clearedLimit:limit,
       failure:f?`${f.class}/${f.domain}`:null,role:f?.sourceRole||null,adapter:f?.adapter||null,appliedLive:true};
@@ -1572,6 +1579,11 @@ function clearAllSpentCounters(s){
     delete s.noProgressEscalations[k];
   }
   if(s.noProgressEscalations && !Object.keys(s.noProgressEscalations).length) delete s.noProgressEscalations;
+  for(const k of Object.keys(s.budgetEscalations||{})){
+    cleared.push(`budgetEscalations:${k}`);
+    delete s.budgetEscalations[k];
+  }
+  if(s.budgetEscalations && !Object.keys(s.budgetEscalations).length) delete s.budgetEscalations;
   const rev=s.standalonePlanReview;
   if(rev&&typeof rev==="object"&&Object.prototype.hasOwnProperty.call(rev,"revision")){
     if(Number(rev.revision)>0) cleared.push(`standalonePlanReview.revision=${rev.revision}`);
@@ -1913,6 +1925,7 @@ function resetFailureCommand(s,recorded,key,scope, {dryRun = false} = {}){
   const limit=recorded&&recorded.budget&&recorded.scope&&`${recorded.budget}:${recorded.scope}`===key?recorded.limit:null;
   if(!dryRun){
     if(used!==undefined) delete budgets[key];
+    clearBudgetEscalation(s, scope);
     s.failureBudgets=budgets;
     s.lastReset={at:now(),scope:key,clearedUsed:used??0,clearedLimit:limit,
       failure:f?`${f.class}/${f.domain}`:null,role:f?.sourceRole||null,adapter:f?.adapter||null,appliedLive:false};
@@ -3480,10 +3493,15 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   }catch{}
   // Pending #22: ONE fix round on the stronger model (never on the at-once
   // fallback re-run). The model switch starts a fresh session (#112).
+  // Backlog #8j: budget-driven escalation keeps using the escalation model
+  // while the current phase scope has an entry in budgetEscalations.
   let escalated=false;
   if(__fallbackDepth===0&&(roleName==="planner"||roleName==="implementer")){
     try{
-      const esc=pendingEscalationModel(s,c,roleName);
+      let esc=pendingEscalationModel(s,c,roleName);
+      if(!esc && roleName==="implementer"){
+        esc=budgetEscalationModel(s,c);
+      }
       if(esc){ role={...rawRole,reasoning:undefined,variant:undefined,...esc}; escalated=true; clearRoleSession(s,roleName); }
     }catch{}
   }
@@ -5381,6 +5399,45 @@ function noteEscalationTrigger(s,c,fixer,scopeKey,source,previous){
     return r;
   }catch{ return null; }
 }
+// Backlog #8j: after an implementation/verification failure budget record,
+// switch the fixing role (implementer) to its escalation model when the
+// remaining budget drops to 2 or fewer attempts.
+function noteBudgetEscalationTrigger(s,c,scope,budget){
+  try{
+    if(!budget||(budget.budget!=="implementationFailureBudget"&&budget.budget!=="verificationFailureBudget")) return null;
+    const role="implementer";
+    const hasEscalationModel=Boolean(normalizeEscalationModel(c?.roles?.[role]?.escalation_model));
+    const alreadySwitched=Boolean(s?.budgetEscalations?.[scope]);
+    const decision=budgetEscalationDecision({
+      used:budget.used,
+      limit:budget.limit,
+      hasEscalationModel,
+      alreadySwitched
+    });
+    if(decision!=="switch") return null;
+    const to=normalizeEscalationModel(c?.roles?.[role]?.escalation_model);
+    const from=effectiveRoleModelFor(s,c,role);
+    const at=now();
+    const entry={role,from,to,budget:budget.budget,used:budget.used,limit:budget.limit,at};
+    s.budgetEscalations={...(s.budgetEscalations||{}),[scope]:entry};
+    console.log(formatBudgetEscalationLog(entry));
+    const missionDir=getMissionWatchDir(s);
+    if(missionDir){
+      appendWatchEvent(missionDir,{
+        type:"model_escalation",
+        role,
+        from:from?.model??null,
+        to:to.model,
+        adapter:to.adapter,
+        source:"failure_budget",
+        scope,
+        phase:s?.phaseIndex!=null?s.phaseIndex+1:null
+      });
+    }
+    try{ saveState(s); }catch{}
+    return entry;
+  }catch{ return null; }
+}
 function review(reviewer,task,c,s,feedback="",requirements=[],taskRef=null,timeoutMs=null,capEnabled=false,roundKey=null,resultExtra=null){
   // Backlog #118: code-review round lines (exhaustive round 1 / verify previous findings).
   if(roundKey) task+=`\n\n${codeReviewerRoundLines(s,roundKey).join("\n")}`;
@@ -5641,17 +5698,35 @@ function detectPlanningState(c,s,request=""){
 async function reviewExistingPlanning(c,s,state,request,opts={}){
   if(state.status==="missing") return {decision:"PASS",findings:[]};
   const framework=state.framework;
-  // Backlog #119: standalone only (SpecKit/GSD artifacts differ). Digest of
-  // PLAN.md + TASKS.md with checkbox state normalised; skipped only on resume
-  // paths (opts.allowSkip), never for an explicit `ap review-plan`.
-  let standaloneDigest=null;
+  // Backlog #119 / Backlog #9: standalone and SpecKit unchanged-plan skip on resume.
+  // Digest of standalone PLAN.md + TASKS.md or SpecKit spec.md + plan.md + tasks.md
+  // with checkbox state normalised; skipped only on resume paths (opts.allowSkip),
+  // never for an explicit `ap review-plan`.
+  let artifactDigest=null;
   if(framework==="standalone"){
     const m=resolveStandaloneMission(repo,s,request);
-    if(m) standaloneDigest=planningArtifactDigest(standalone.planPath(repo,m),standalone.tasksPath(repo,m));
-    if(opts.allowSkip && canSkipPlanningStateReview(s.planningStateReview,standaloneDigest)){
-      console.log(`[autopilot] planning-state review skipped: plan unchanged since ${s.planningStateReview.at}`);
-      return {decision:"PASS",findings:[],skipped:true};
+    if(m) artifactDigest=planningArtifactDigest(standalone.planPath(repo,m),standalone.tasksPath(repo,m));
+  }else if(framework==="speckit"){
+    let specFile=null, planFile=null, tasksFile=null;
+    if((state.taskFiles||[])[0]){
+      const dir=path.dirname(state.taskFiles[0]);
+      specFile=path.join(dir,"spec.md");
+      planFile=path.join(dir,"plan.md");
+      tasksFile=state.taskFiles[0];
+    }else if(s.speckitFeatureDir){
+      const dir=path.isAbsolute(s.speckitFeatureDir)?s.speckitFeatureDir:path.join(repo,"specs",s.speckitFeatureDir);
+      specFile=path.join(dir,"spec.md");
+      planFile=path.join(dir,"plan.md");
+      tasksFile=path.join(dir,"tasks.md");
     }
+    if(specFile&&planFile&&tasksFile){
+      artifactDigest=planningArtifactDigest(specFile,planFile,tasksFile);
+    }
+  }
+  const standaloneDigest=artifactDigest;
+  if(artifactDigest && opts.allowSkip && canSkipPlanningStateReview(s.planningStateReview,artifactDigest)){
+    console.log(`[autopilot] planning-state review skipped: plan unchanged since ${s.planningStateReview.at}`);
+    return {decision:"PASS",findings:[],skipped:true};
   }
   const subject=framework==="gsd"
     ? `GSD phase ${state.phase||"current"} planning artifacts`
@@ -5730,7 +5805,7 @@ async function reviewExistingPlanning(c,s,state,request,opts={}){
     s.phase="escalated";s.step="existing-planning-review-failed";s.planningStateReview=rr.review||null;saveState(s);
     die(`Existing ${framework} planning is not ready for execution.`);
   }
-  s.planningStateReview={status:"passed",framework,phase:state.phase||null,at:now(),...(standaloneDigest?{artifactDigest:standaloneDigest}:{})};
+  s.planningStateReview={status:"passed",framework,phase:state.phase||null,at:now(),...(artifactDigest?{artifactDigest}:{})};
   saveState(s);
   return rr.review;
 }
@@ -5757,6 +5832,25 @@ function planApprovalArtifacts(repo,state,s,request){
     return [path.join(dir,"plan.md"),path.join(dir,"tasks.md")].map(rel);
   }
   return [];
+}
+
+function resolvePlanningResumeTarget(c,s,state,effectiveRequest){
+  let phaseCount=0, phasesComplete=false;
+  if(state?.framework==="speckit"){
+    try{
+      const pList=specKitPhases(c,s);
+      phaseCount=pList.length;
+      phasesComplete=phaseCount>0 && pList.every(p=>p.tasks?.length>0 && p.tasks.every(t=>t.done));
+    }catch{}
+  }else if(state?.framework==="standalone"){
+    try{
+      const m=resolveStandaloneMission(repo,s,effectiveRequest);
+      const pList=m?standalone.phases(repo,m):[];
+      phaseCount=pList.length;
+      phasesComplete=phaseCount>0 && pList.every(p=>p.tasks?.length>0 && p.tasks.every(t=>t.done));
+    }catch{}
+  }
+  return resumeTarget({state:s,phaseCount,phasesComplete});
 }
 
 async function ensurePlanningReady(c,s,request){
@@ -5908,6 +6002,7 @@ async function ensurePlanningReady(c,s,request){
     delete s.verifierHistory;
     delete s.escalationSwitches;
     delete s.escalationPending;
+    delete s.budgetEscalations;
     // A new mission's name is derivable from `request` via `nameFromRequest`
     // for every framework at this exact point (SpecKit's short-name algorithm
     // is the same one `nameFromRequest` ports), so blindly reserving
@@ -5924,6 +6019,7 @@ async function ensurePlanningReady(c,s,request){
     // that rename, so no empty provisional folder is left behind.
     s.mission=null;
     delete s.fixtureGitBlockWarning; delete s.fixtureGitBlockWarningPhaseIndex;
+    delete s.finalReviewStarted;
     // TASK-36: only THIS new-request site filters to reusable folders. The
     // reuse exists solely for a provisional folder that a WATCH-REPORT
     // refresh created moments earlier in this SAME run; adopting any folder
@@ -5984,10 +6080,16 @@ async function ensurePlanningReady(c,s,request){
     const approvedDigest=planningArtifactDigest(standalone.planPath(repo,approvedMission),standalone.tasksPath(repo,approvedMission));
     standalonePlanApproved=canSkipPlanningStateReview(s.planningStateReview,approvedDigest);
   }
+  const resumeDecision=!startNewPlanning ? resolvePlanningResumeTarget(c,s,state,effectiveRequest) : null;
+  if(!startNewPlanning && resumeDecision==="final_review"){
+    console.log("[autopilot] planning review skipped: all phases complete — resuming directly into mission-final review");
+    s.phase="final_review";s.step="final_review";saveState(s);
+    return state;
+  }
   // !startNewPlanning keeps the original `} else if` semantics: a new
   // request never takes the artifacts-complete shortcut.
   if(!startNewPlanning && state.status==="complete" && !recoverableCheckpointResume && !standaloneReviewResume && !speckitGateReviewResume && !hasPendingStandalonePlan && !pendingSpeckitStage) {
-    await reviewExistingPlanning(c,s,state,effectiveRequest,{allowSkip:true});
+    if(resumeDecision!=="final_review") await reviewExistingPlanning(c,s,state,effectiveRequest,{allowSkip:true});
     // Mission 099 task 2.4: the pre-existing complete-planning shortcut is the
     // same approval boundary as a freshly planned pass. Standalone and SpecKit
     // pause after the existing-plan review when approval is required; GSD keeps
@@ -6034,7 +6136,7 @@ async function ensurePlanningReady(c,s,request){
     // reviewExistingPlanning() (which would review "existing planning" and then
     // continue from the generic detection-based entry point instead).
     const hasActiveCheckpoint=(s.speckitPlanningCheckpoint && s.speckitFeatureDir && !startNewPlanning) || recoverableCheckpointResume || !!speckitGateReviewResume;
-    if(state.status!=="missing" && !startNewPlanning && !hasActiveCheckpoint && !pendingSpeckitStage) await reviewExistingPlanning(c,s,state,effectiveRequest);
+    if(state.status!=="missing" && !startNewPlanning && !hasActiveCheckpoint && !pendingSpeckitStage && resumeDecision!=="final_review") await reviewExistingPlanning(c,s,state,effectiveRequest);
     // The gate the checkpoint names wins over detection's entry index: that is
     // what makes a crash during review-tasks resume at review-tasks instead of
     // at whatever `detectPlanningState()` inferred from the artifacts on disk.
@@ -6064,7 +6166,7 @@ async function ensurePlanningReady(c,s,request){
   }
   if(state.framework==="standalone") {
     if(startNewPlanning || (!standalonePlanApproved && state.status!=="complete") || standaloneReviewResume || (!startNewPlanning && hasPendingStandalonePlan)) return runStandalonePlanning(c,s,effectiveRequest,{resumePosition:standaloneReviewResume});
-    await reviewExistingPlanning(c,s,state,effectiveRequest,{allowSkip:true});
+    if(resumeDecision!=="final_review") await reviewExistingPlanning(c,s,state,effectiveRequest,{allowSkip:true});
     // Only the approved-plan-before-implementation resume pauses here. The
     // pre-existing complete-plan path (all tasks ticked) keeps its old
     // reviewExistingPlanning -> tasks_ready behavior, even mid-mission.
@@ -9133,7 +9235,7 @@ async function runGsdImplementation(c,s){
     phase=gsd.nextPendingPhase(repo,phase,gsdPhaseRoot(c));
     if(phase){s.checkpoint={type:"phase-transition",from:s.gsdPhase,to:phase,at:now()};saveState(s);}
   }
-  s.phase="final_review";s.step="final_review";saveState(s);
+  s.phase="final_review";s.step="final_review";s.finalReviewStarted=true;saveState(s);
   const final=await relayAsync("code_reviewer",
     `Final repository review across all completed GSD phases.\n\nGit diff:\n${diff()}\n\n${CODE_REVIEW_REAL_TESTS_RULE}`,
     c,s,{readOnly:true,review:true});
@@ -9177,6 +9279,86 @@ async function recordFinalReviewerFailure(c,s,site,{review:result}){
   }
   return {allowed:false,step:recorded.escalate.step,message:recorded.escalate.message};
 }
+// Backlog #13: one mission-final review (SpecKit or standalone: `site` is
+// "speckit" | "standalone", also the continuation scope `final:<site>`) run as
+// a continuation chain like a phase review. A session that ends capped or
+// INCOMPLETE keeps its hand-off note and carried scratch and the next session
+// continues the unchecked requirements; when only the gate is left it takes
+// one verdict-only turn; only after the continuation allowance runs out does
+// it stop the mission (finalReviewNextStep) — it never reaches the fix rounds.
+// Returns the first result that is a verdict, a no-verdict failure or a policy
+// violation (the fix-round driver handles those). `buildPrompt` is the site's
+// own review prompt (called per session so the delta is current).
+async function runFinalReviewSessions(c,s,{site,mission,requirements,buildPrompt}){
+  const contScope=`final:${site}`;
+  const ref=`final-review-${site}`;
+  for(;;){
+    const budget=roleDeadline(c,s,"code_reviewer");
+    const verdictOnlyText=s.verdictOnlyTurns?.[contScope];
+    const cReview=verdictOnlyText
+      ? {...c, policy: {...c.policy, free_model_turns_cap: 5, caps: {...c.policy?.caps, code_reviewer: {...c.policy?.caps?.code_reviewer, max_turns: 5}}}}
+      : c;
+    const deadEnds=readRolloverDeadEnds(s,contScope);
+    const deadEndsText=deadEnds.length?`Prior dead ends (continuation context — do not retry blindly):\n${deadEnds.map((d)=>`- Generation ${d.generation} (${d.reason} ${d.used}/${d.limit}): ${d.tail}`).join("\n")}\n\n`:"";
+    const noteText=readOnlyContinuationNote(readHandoffNote(mission,ref),repo,mission,ref,"reviewer");
+    const rv=await review("code_reviewer",
+      `${buildPrompt()}\n\n${deadEndsText}${noteText?`${noteText}\n\n`:""}${CODE_REVIEWER_TARGETED_TESTS_LINE}\n\n${budget.note}\n${readOnlyHandoffNoteReminder({mission, ref, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyText?`\n\n${verdictOnlyText}`:""}`,
+      cReview,s,"",requirements,ref,budget.timeoutMs,true,codeReviewScopeKey("final",site));
+    noteRoleDeadlineOutcome(s,"code_reviewer",rv,budget.derived);
+    if(rv.policyViolation) return rv;
+    if(rv.capped) acceptCappedFinalVerdict("Final review",rv);
+    const incomplete=Boolean(rv.capped)||rv.review?.decision==="INCOMPLETE"||parseIncompleteSignal(rv.review ?? rv);
+    let cont=null;
+    if(incomplete){
+      maybeApplyPendingContinuationReset(s,contScope);
+      cont=consumeContinuation(s,c.policy,contScope,resolvePerRoleLimits("code_reviewer",c.policy).continuationAllowance);
+      recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:rv.capped?.type??"incomplete",used:rv.capped?.used??null,limit:rv.capped?.limit??null,tail:deadEndTail({summary:`Final review ${rv.capped?`capped (${rv.capped.type} ${rv.capped.used}/${rv.capped.limit})`:`incomplete (${rv.review?.decision ?? "INCOMPLETE"})`}; mission delta unchanged — continue the unchecked requirements.`,files:[]})});
+      saveState(s);
+    }
+    const step=finalReviewNextStep({status:rv.status,decision:rv.review?.decision,capped:Boolean(rv.capped),incomplete,allowanceLeft:Boolean(cont?.allowed),onlyGateLeft:Boolean(cont)&&!verdictOnlyText&&noteSaysOnlyGateLeft(readHandoffNote(mission,ref))});
+    if(step==="continue"){
+      console.log(`Final review (${site}) ${rv.capped?`hit the ${rv.capped.type} cap (${rv.capped.used}/${rv.capped.limit} ${capUnitLabel(rv.capped.type)})`:"stopped as incomplete"}; continuing as session ${cont.used+1} of ${cont.limit+1}.`);
+      continue;
+    }
+    if(step==="verdict_only"){
+      s.verdictOnlyTurns=s.verdictOnlyTurns||{};
+      s.verdictOnlyTurns[contScope]="VERDICT-ONLY TURN: the previous sessions found no open findings and only the gate was left. Do not run any tests or the gate. Decide PASS or FAIL now from the hand-off note and the delta; the orchestrator runs the gate.";
+      saveState(s);
+      console.log(`Final review (${site}) ended incomplete but the handoff note reports only the gate left; continuing for one verdict-only turn.`);
+      continue;
+    }
+    if(step==="escalate"){
+      recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:ref});
+      s.phase="escalated";s.step="final_review_not_converging";saveState(s);
+      die(`Final review (${site}) did not converge after ${cont.used} incomplete generations. STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+    }
+    if(rv.status==="completed"&&["PASS","FAIL"].includes(rv.review?.decision)){
+      clearContinuationRound(s,contScope);
+      clearHandoffNote(mission,ref);
+    }
+    return rv;
+  }
+}
+
+// Backlog #14: every final-review fix-round implementer launch (standalone and
+// SpecKit) runs capped like a phase-task implementer session, continuing as
+// session N+1 (dead ends + hand-off note in its prompt) on a capped end, under
+// its own scope key `final-fix:<framework>:round-<n>`.
+async function runCappedFinalFixImplementer(c,s,{framework,round,prompt,requirements}){
+  const scopeKey=`final-fix:${framework}:round-${round}`;
+  const taskRef=`final-fix-${framework}-round-${round}`;
+  try{
+    return await runCappedFixSessions({state:s,policy:c.policy,scopeKey,launch:({deadEnds})=>{
+      const note=deadEnds.length?readHandoffNote(s?.mission,taskRef):"";
+      const deadEndsText=deadEnds.length?`Prior dead ends (continuation context — do not retry blindly):\n${deadEnds.map((d)=>`- Generation ${d.generation} (${d.reason} ${d.used}/${d.limit}): ${d.tail}`).join("\n")}`:"";
+      const noteText=note?`Prior hand-off note (continuation context — continue from where it stopped):\n${note}`:"";
+      const continuation=[deadEndsText,noteText].filter(Boolean).join("\n\n");
+      return relay("implementer",continuation?`${prompt}\n\n${continuation}`:prompt,c,s,{resume:false,requirements,taskRef,capEnabled:true,contScope:scopeKey});
+    }});
+  }finally{
+    clearHandoffNote(s?.mission,taskRef);
+  }
+}
 async function runStandaloneFinalReviewFixRounds({c,s,site,initialReview,mission,phaseList,missionRequirements,declaredPaths,missionBaselineKey}){
   const allTasks=phaseList.flatMap(p=>p.tasks);
   const linkedCommands=linkedVerifyCommandsForPhase(allTasks,c?.gates?.commands);
@@ -9188,19 +9370,18 @@ async function runStandaloneFinalReviewFixRounds({c,s,site,initialReview,mission
   const digestArgs={framework:"standalone",mission,phaseIndex:phaseList.length,phaseNumber:phaseList.length+1,phaseName:`mission-${site}`,tasks:missionTasks,repoRoot:repo};
   let lastFinalReview=initialReview;
   const reviewOnce=async(summary="")=>{
-    const handoff=buildStandaloneHandoff({kind:"MISSION_FINAL",
-      deltaChunks:scopedDeltaChunks(repo,missionBaselineKey,{mission,declaredPaths}),
-      baselineKey:missionBaselineKey,declaredPaths,
-      planPath:standalone.planPath(repo,mission),tasksPath:standalone.tasksPath(repo,mission),
-      specPath:standaloneFinalSpecPath(c,mission),
-      repoRoot:repo,
-      implementationSummary:typeof summary==="string"?summary:""});
-    if(handoff.meta.truncated) console.warn(truncationWarning(handoff.meta));
-    const budget=roleDeadline(c,s,"code_reviewer");
-    const fixPassNotes=finalReviewPassNotesText(s);
-    const result=await review("code_reviewer",`${handoff.text}${fixPassNotes?`\n\n${fixPassNotes}`:""}\n\n${budget.note}`,
-      c,s,"",missionRequirements,null,budget.timeoutMs,false,codeReviewScopeKey("final","standalone"));
-    noteRoleDeadlineOutcome(s,"code_reviewer",result,budget.derived);
+    const result=await runFinalReviewSessions(c,s,{site:"standalone",mission,requirements:missionRequirements,buildPrompt:()=>{
+      const handoff=buildStandaloneHandoff({kind:"MISSION_FINAL",
+        deltaChunks:scopedDeltaChunks(repo,missionBaselineKey,{mission,declaredPaths}),
+        baselineKey:missionBaselineKey,declaredPaths,
+        planPath:standalone.planPath(repo,mission),tasksPath:standalone.tasksPath(repo,mission),
+        specPath:standaloneFinalSpecPath(c,mission),
+        repoRoot:repo,
+        implementationSummary:typeof summary==="string"?summary:""});
+      if(handoff.meta.truncated) console.warn(truncationWarning(handoff.meta));
+      const fixPassNotes=finalReviewPassNotesText(s);
+      return `${handoff.text}${fixPassNotes?`\n\n${fixPassNotes}`:""}`;
+    }});
     lastFinalReview=result;
     applyPlanPassNoteMarks(s, result, {phase:"final"}); saveState(s);
     return result;
@@ -9221,7 +9402,7 @@ async function runStandaloneFinalReviewFixRounds({c,s,site,initialReview,mission
         recordCodeReviewRound(s,codeReviewScopeKey("final","standalone"),findings,lastFinalReview?.review?.previous);noteEscalationTrigger(s,c,"implementer",codeReviewScopeKey("final","standalone"),"code_reviewer",lastFinalReview?.review?.previous);
         const earlierRounds=implementerEarlierRoundsText(s,codeReviewScopeKey("final","standalone"));
         const prompt=`Mission-final review FAIL (fix round ${round}/${limit}): address every finding below or rebut it with evidence; do not declare the work complete while any finding stands.\n${feedbackText(findings)}${earlierRounds?`\n\n${earlierRounds}`:""}${brief?`\n${brief}`:""}`;
-        const fix=await relay("implementer",prompt,c,s,{resume:false,requirements:missionRequirements});
+        const fix=await runCappedFinalFixImplementer(c,s,{framework:"standalone",round,prompt,requirements:missionRequirements});
         if(fix?.policyViolation){
           s.phase="escalated";s.step="relay_policy_violation";s.relayPolicyViolation=fix.policyViolation;saveState(s);
           die(formatRelayPolicyViolation(fix.policyViolation,fix.touchedFiles));
@@ -9232,7 +9413,6 @@ async function runStandaloneFinalReviewFixRounds({c,s,site,initialReview,mission
       runGate:async()=>null,
       runFinalReview:async({round,used,limit,gate,brief,summary})=>{
         const rereview=await reviewOnce(typeof summary==="string"?summary:"");
-        if(rereview?.review?.decision==="INCOMPLETE") console.log(`Standalone ${site} final re-review round ${round} INCOMPLETE treated as FAIL (no continuation).`);
         return rereview;
       },
       checkEvidenceRefusal:({review:candidate})=>checkSiteRefusal(candidate),
@@ -9336,7 +9516,7 @@ async function runStandaloneImplementation(c,s){
     // deletion lands here with a stale active checkpoint still bound to the
     // last phase — it must not survive its completed mission.
     if(Object.hasOwn(s,CHECKPOINT_STATE_KEY)){ delete s[CHECKPOINT_STATE_KEY];saveState(s); }
-    s.phase="final_review";s.step="final_review";saveState(s);
+    s.phase="final_review";s.step="final_review";s.finalReviewStarted=true;saveState(s);
     if(c.workflow?.finalReview===false){
       // Backlog #13: workflow.final_review=false skips the whole-mission
       // final reviewer (and its fix rounds) entirely. The marker is
@@ -9356,12 +9536,8 @@ async function runStandaloneImplementation(c,s){
       repoRoot:repo,
       implementationSummary:""});
     if(finalHandoff.meta.truncated) console.warn(truncationWarning(finalHandoff.meta));
-    // TASK-26: the mission-final review gets a measured deadline too.
-    const finalBudget=roleDeadline(c,s,"code_reviewer");
     const earlyFinalPassNotes=finalReviewPassNotesText(s);
-    let final=await review("code_reviewer",`${finalHandoff.text}${earlyFinalPassNotes?`\n\n${earlyFinalPassNotes}`:""}\n\n${finalBudget.note}`,
-      c,s,"",missionRequirements,null,finalBudget.timeoutMs,false,codeReviewScopeKey("final","standalone"));
-    noteRoleDeadlineOutcome(s,"code_reviewer",final,finalBudget.derived);
+    let final=await runFinalReviewSessions(c,s,{site:"standalone",mission,requirements:missionRequirements,buildPrompt:()=>`${finalHandoff.text}${earlyFinalPassNotes?`\n\n${earlyFinalPassNotes}`:""}`});
     applyPlanPassNoteMarks(s, final, {phase:"final"}); saveState(s);
     if(final.status==="completed"&&!final.policyViolation&&final.review?.decision==="PASS"){
       // Mission 025 task 2.4 (no-pending early final path): same mission-wide
@@ -9370,8 +9546,7 @@ async function runStandaloneImplementation(c,s){
       const earlyFinalRefusal=shouldRefusePassForEvidence({gateResults:[],toolResults:reviewerLinkedToolResults(final,linkedVerifyCommandsForPhase(phaseList.flatMap(p=>p.tasks),c?.gates?.commands))});
       if(earlyFinalRefusal?.refuse===true){s.phase="escalated";saveState(s);die("Final review failed.");}
     }
-    // Mission 031 Phase 3 task 3.5: INCOMPLETE-as-FAIL (no continuation): standalone-early-final-review has no continuation loop — an INCOMPLETE decision is treated as FAIL with explicit reason and never consumes a continuation.
-    if(final.review?.decision==="INCOMPLETE") console.log("Standalone early final review INCOMPLETE treated as FAIL (no continuation).");
+    // Backlog #13: standalone early final review continuation chain (runFinalReviewSessions) — INCOMPLETE never reaches the fix rounds.
     if(final.status!=="completed"||final.policyViolation||final.review?.decision!=="PASS"){
       // Mission 051 task 1.3: route the early-final FAIL through the shared
       // bounded fix-round driver (finding record, fixPassBriefExcerpts
@@ -9528,6 +9703,7 @@ async function runStandaloneImplementation(c,s){
         // All checked mid-loop: same stale-clearance as the entry path.
         if(Object.hasOwn(s,CHECKPOINT_STATE_KEY)){ delete s[CHECKPOINT_STATE_KEY];saveState(s); }
         passed=true;
+        clearBudgetEscalation(s,`standalone:phase-${s.phaseIndex}`);
         continue;
       }
       s.currentPhase={name:phase.name,tasks:phaseTasks};s.currentTask=phaseTasks[0];s.feedback=feedback;saveState(s);
@@ -10036,6 +10212,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           // as drift, never rerun planning. The cursor was left on the
           // interrupted task by the loop, so the retry resumes there.
           const recorded=enforceAttemptFailure(c,s,`standalone:phase-${s.phaseIndex}`,[impl],{ok:true});
+          noteBudgetEscalationTrigger(s,c,`standalone:phase-${s.phaseIndex}`,recorded.budget);
           checkpoint=applyCheckpointTransition(decideTransition(checkpoint,recorded));
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
           continue;
@@ -10284,6 +10461,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           continue;
         }
         if(rv.status==="completed"&&(rv.review?.decision==="PASS"||rv.review?.decision==="FAIL")){
+          applyPlanPassNoteMarks(s, rv, {phase:s.phaseIndex+1, allowSkip:false});
           clearContinuationRound(s,`task:standalone:phase-${s.phaseIndex}:code_reviewer`);
           deleteCarriedScratch(repo,mission,reviewRef);
         }
@@ -10305,6 +10483,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             recordPhaseFindingTasks(phaseKey,refusalFindings,true);recordCodeReviewRound(s,codeReviewScopeKey("standalone-phase",s.phaseIndex),refusalFindings,rv.review?.previous);
             {
               const recorded=enforceAttemptFailure(c,s,`standalone:phase-${s.phaseIndex}`,lastImpl?[lastImpl,{...rv,failure:failure("IMPLEMENTATION_REJECTED","implementation",true,refusalFindings)}]:[{...rv,failure:failure("IMPLEMENTATION_REJECTED","implementation",true,refusalFindings)}],{ok:true});
+              noteBudgetEscalationTrigger(s,c,`standalone:phase-${s.phaseIndex}`,recorded.budget);
               checkpoint=applyCheckpointTransition(decideTransition(checkpoint,recorded));
               s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
             }
@@ -10313,7 +10492,6 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           clearCodeReviewHistory(s,codeReviewScopeKey("standalone-phase",s.phaseIndex));const transition=decideTransition(checkpoint,{stage:"code_reviewer",status:"completed",decision:"PASS",runId:rv.sessionId??null,findings:rv.review?.findings??[]});
           checkpoint=applyCheckpointTransition(transition);
           checkpoint.codeReviewer={runId:rv.sessionId??null,decision:"PASS",findings:rv.review?.findings??[]};
-          applyPlanPassNoteMarks(s, rv, {phase:s.phaseIndex+1, allowSkip:false});
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
           if(stopStage==="review"){
             // Mission 090 task 1.5: review covers the Code Reviewer only.
@@ -10336,6 +10514,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         // Reviewer on infra, return to the Implementer on rejection.
         {
           const recorded=enforceAttemptFailure(c,s,`standalone:phase-${s.phaseIndex}`,lastImpl?[lastImpl,rv]:[rv],{ok:true});
+          noteBudgetEscalationTrigger(s,c,`standalone:phase-${s.phaseIndex}`,recorded.budget);
           checkpoint=applyCheckpointTransition(decideTransition(checkpoint,recorded));
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
         }
@@ -10530,13 +10709,29 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           console.log(`Verification stopped voluntarily as incomplete; continuing as session ${cont.used+1} of ${cont.limit+1}.`);
           continue;
         }
+        if(vv.review){
+          const {moved}=moveManualCheckFindings(vv.review);
+          if(moved.length){
+            const phaseKey=phase?.name||String(s.phaseIndex);
+            const fresh=filterUnrecordedManualChecks(s,phaseKey,moved);
+            if(fresh.length){
+              const mdir=missionDir;
+              if(appendManualChecks(mdir,{phaseName:phaseKey,notes:fresh,at:new Date().toISOString()})){
+                console.log(`Manual check recorded in MANUAL-CHECKS.md (${fresh.length} note(s)) — not counted as a verifier finding.`);
+              }
+            }
+          }
+          const verifierRefusal=shouldRefusePassForEvidence({gateResults:Array.isArray(g.results)?g.results:[],toolResults:reviewerLinkedToolResults(vv,linkedVerifyCommandsForPhase(phaseTasks,c?.gates?.commands))});
+          const evidenceOk=verifierRefusal?.refuse!==true;
+          vv.review.decision=verifierVerdictAfterManualMove({decision:vv.review.decision,remaining:vv.review.findings,gateOk:g?.ok===true,evidenceOk});
+        }
         if(vv.status==="completed"&&(vv.review?.decision==="PASS"||vv.review?.decision==="FAIL")){
           clearContinuationRound(s,`task:standalone:phase-${s.phaseIndex}:verifier`);
           deleteCarriedScratch(repo,mission,verifyRef);
         }
         if(g.ok&&vv.status==="completed"&&vv.review?.decision==="PASS"){
-          { const bn=browserCheckNotes(vv.review); if(bn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:bn,at:new Date().toISOString()})) console.log(`Manual UI check recorded in MANUAL-CHECKS.md (${bn.length} note(s)).`); } }
-          { const nn=networkCheckNotes(vv.review); if(nn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:nn,at:new Date().toISOString()})) console.log(`Manual network-test run recorded in MANUAL-CHECKS.md (${nn.length} note(s)).`); } }
+          { const bn=filterUnrecordedManualChecks(s,phase?.name||String(s.phaseIndex),browserCheckNotes(vv.review)); if(bn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:bn,at:new Date().toISOString()})) console.log(`Manual UI check recorded in MANUAL-CHECKS.md (${bn.length} note(s)).`); } }
+          { const nn=filterUnrecordedManualChecks(s,phase?.name||String(s.phaseIndex),networkCheckNotes(vv.review)); if(nn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:nn,at:new Date().toISOString()})) console.log(`Manual network-test run recorded in MANUAL-CHECKS.md (${nn.length} note(s)).`); } }
           // Mission 025 task 2.2: never accept a standalone verifier PASS
           // while any linked verify/tool result exited non-zero or 124. The
           // joint gate+verdict check covers both evidence channels: the
@@ -10555,6 +10750,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             recordPhaseFindingTasks(phaseKey,refusalFindings,true);
             {
               const recorded=enforceAttemptFailure(c,s,`standalone:phase-${s.phaseIndex}`,lastImpl&&lastReview?[lastImpl,lastReview,{...vv,failure:failure("VERIFICATION_REJECTED","verification",true,refusalFindings)}]:(lastReview?[lastReview,{...vv,failure:failure("VERIFICATION_REJECTED","verification",true,refusalFindings)}]:[{...vv,failure:failure("VERIFICATION_REJECTED","verification",true,refusalFindings)}]),g);
+              noteBudgetEscalationTrigger(s,c,`standalone:phase-${s.phaseIndex}`,recorded.budget);
               checkpoint=applyCheckpointTransition(decideTransition(checkpoint,recorded));
               s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
             }
@@ -10675,6 +10871,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         // infrastructure failure retries only the Verifier.
         {
           const recorded=enforceAttemptFailure(c,s,`standalone:phase-${s.phaseIndex}`,lastImpl&&lastReview?[lastImpl,lastReview,vv]:(lastReview?[lastReview,vv]:[vv]),g);
+          noteBudgetEscalationTrigger(s,c,`standalone:phase-${s.phaseIndex}`,recorded.budget);
           checkpoint=applyCheckpointTransition(decideTransition(checkpoint,recorded));
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
         }
@@ -10711,6 +10908,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         // describes — a PASS must never leave a FAIL's map readable.
         clearReviewFeedback(s,phaseKey);
         clearFindingTasks(s,phaseKey);clearCodeReviewHistory(s,codeReviewScopeKey("standalone-phase",s.phaseIndex));clearVerifierHistory(s,codeReviewScopeKey("standalone-phase",s.phaseIndex));
+        clearBudgetEscalation(s,`standalone:phase-${s.phaseIndex}`);
         // TASK-23: this phase's per-review snapshots are only ever read by
         // its own next code review. A passed phase is never reviewed again,
         // so delete them (they are copies of the phase's dirty files).
@@ -10752,7 +10950,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
     stopAfterStage(stopStage);
     return;
   }
-  s.phase="final_review";s.step="final_review";saveState(s);
+  s.phase="final_review";s.step="final_review";s.finalReviewStarted=true;saveState(s);
   if(c.workflow?.finalReview===false){
     // Backlog #13: same skip as the no-pending early path above — set the
     // mission-scoped marker, persist the final_review phase/step, and go
@@ -10771,12 +10969,8 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
     repoRoot:repo,
     implementationSummary:""});
   if(finalHandoff.meta.truncated) console.warn(truncationWarning(finalHandoff.meta));
-    // TASK-26: the mission-final review gets a measured deadline too.
-    const standaloneFinalBudget=roleDeadline(c,s,"code_reviewer");
     const standaloneFinalPassNotes=finalReviewPassNotesText(s);
-    let final=await review("code_reviewer",`${finalHandoff.text}${standaloneFinalPassNotes?`\n\n${standaloneFinalPassNotes}`:""}\n\n${standaloneFinalBudget.note}`,
-      c,s,"",missionRequirements,null,standaloneFinalBudget.timeoutMs,false,codeReviewScopeKey("final","standalone"));
-    noteRoleDeadlineOutcome(s,"code_reviewer",final,standaloneFinalBudget.derived);
+    let final=await runFinalReviewSessions(c,s,{site:"standalone",mission,requirements:missionRequirements,buildPrompt:()=>`${finalHandoff.text}${standaloneFinalPassNotes?`\n\n${standaloneFinalPassNotes}`:""}`});
     applyPlanPassNoteMarks(s, final, {phase:"final"}); saveState(s);
     if(final.status==="completed"&&!final.policyViolation&&final.review?.decision==="PASS"){
       // Mission 025 task 2.4: never complete the mission on a final-reviewer
@@ -10792,8 +10986,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         s.phase="escalated";s.step="final_review";saveState(s);die("Final review failed.");
       }
     }
-    // Mission 031 Phase 3 task 3.5: INCOMPLETE-as-FAIL (no continuation): standalone-final-review has no continuation loop — an INCOMPLETE decision is treated as FAIL with explicit reason and never consumes a continuation.
-    if(final.review?.decision==="INCOMPLETE") console.log("Standalone final review INCOMPLETE treated as FAIL (no continuation).");
+    // Backlog #13: standalone mission-final review continuation chain (runFinalReviewSessions) — INCOMPLETE never reaches the fix rounds.
     if(final.status!=="completed"||final.policyViolation||final.review?.decision!=="PASS"){
       // Mission 051 task 1.3: same shared fix-round driver as the
       // early-final site above. Escalates only on budget exhaustion (or
@@ -11045,6 +11238,7 @@ async function runImplementation(c){
       // mission: clear the checkpoint so planning runs with a fresh seq.
       s.phase="idle"; s.step="idle"; s.mission=null; s.missionSeq=null; s.planningStartedAt=null;
       delete s.fixtureGitBlockWarning; delete s.fixtureGitBlockWarningPhaseIndex;
+    delete s.finalReviewStarted;
       saveState(s);
       console.log("New request detected — starting a new mission.");
       clearInheritedFailureCounters(s);
@@ -11353,6 +11547,7 @@ async function runImplementation(c){
         // All checked mid-loop: same stale-clearance as the entry path.
         if(Object.hasOwn(s,CHECKPOINT_STATE_KEY)){ delete s[CHECKPOINT_STATE_KEY];saveState(s); }
         passed=true;
+        clearBudgetEscalation(s,`speckit:${phase.name}`);
         continue;
       }
       s.currentPhase={name:phase.name,tasks:phaseTasks};s.currentTask=phaseTasks[0];s.feedback=feedback;saveState(s);
@@ -11820,6 +12015,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         // as drift, never rerun planning. The cursor was left on the
         // interrupted task by the loop, so the retry resumes there.
         const recorded=enforceAttemptFailure(c,s,`speckit:${phase.name}`,[impl],{ok:true});
+        noteBudgetEscalationTrigger(s,c,`speckit:${phase.name}`,recorded.budget);
         checkpoint=applyCheckpointTransition(decideTransition(checkpoint,recorded));
         s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
         continue;
@@ -12067,6 +12263,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           continue;
         }
         if(rv.status==="completed"&&(rv.review?.decision==="PASS"||rv.review?.decision==="FAIL")){
+          applyPlanPassNoteMarks(s, rv, {phase:s.phaseIndex+1, allowSkip:false});
           clearContinuationRound(s,`task:speckit:phase-${s.phaseIndex}:code_reviewer`);
           deleteCarriedScratch(repo,missionIdentity,reviewRef);
         }
@@ -12088,6 +12285,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             recordPhaseFindingTasks(speckitPhaseFeedbackKey(s.phaseIndex),refusalFindings,true);recordCodeReviewRound(s,codeReviewScopeKey("speckit-phase",s.phaseIndex),refusalFindings,rv.review?.previous);
             {
               const recorded=enforceAttemptFailure(c,s,`speckit:${phase.name}`,lastImpl?[lastImpl,{...rv,failure:failure("IMPLEMENTATION_REJECTED","implementation",true,refusalFindings)}]:[{...rv,failure:failure("IMPLEMENTATION_REJECTED","implementation",true,refusalFindings)}],{ok:true});
+              noteBudgetEscalationTrigger(s,c,`speckit:${phase.name}`,recorded.budget);
               checkpoint=applyCheckpointTransition(decideTransition(checkpoint,recorded));
               s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
             }
@@ -12096,7 +12294,6 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           clearCodeReviewHistory(s,codeReviewScopeKey("speckit-phase",s.phaseIndex));const transition=decideTransition(checkpoint,{stage:"code_reviewer",status:"completed",decision:"PASS",runId:rv.sessionId??null,findings:rv.review?.findings??[]});
           checkpoint=applyCheckpointTransition(transition);
           checkpoint.codeReviewer={runId:rv.sessionId??null,decision:"PASS",findings:rv.review?.findings??[]};
-          applyPlanPassNoteMarks(s, rv, {phase:s.phaseIndex+1, allowSkip:false});
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
           continue;
         }
@@ -12114,6 +12311,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         // Reviewer on infra, return to the Implementer on rejection.
         {
           const recorded=enforceAttemptFailure(c,s,`speckit:${phase.name}`,lastImpl?[lastImpl,rv]:[rv],{ok:true});
+          noteBudgetEscalationTrigger(s,c,`speckit:${phase.name}`,recorded.budget);
           checkpoint=applyCheckpointTransition(decideTransition(checkpoint,recorded));
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
         }
@@ -12314,13 +12512,29 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             console.log(`SpecKit verification stopped voluntarily as incomplete; continuing as session ${cont.used+1} of ${cont.limit+1}.`);
           continue;
         }
+        if(vv.review){
+          const {moved}=moveManualCheckFindings(vv.review);
+          if(moved.length){
+            const phaseKey=phase?.name||String(s.phaseIndex);
+            const fresh=filterUnrecordedManualChecks(s,phaseKey,moved);
+            if(fresh.length){
+              const mdir=missionDir;
+              if(appendManualChecks(mdir,{phaseName:phaseKey,notes:fresh,at:new Date().toISOString()})){
+                console.log(`Manual check recorded in MANUAL-CHECKS.md (${fresh.length} note(s)) — not counted as a verifier finding.`);
+              }
+            }
+          }
+          const verifierRefusal=shouldRefusePassForEvidence({gateResults:Array.isArray(g.results)?g.results:[],toolResults:reviewerLinkedToolResults(vv,linkedVerifyCommandsForPhase(phaseTasks,c?.gates?.commands))});
+          const evidenceOk=verifierRefusal?.refuse!==true;
+          vv.review.decision=verifierVerdictAfterManualMove({decision:vv.review.decision,remaining:vv.review.findings,gateOk:g?.ok===true,evidenceOk});
+        }
         if(vv.status==="completed"&&(vv.review?.decision==="PASS"||vv.review?.decision==="FAIL")){
           clearContinuationRound(s,`task:speckit:phase-${s.phaseIndex}:verifier`);
           deleteCarriedScratch(repo,missionIdentity,verifyRef);
         }
         if(g.ok&&vv.status==="completed"&&vv.review?.decision==="PASS"){
-          { const bn=browserCheckNotes(vv.review); if(bn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:bn,at:new Date().toISOString()})) console.log(`Manual UI check recorded in MANUAL-CHECKS.md (${bn.length} note(s)).`); } }
-          { const nn=networkCheckNotes(vv.review); if(nn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:nn,at:new Date().toISOString()})) console.log(`Manual network-test run recorded in MANUAL-CHECKS.md (${nn.length} note(s)).`); } }
+          { const bn=filterUnrecordedManualChecks(s,phase?.name||String(s.phaseIndex),browserCheckNotes(vv.review)); if(bn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:bn,at:new Date().toISOString()})) console.log(`Manual UI check recorded in MANUAL-CHECKS.md (${bn.length} note(s)).`); } }
+          { const nn=filterUnrecordedManualChecks(s,phase?.name||String(s.phaseIndex),networkCheckNotes(vv.review)); if(nn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:nn,at:new Date().toISOString()})) console.log(`Manual network-test run recorded in MANUAL-CHECKS.md (${nn.length} note(s)).`); } }
           // Mission 025 task 3.2: never accept a SpecKit verifier PASS
           // while any linked verify/tool result exited non-zero or 124. The
           // joint gate+verdict check covers both evidence channels: the
@@ -12339,6 +12553,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             recordPhaseFindingTasks(speckitPhaseFeedbackKey(s.phaseIndex),refusalFindings,true);
             {
               const recorded=enforceAttemptFailure(c,s,`speckit:${phase.name}`,lastImpl&&lastReview?[lastImpl,lastReview,{...vv,failure:failure("VERIFICATION_REJECTED","verification",true,refusalFindings)}]:(lastReview?[lastReview,{...vv,failure:failure("VERIFICATION_REJECTED","verification",true,refusalFindings)}]:[{...vv,failure:failure("VERIFICATION_REJECTED","verification",true,refusalFindings)}]),g);
+              noteBudgetEscalationTrigger(s,c,`speckit:${phase.name}`,recorded.budget);
               checkpoint=applyCheckpointTransition(decideTransition(checkpoint,recorded));
               s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
             }
@@ -12366,6 +12581,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         // infrastructure failure retries only the Verifier.
         {
           const recorded=enforceAttemptFailure(c,s,`speckit:${phase.name}`,lastImpl&&lastReview?[lastImpl,lastReview,vv]:(lastReview?[lastReview,vv]:[vv]),g);
+          noteBudgetEscalationTrigger(s,c,`speckit:${phase.name}`,recorded.budget);
           checkpoint=applyCheckpointTransition(decideTransition(checkpoint,recorded));
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
         }
@@ -12409,6 +12625,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         // describes — a PASS must never leave a FAIL's map readable.
         clearReviewFeedback(s,speckitPhaseFeedbackKey(s.phaseIndex));
         clearFindingTasks(s,speckitPhaseFeedbackKey(s.phaseIndex));clearCodeReviewHistory(s,codeReviewScopeKey("speckit-phase",s.phaseIndex));clearVerifierHistory(s,codeReviewScopeKey("speckit-phase",s.phaseIndex));
+        clearBudgetEscalation(s,`speckit:${phase.name}`);
         // TASK-23: this phase's per-review snapshots are only ever read by
         // its own next code review. A passed phase is never reviewed again,
         // so delete them (they are copies of the phase's dirty files).
@@ -12430,7 +12647,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
     s.checkpoint={type:"phase",index:s.phaseIndex,phase:phase.name,tasks:phaseTasks.map(t=>t.text),at:now()};saveState(s);
   }
 
-  s.phase="final_review";s.step="final_review";saveState(s);
+  s.phase="final_review";s.step="final_review";s.finalReviewStarted=true;saveState(s);
   // Belt-and-suspenders: re-read tasks.md fresh from disk (never the
   // in-memory phaseList, which could be stale) and refuse to declare the
   // mission complete while any task belonging to this SpecKit feature is
@@ -12458,8 +12675,6 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
     console.log("ALL WORK COMPLETE — HUMAN COMMIT REQUIRED");
     return;
   }
-  // TASK-26: the mission-final review gets a measured deadline too.
-  const speckitFinalBudget=roleDeadline(c,s,"code_reviewer");
   const speckitFinalNoParallel=formatHeavySuiteNoParallelNote();
   const speckitFinalSpecFile=s.speckitFeatureDir?path.join(repo,"specs",s.speckitFeatureDir,"spec.md"):"";
   const speckitFinalSpecParagraph=(speckitFinalSpecFile&&fs.existsSync(speckitFinalSpecFile))?`\n\n${specFrCheckLine(speckitFinalSpecFile)}`:"";
@@ -12467,11 +12682,12 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
   // mission-final review prompt verbatim plus the shared
   // whole-mission-diff reviewer line (imported, never duplicated).
   // Explicit repo root — absent/unreadable yields the generic section.
-  const speckitFinalPassNotes=finalReviewPassNotesText(s);
-  let final=await review("code_reviewer",
-    `${`Perform final repository review against the planning artifacts.${speckitFinalSpecParagraph}\n\nScoped implementation delta for THIS ENTIRE MISSION (pre-existing repository changes made before this mission started are excluded — do not evaluate or flag anything outside this delta; an empty delta means this mission made no repository changes):\n${scopedDeltaBeginMarker("MISSION")}\n${speckitBoundedDelta(repo,missionBaselineKey,"MISSION_FINAL")}\n${SCOPED_DELTA_END_MARKER}`}${speckitFinalNoParallel?`\n\n${speckitFinalNoParallel}`:""}${speckitFinalPassNotes?`\n\n${speckitFinalPassNotes}`:""}\n\n${buildSecurityChecklistSection(repo)}\n${MISSION_FINAL_SECURITY_LINE}\n\n${speckitFinalBudget.note}`,
-    c,s,"",[],null,speckitFinalBudget.timeoutMs,false,codeReviewScopeKey("final","speckit"));
-  noteRoleDeadlineOutcome(s,"code_reviewer",final,speckitFinalBudget.derived);
+  // Backlog #13: prompt builder for first review and re-reviews.
+  const speckitFinalPrompt=(answerSection="")=>{
+    const passNotes=finalReviewPassNotesText(s);
+    return `${`Perform final repository review against the planning artifacts.${speckitFinalSpecParagraph}\n\nScoped implementation delta for THIS ENTIRE MISSION (pre-existing repository changes made before this mission started are excluded — do not evaluate or flag anything outside this delta; an empty delta means this mission made no repository changes):\n${scopedDeltaBeginMarker("MISSION")}\n${speckitBoundedDelta(repo,missionBaselineKey,"MISSION_FINAL")}\n${SCOPED_DELTA_END_MARKER}`}${speckitFinalNoParallel?`\n\n${speckitFinalNoParallel}`:""}${passNotes?`\n\n${passNotes}`:""}\n\n${buildSecurityChecklistSection(repo)}\n${MISSION_FINAL_SECURITY_LINE}${answerSection}`;
+  };
+  let final=await runFinalReviewSessions(c,s,{site:"speckit",mission:missionIdentity,requirements:[],buildPrompt:()=>speckitFinalPrompt()});
   applyPlanPassNoteMarks(s, final, {phase:"final"}); saveState(s);
   if(final.status==="completed"&&!final.policyViolation&&final.review?.decision==="PASS"){
     // Mission 025 task 3.4: never complete the mission on a final-reviewer
@@ -12487,8 +12703,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
       s.phase="escalated";s.step="final_review";saveState(s);die("Final review failed.");
     }
   }
-  // Mission 031 Phase 3 task 3.5: INCOMPLETE-as-FAIL (no continuation): speckit-final-review has no continuation loop — an INCOMPLETE decision is treated as FAIL with explicit reason and never consumes a continuation.
-  if(final.review?.decision==="INCOMPLETE") console.log("SpecKit final review INCOMPLETE treated as FAIL (no continuation).");
+  // Backlog #13: speckit mission-final review continuation chain (runFinalReviewSessions) — INCOMPLETE never reaches the fix rounds.
   if(final.status!=="completed" || final.policyViolation || final.review?.decision!=="PASS"){
     // Mission 051 task 1.4: route the SpecKit mission-final FAIL through the
     // bounded final-review fix-round loop instead of escalating immediately.
@@ -12521,7 +12736,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           recordCodeReviewRound(s,codeReviewScopeKey("final","speckit"),findings,lastFinalReview?.review?.previous);noteEscalationTrigger(s,c,"implementer",codeReviewScopeKey("final","speckit"),"code_reviewer",lastFinalReview?.review?.previous);
           const earlierRounds=implementerEarlierRoundsText(s,codeReviewScopeKey("final","speckit"));
           const prompt=`SpecKit mission-final review FAIL (fix round ${round}/${limit}): address every finding below or rebut it with evidence; do not declare the work complete while any finding stands.\n${feedbackText(findings)}${earlierRounds?`\n\n${earlierRounds}`:""}${brief?`\n${brief}`:""}`;
-          const fix=await relay("implementer",prompt,c,s,{resume:false,requirements:[]});
+          const fix=await runCappedFinalFixImplementer(c,s,{framework:"speckit",round,prompt,requirements:[]});
           if(fix?.policyViolation){
             s.phase="escalated";s.step="relay_policy_violation";s.relayPolicyViolation=fix.policyViolation;saveState(s);
             die(formatRelayPolicyViolation(fix.policyViolation,fix.touchedFiles));
@@ -12530,16 +12745,10 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         },
         runGate:async()=>null,
         runFinalReview:async({round,used,limit,gate,brief,summary})=>{
-          const budget=roleDeadline(c,s,"code_reviewer");
           // 067 security section above; 071 no-work summary as answer/rebuttal.
           const answerSection=(typeof summary==="string"&&summary!=="")?`\n\nImplementer's answer/rebuttal (no files changed):\n${summary}`:"";
-          const rereviewPassNotes=finalReviewPassNotesText(s);
-          const rereview=await review("code_reviewer",
-            `${`Perform final repository review against the planning artifacts.${speckitFinalSpecParagraph}\n\nScoped implementation delta for THIS ENTIRE MISSION (pre-existing repository changes made before this mission started are excluded — do not evaluate or flag anything outside this delta; an empty delta means this mission made no repository changes):\n${scopedDeltaBeginMarker("MISSION")}\n${speckitBoundedDelta(repo,missionBaselineKey,"MISSION_FINAL")}\n${SCOPED_DELTA_END_MARKER}`}${speckitFinalNoParallel?`\n\n${speckitFinalNoParallel}`:""}${rereviewPassNotes?`\n\n${rereviewPassNotes}`:""}\n\n${buildSecurityChecklistSection(repo)}\n${MISSION_FINAL_SECURITY_LINE}${answerSection}\n\n${budget.note}`,
-            c,s,"",[],null,budget.timeoutMs,false,codeReviewScopeKey("final","speckit"));
-          noteRoleDeadlineOutcome(s,"code_reviewer",rereview,budget.derived);
+          const rereview=await runFinalReviewSessions(c,s,{site:"speckit",mission:missionIdentity,requirements:[],buildPrompt:()=>speckitFinalPrompt(answerSection)});
           lastFinalReview=rereview;
-          if(rereview?.review?.decision==="INCOMPLETE") console.log(`SpecKit mission-final final re-review round ${round} INCOMPLETE treated as FAIL (no continuation).`);
           applyPlanPassNoteMarks(s, rereview, {phase:"final"}); saveState(s);
           return rereview;
         },

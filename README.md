@@ -242,7 +242,7 @@ For each phase:
 
 A failed review or verification sends the work back to the implementer. Each
 kind of failure has its own budget (`retries.implementation`,
-`retries.verification`, default 4). When a budget runs out the mission
+`retries.verification`, default 5). When a budget runs out the mission
 **escalates** (see below) instead of looping forever.
 
 ### 3. Final review
@@ -251,7 +251,12 @@ When every phase has passed, the code reviewer reads the whole mission's
 change once more. With a spec (standalone `SPEC.md` or SpecKit `spec.md`) it
 also checks every FR against the code and says where it is implemented; a
 missing or half-built FR is a finding. Findings get up to `retries.final_review_fix_rounds` fix
-rounds (default 2). When it approves, the mission is **COMPLETED** and prints
+rounds (default 2). If the final reviewer runs out of turns or context before
+it decides, it continues in a new session from its hand-off note, like a phase
+review, instead of failing; only items it really found wrong go to the fix
+rounds, and each fix-round session has the same limits as a phase task. If you
+resume a mission whose phases have all passed, it goes straight back to the
+final review. When it approves, the mission is **COMPLETED** and prints
 `ALL WORK COMPLETE — HUMAN COMMIT REQUIRED`.
 
 ### When a mission stops: escalation
@@ -288,6 +293,12 @@ The messages name the exact command when one is needed, for example
   `retries.escalate_after_not_fixed` times in a row (default 2), the next fix
   round runs on the escalation model, once per scope, then the role returns to
   its normal model.
+- **Last attempts on the escalation model.** When a phase has 2 attempts left
+  in its implementation or verification budget (`retries.implementation` /
+  `retries.verification`, default 5), the implementer switches to its
+  `escalation_model` and stays on it until the phase passes or the budget runs
+  out. The counter is not reset. This catches fixes that keep closing one
+  finding and opening another, which never trip the "not fixed twice" rule.
 - **No-progress stop.** A continuation session that changes no project file is
   "no progress". After `retries.no_progress_sessions` of them in a row
   (default 2) the task stops early instead of using up all its sessions. If the
@@ -670,8 +681,8 @@ for all of them with their defaults.
   a fresh session continues. `caps.mission_token_backstop` (default 6M tokens)
   stops a runaway mission. `caps.task_size_target_turns` (default 30) tells the
   planner how big one task may be.
-- **Retries:** plan revisions (8), spec revisions (3), implementation failures (4), verification
-  failures (4), final-review fix rounds (2), CLI errors (3), infrastructure
+- **Retries:** plan revisions (8), spec revisions (3), implementation failures (5), verification
+  failures (5), final-review fix rounds (2), CLI errors (3), infrastructure
   failures (3), no-progress sessions (2).
 - **Timeouts:** `time_limits.role_timeout_minutes` (60 per session, 180 for the
   verifier, which waits for the full test suite), `time_limits.call_backstop_minutes`
