@@ -75,6 +75,7 @@ const PORTED_SCENARIOS = new Set([
   "carry_forward_tagged", "carry_forward_untagged", "carry_forward_overlap", "carry_forward_gate", "carry_forward_phasewide",
   "scoped_rereview", "scoped_rereview_fallback",
   "findings_per_task", "findings_per_task_phasewide",
+  "cross_phase_repair",
   "impl_missing_sentinel_once", "impl_missing_sentinel_always", "impl_malformed_sentinel_once",
   "speckit_reviewer_infra_once", "speckit_reviewer_fail_once",
   "role_deadline_breach",
@@ -379,7 +380,10 @@ function planNewFeature(prompt, step, scenario) {
       const carryTasks = ["carry_forward_tagged", "carry_forward_untagged", "carry_forward_overlap", "carry_forward_gate", "carry_forward_phasewide", "scoped_rereview", "scoped_rereview_fallback", "findings_per_task", "findings_per_task_phasewide"].includes(scenario)
         ? "## Phase 1: Do the fixture task\n\n- [ ] Do the first carry-forward task\n- [ ] Do the second carry-forward task\n- [ ] Do the third carry-forward task\n"
         : null;
-      fs.writeFileSync(path.join("specs", wantDir, "tasks.md"), carryTasks ?? sentinelTasks ??
+      const crossPhaseTasks = scenario === "cross_phase_repair"
+        ? "## Phase 1: Setup\n\n- [ ] T001 Do the setup task\n\n## Phase 2: Feature\n\n- [ ] T002 Do the first feature task\n- [ ] T003 Do the second feature task\n"
+        : null;
+      fs.writeFileSync(path.join("specs", wantDir, "tasks.md"), crossPhaseTasks ?? carryTasks ?? sentinelTasks ??
         `## Phase 1: Do the fixture task\n\n- [ ] Do the fixture task\n${second}`);
     }
   }
@@ -633,7 +637,10 @@ async function main() {
           const carryTasksFile = ["carry_forward_tagged", "carry_forward_untagged", "carry_forward_overlap", "carry_forward_gate", "carry_forward_phasewide", "scoped_rereview", "scoped_rereview_fallback", "findings_per_task", "findings_per_task_phasewide"].includes(scenario)
             ? "## Phase 1: General\n\n- [ ] Do the first carry-forward task — accept: done ; verify: none\n- [ ] Do the second carry-forward task — accept: done ; verify: none\n- [ ] Do the third carry-forward task — accept: done ; verify: none\n"
             : null;
-          fs.writeFileSync(tasksFile, carryTasksFile ?? sentinelTasksFile ??
+          const crossPhaseTasksFile = scenario === "cross_phase_repair"
+            ? "## Phase 1: Setup\n\n- [ ] Do the setup task — accept: done ; verify: none\n\n## Phase 2: Feature\n\n- [ ] Do the first feature task — accept: done ; verify: none\n- [ ] Do the second feature task — accept: done ; verify: none\n"
+            : null;
+          fs.writeFileSync(tasksFile, crossPhaseTasksFile ?? carryTasksFile ?? sentinelTasksFile ??
             `## Phase 1: General\n\n- [ ] Do the fixture task — accept: done ; verify: none\n${secondTask}`);
           if (prompt.includes("Every TASKS.md task cites")) {
             fs.writeFileSync(tasksFile, fs.readFileSync(tasksFile, "utf8").replace(/ — accept:/g, " (FR-001) — accept:"));
@@ -962,6 +969,21 @@ async function main() {
       emitTaskResult();
       process.exit(0);
     }
+    if (scenario === "cross_phase_repair") {
+      fs.mkdirSync("output", {recursive: true});
+      if (prompt.includes("Cross-phase targeted repair")) {
+        fs.writeFileSync(path.join("output", "cross-phase-target.txt"), "cross phase repaired\n");
+      } else if (/:P1:/.test(prompt) || /phase 1\//i.test(prompt)) {
+        fs.writeFileSync(path.join("output", "cross-phase-target.txt"), "cross phase initial\n");
+      } else {
+        const taskId = firstLineMatch(prompt, /^currentTaskId: (.*)$/) || "task";
+        const ordMatch = /:T(\d+):/.exec(taskId);
+        const ord = ordMatch ? ordMatch[1] : "x";
+        fs.writeFileSync(path.join("output", `carry-T${ord}.txt`), "task output\n");
+      }
+      emitTaskResult();
+      process.exit(0);
+    }
     if (["carry_forward_tagged", "carry_forward_untagged", "carry_forward_overlap", "carry_forward_gate", "carry_forward_phasewide", "findings_per_task", "findings_per_task_phasewide"].includes(scenario)) {
       // TASK-21: per-task Implementer writing one ordinal-derived file per
       // task (the intra_role_ten mechanism: the path derives from the
@@ -1129,6 +1151,22 @@ async function main() {
         }]})}`);
       } else {
         reviewOutput("PASS", "");
+      }
+    } else if (role === "code_reviewer" && scenario === "cross_phase_repair" && isPhaseReviewCall(prompt)) {
+      if (prompt.includes("FEEDBACK TO ADDRESS")) {
+        reviewOutput("PASS", "");
+      } else if (/Phase: 1 of|phase 1|Phase: Setup/i.test(prompt)) {
+        reviewOutput("PASS", "");
+      } else {
+        console.log(`AUTOPILOT_REVIEW=${JSON.stringify({
+          decision: "FAIL",
+          findings: [{
+            tasks: [],
+            location: "output/cross-phase-target.txt",
+            problem: "Regression in cross-phase target.",
+            correction: "Fix regression in cross-phase target.",
+          }],
+        })}`);
       }
     } else if (role === "code_reviewer" && scenario === "findings_per_task" && isPhaseReviewCall(prompt)) {
       // TASK-24: FAIL once with two findings — T1 and T3 — then PASS (no

@@ -38,18 +38,25 @@ import {
   ROLE_PROGRESS_SUMMARY_MAX_CHARS,
   ROLE_PROGRESS_MAX_FILES,
 } from "./phase-stage-checkpoint.mjs";
+import {
+  isManualCheckMarker,
+  splitManualCheckFindings,
+} from "./task-requirements.mjs";
+
+export {isManualCheckMarker, splitManualCheckFindings};
 
 // Same state key review-feedback.mjs uses for its own slot, so the two records
 // are addressed by the same caller-chosen key and can never drift apart.
 export const FINDING_TASKS_STATE_KEY = "reviewFindingTasks";
+export const TASK_OWNERSHIP_STATE_KEY = "taskOwnership";
 
-const SOURCES = Object.freeze(["declared", "file", "phase", "none"]);
+const SOURCES = Object.freeze(["declared", "file", "cross-phase", "phase", "none"]);
 
 // Sources that attribute a finding to named tasks. Anything else —
 // `"phase"`, `"none"`, and any future source — fails `allMapped` closed in
 // `affectedTaskIds`, so a finding that is not mapped to a task can never
 // silently narrow the retry to a subset of tasks.
-const MAPPED_SOURCES = Object.freeze(["declared", "file"]);
+const MAPPED_SOURCES = Object.freeze(["declared", "file", "cross-phase"]);
 
 // "T<index+1>". The index is a 0-based position in the reviewer's task list.
 export function taskLabel(index) {
@@ -131,22 +138,107 @@ function fileTaskIds(raw, taskIds, factsByTask) {
   }).slice(0, 1);
 }
 
-// Resolution per finding: declared → file → phase → none, first hit wins, and
-// exactly ONE owner at most. The order is the contract step 3/step 2 rely on:
-// a reviewer that both tags a finding and gives its location must never be
-// second-guessed by the file heuristic, so a non-empty `tasks` array still
-// wins outright. An explicit phase-wide answer (`tasks: []`) does NOT: a cited
-// file some task owns is evidence about that task, so the empty tag is only
-// consulted AFTER the file branch and the finding stays `"phase"` solely when
-// there is no location or no task owns the cited file.
-// A non-empty `tasks` array with only unknown labels counts as absent (the
-// existing `declaredTaskIds` drops unknown values silently), so it still
-// falls through to the file fallback and then to `"none"`.
-function resolveFinding(raw, taskIds, factsByTask) {
+// Record mission-wide task file ownership across phases so an exact cited file
+// owned by an earlier phase can be resolved deterministically without fuzzy matching.
+export function recordTaskOwnership(state, {taskId, phaseIndex, phaseNumber, phaseName, taskText, files, summary} = {}) {
+  if (!state || typeof state !== "object" || !taskId || typeof taskId !== "string") return null;
+  if (!state[TASK_OWNERSHIP_STATE_KEY] || typeof state[TASK_OWNERSHIP_STATE_KEY] !== "object") {
+    state[TASK_OWNERSHIP_STATE_KEY] = {};
+  }
+  const existingEntry = state[TASK_OWNERSHIP_STATE_KEY][taskId];
+  const existingFiles = (existingEntry && Array.isArray(existingEntry.files)) ? existingEntry.files : [];
+  const cleanFiles = [...new Set([
+    ...existingFiles.map(comparablePath).filter(Boolean),
+    ...(Array.isArray(files) ? files.map(comparablePath).filter(Boolean) : []),
+  ])];
+  const entry = {
+    taskId,
+    phaseIndex: Number.isInteger(phaseIndex) ? phaseIndex : (existingEntry?.phaseIndex ?? null),
+    phaseNumber: Number.isInteger(phaseNumber) ? phaseNumber : (Number.isInteger(phaseIndex) ? phaseIndex + 1 : (existingEntry?.phaseNumber ?? null)),
+    phaseName: typeof phaseName === "string" ? phaseName : (existingEntry?.phaseName ?? ""),
+    taskText: typeof taskText === "string" ? taskText : (existingEntry?.taskText ?? ""),
+    files: cleanFiles,
+    summary: typeof summary === "string" ? summary : (existingEntry?.summary ?? ""),
+    at: new Date().toISOString(),
+  };
+  state[TASK_OWNERSHIP_STATE_KEY][taskId] = entry;
+  return entry;
+}
+
+export function loadTaskOwnership(state) {
+  const raw = state?.[TASK_OWNERSHIP_STATE_KEY];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out = {};
+  for (const [id, entry] of Object.entries(raw)) {
+    if (!id || !entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    if (!Array.isArray(entry.files)) continue;
+    out[id] = {
+      taskId: id,
+      phaseIndex: Number.isInteger(entry.phaseIndex) ? entry.phaseIndex : null,
+      phaseNumber: Number.isInteger(entry.phaseNumber) ? entry.phaseNumber : null,
+      phaseName: typeof entry.phaseName === "string" ? entry.phaseName : "",
+      taskText: typeof entry.taskText === "string" ? entry.taskText : "",
+      files: entry.files.map(comparablePath).filter(Boolean),
+      summary: typeof entry.summary === "string" ? entry.summary : "",
+      at: typeof entry.at === "string" ? entry.at : null,
+    };
+  }
+  return out;
+}
+
+export function clearTaskOwnership(state) {
+  if (state?.[TASK_OWNERSHIP_STATE_KEY] && typeof state[TASK_OWNERSHIP_STATE_KEY] === "object") {
+    delete state[TASK_OWNERSHIP_STATE_KEY];
+  }
+}
+
+// Find a unique task outside the current phase that owned the exact cited file.
+// Never infers an owner from fuzzy or partial filename matching.
+export function findExactFileOwner(location, taskOwnership, currentTaskIds = []) {
+  const file = comparablePath(location);
+  if (!file) return null;
+  const ownership = taskOwnership && typeof taskOwnership === "object" ? taskOwnership : {};
+  const currentSet = new Set(Array.isArray(currentTaskIds) ? currentTaskIds : []);
+  const matches = [];
+  for (const entry of Object.values(ownership)) {
+    if (!entry || typeof entry !== "object" || !entry.taskId) continue;
+    if (currentSet.has(entry.taskId)) continue;
+    if (Array.isArray(entry.files) && entry.files.some(f => comparablePath(f) === file)) {
+      matches.push(entry);
+    }
+  }
+  if (matches.length === 1) {
+    return matches[0];
+  }
+  return null;
+}
+
+// Resolution per finding: declared → file → cross-phase → phase → none, first
+// hit wins, and exactly ONE owner at most.
+//
+// When a finding cites an exact file location uniquely owned by an earlier task
+// in missionTaskOwnership, it resolves as "cross-phase" rather than falling
+// through to "phase" or "none", so a cross-phase defect gets one targeted repair
+// instead of re-launching every open task in the current phase.
+function resolveFinding(raw, taskIds, factsByTask, taskOwnership) {
   const declared = declaredTaskIds(raw, taskIds);
   if (declared.length) return {taskIds: declared, source: "declared"};
   const byFile = fileTaskIds(raw, taskIds, factsByTask);
   if (byFile.length) return {taskIds: byFile, source: "file"};
+  if (taskOwnership) {
+    const loc = findingLocation(raw);
+    const owner = findExactFileOwner(loc, taskOwnership, taskIds);
+    if (owner) {
+      return {
+        taskIds: [owner.taskId],
+        source: "cross-phase",
+        ownerTaskId: owner.taskId,
+        ownerPhaseIndex: owner.phaseIndex,
+        ownerPhaseName: owner.phaseName,
+        file: comparablePath(loc),
+      };
+    }
+  }
   if (raw && typeof raw === "object" && !Array.isArray(raw) && Array.isArray(raw.tasks) && raw.tasks.length === 0) {
     return {taskIds: [], source: "phase"};
   }
@@ -160,18 +252,22 @@ function resolveFinding(raw, taskIds, factsByTask) {
 // statement) or the list it truncates (MAX_FINDINGS / MAX_TOTAL_CHARS) can
 // never shift the indices the two functions disagree about.
 //
+// Manual check markers (network-gated and browser checks) are extracted and
+// retained as notes/manual-check evidence, never treated as unlinked findings.
+//
 // `factsByTask` must be the PRE-WIPE
 // `checkpoint.roleProgress.implementer.factsByTask`: by the time
 // applyCheckpointTransition() runs on a FAIL, that map is empty.
-export function mapFindingsToTasks({findings, taskIds, factsByTask} = {}) {
+export function mapFindingsToTasks({findings, taskIds, factsByTask, taskOwnership} = {}) {
   const ids = (Array.isArray(taskIds) ? taskIds : []).filter(id => typeof id === "string" && id);
   const facts = factsByTask && typeof factsByTask === "object" ? factsByTask : {};
-  return normalizeFindingsWithSource(findings).map(({raw}) => resolveFinding(raw, ids, facts));
+  const {implementationFindings} = splitManualCheckFindings(findings);
+  return normalizeFindingsWithSource(implementationFindings).map(({raw}) => resolveFinding(raw, ids, facts, taskOwnership));
 }
 
 // The union of every mapped task, in `taskIds` order (never in finding order,
 // so the record is stable while a reviewer reorders its findings), plus
-// `allMapped`.
+// `allMapped` and any cross-phase repairs.
 //
 // `allMapped` is the fail-closed signal step 2 will read:
 //   * false as soon as ANY entry is not a non-empty `MAPPED_SOURCES` entry —
@@ -186,17 +282,33 @@ export function affectedTaskIds(entries, taskIds) {
   const ids = (Array.isArray(taskIds) ? taskIds : []).filter(id => typeof id === "string" && id);
   const list = Array.isArray(entries) ? entries : [];
   const chosen = new Set();
+  const crossPhase = [];
+  const seenCrossPhase = new Set();
   let allMapped = list.length > 0;
   for (const entry of list) {
-    // mapped only if: MAPPED_SOURCES.includes(entry.source) && entry.taskIds.length > 0
     if (!entry || typeof entry !== "object" || !Array.isArray(entry.taskIds) ||
         !(MAPPED_SOURCES.includes(entry.source) && entry.taskIds.length > 0)) {
       allMapped = false;
       continue;
     }
+    if (entry.source === "cross-phase") {
+      for (const id of entry.taskIds) {
+        if (typeof id === "string" && !seenCrossPhase.has(id)) {
+          seenCrossPhase.add(id);
+          crossPhase.push({
+            taskId: id,
+            ownerTaskId: entry.ownerTaskId ?? id,
+            ownerPhaseIndex: entry.ownerPhaseIndex ?? null,
+            ownerPhaseName: entry.ownerPhaseName ?? "",
+            file: entry.file ?? "",
+          });
+        }
+      }
+      continue;
+    }
     for (const id of entry.taskIds) if (typeof id === "string") chosen.add(id);
   }
-  return {taskIds: ids.filter(id => chosen.has(id)), allMapped};
+  return {taskIds: ids.filter(id => chosen.has(id)), allMapped, crossPhase};
 }
 
 // Compute the mapping from the RAW verdict findings (never the rendered
@@ -219,11 +331,13 @@ export function affectedTaskIds(entries, taskIds) {
 // `factsByTask[id]` of every task in `taskIds` NOT in `affected`, filled
 // only when `allMapped === true`, `carryAllowed === true`, and the task has
 // a facts entry; otherwise `{}` (redo everything, today's behaviour).
-export function recordFindingTasks(state, key, {phaseTaskDigest, findings, taskIds, factsByTask, revision, carryAllowed} = {}) {
+export function recordFindingTasks(state, key, {phaseTaskDigest, findings, taskIds, factsByTask, revision, carryAllowed, taskOwnership} = {}) {
   if (!state || typeof state !== "object" || !key) return null;
   const ids = (Array.isArray(taskIds) ? taskIds : []).filter(id => typeof id === "string" && id);
-  const entries = mapFindingsToTasks({findings, taskIds: ids, factsByTask});
-  const {taskIds: affected, allMapped} = affectedTaskIds(entries, ids);
+  const ownership = taskOwnership ?? loadTaskOwnership(state);
+  const {implementationFindings, manualChecks} = splitManualCheckFindings(findings);
+  const entries = mapFindingsToTasks({findings: implementationFindings, taskIds: ids, factsByTask, taskOwnership: ownership});
+  const {taskIds: affected, allMapped, crossPhase} = affectedTaskIds(entries, ids);
   const rev = Number.isInteger(revision) && revision >= 1 ? revision : null;
   const carry = {};
   if (allMapped && carryAllowed === true && rev !== null) {
@@ -241,6 +355,8 @@ export function recordFindingTasks(state, key, {phaseTaskDigest, findings, taskI
     taskIds: ids,
     entries,
     affected,
+    crossPhase: crossPhase ?? [],
+    manualChecks: manualChecks ?? [],
     allMapped,
     revision: rev,
     carry,
@@ -272,7 +388,8 @@ export function loadFindingTasks(state, key, {phaseTaskDigest} = {}) {
   for (const entry of slot.entries) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
     if (!SOURCES.includes(entry.source) || !Array.isArray(entry.taskIds)) return null;
-    if (entry.taskIds.some(id => !slot.taskIds.includes(id))) return null;
+    if (entry.source !== "cross-phase" && entry.taskIds.some(id => !slot.taskIds.includes(id))) return null;
+    if (entry.source === "cross-phase" && (entry.taskIds.length === 0 || entry.taskIds.some(id => typeof id !== "string" || !id))) return null;
   }
   // TASK-21: the carry record is only usable by the revision the FAIL
   // created (N+1 reads N's record). A missing or non-positive revision —
@@ -321,12 +438,23 @@ export function loadFindingTasks(state, key, {phaseTaskDigest} = {}) {
   return {
     phaseTaskDigest: slot.phaseTaskDigest,
     taskIds: [...slot.taskIds],
-    entries: slot.entries.map(entry => ({taskIds: [...entry.taskIds], source: entry.source})),
+    entries: slot.entries.map(entry => ({
+      taskIds: [...entry.taskIds],
+      source: entry.source,
+      ...(entry.ownerTaskId ? {ownerTaskId: entry.ownerTaskId} : {}),
+      ...(entry.ownerPhaseIndex != null ? {ownerPhaseIndex: entry.ownerPhaseIndex} : {}),
+      ...(entry.ownerPhaseName ? {ownerPhaseName: entry.ownerPhaseName} : {}),
+      ...(entry.file ? {file: entry.file} : {}),
+    })),
     affected: [...slot.affected],
+    crossPhase: Array.isArray(slot.crossPhase) ? JSON.parse(JSON.stringify(slot.crossPhase)) : [],
+    manualChecks: Array.isArray(slot.manualChecks) ? [...slot.manualChecks] : [],
+    completedCrossPhaseRepairs: slot.completedCrossPhaseRepairs && typeof slot.completedCrossPhaseRepairs === "object"
+      ? JSON.parse(JSON.stringify(slot.completedCrossPhaseRepairs))
+      : {},
     allMapped: slot.allMapped,
     revision: slot.revision,
     carry,
-    at: typeof slot.at === "string" ? slot.at : null,
   };
 }
 
@@ -520,11 +648,142 @@ export function carryDecision({record, taskId, progress, revision, phaseTaskDige
         }
       }
     }
+    if (record.completedCrossPhaseRepairs && typeof record.completedCrossPhaseRepairs === "object") {
+      for (const [repId, rep] of Object.entries(record.completedCrossPhaseRepairs)) {
+        const repFiles = rep && Array.isArray(rep.files) ? rep.files : [];
+        for (const file of repFiles) {
+          const normalized = comparablePath(file);
+          if (normalized && owned.has(normalized)) {
+            if (!overlapTaskIds.includes(repId)) overlapTaskIds.push(repId);
+            if (!seenOverlapFiles.has(normalized)) {
+              seenOverlapFiles.add(normalized);
+              overlapFiles.push(typeof file === "string" ? file : normalized);
+            }
+          }
+        }
+      }
+    }
     if (overlapTaskIds.length > 0) {
       return {carry: false, reason: "overlap", overlap: {taskIds: [...overlapTaskIds], files: [...overlapFiles]}};
     }
   }
   return {carry: true, facts: JSON.parse(JSON.stringify(entry)), reason: "carry"};
+}
+
+export function pendingCrossPhaseRepairs(record) {
+  if (!record || typeof record !== "object") return [];
+  const list = Array.isArray(record.crossPhase) ? record.crossPhase : [];
+  const completed = record.completedCrossPhaseRepairs && typeof record.completedCrossPhaseRepairs === "object"
+    ? record.completedCrossPhaseRepairs
+    : {};
+  return list.filter(item => item && item.taskId && !completed[item.taskId]);
+}
+
+export function markCrossPhaseRepairCompleted(state, key, taskId, {files} = {}) {
+  const record = state?.[FINDING_TASKS_STATE_KEY]?.[key];
+  if (!record || typeof record !== "object") return false;
+  if (!record.completedCrossPhaseRepairs || typeof record.completedCrossPhaseRepairs !== "object") {
+    record.completedCrossPhaseRepairs = {};
+  }
+  record.completedCrossPhaseRepairs[taskId] = {
+    status: "completed",
+    at: new Date().toISOString(),
+    files: Array.isArray(files) ? files.map(comparablePath).filter(Boolean) : [],
+  };
+  return true;
+}
+
+export function buildCrossPhaseRepairPrompt({owner, findingText, file, taskRef} = {}) {
+  const fileStr = file ? `File: ${file}\n` : "";
+  const taskRefStr = taskRef ? ` [${taskRef}]` : "";
+  return [
+    `Cross-phase targeted repair${taskRefStr}:`,
+    `A regression was detected in a file owned by earlier task ${owner?.taskId || "unknown"}.`,
+    fileStr,
+    `Reviewer feedback from the previous attempt that MUST be addressed — fix this finding in the cited file:`,
+    findingText || "Fix the reported regression.",
+  ].filter(Boolean).join("\n\n");
+}
+
+export async function executePendingCrossPhaseRepairs({
+  state,
+  key,
+  phaseTaskDigest,
+  framework,
+  relay,
+  config,
+  phaseRequirements,
+  perTaskLimits,
+  feedback,
+  onPolicyViolation,
+  saveState,
+  afterRepair,
+} = {}) {
+  const digest = phaseTaskDigest || state?.[FINDING_TASKS_STATE_KEY]?.[key]?.phaseTaskDigest;
+  const findingRecord = loadFindingTasks(state, key, {phaseTaskDigest: digest});
+  const pendingRepairs = pendingCrossPhaseRepairs(findingRecord);
+  if (!pendingRepairs.length) return {repaired: false, count: 0, lastResult: null};
+  
+  const ownership = loadTaskOwnership(state);
+  let count = 0;
+  let lastRepairResult = null;
+  for (const repair of pendingRepairs) {
+    console.log(`  Launching targeted cross-phase repair for task ${repair.taskId} (${repair.file || "unspecified file"})...`);
+    const repairOwnership = ownership[repair.taskId];
+    const repairRef = repairOwnership?.taskId || repair.taskId;
+    const allFeedback = loadReviewFeedback(state, key);
+    const repairFindingsText = (findingRecord?.entries || [])
+      .map((e, idx) => ({entry: e, text: allFeedback[idx]}))
+      .filter(({entry}) => entry.source === "cross-phase" && entry.taskIds?.includes(repair.taskId))
+      .map(({text}) => text)
+      .filter(Boolean)
+      .join("\n");
+    const repairPrompt = buildCrossPhaseRepairPrompt({
+      owner: repairOwnership || {taskId: repair.taskId},
+      findingText: repairFindingsText || feedback,
+      file: repair.file,
+      taskRef: repairRef,
+    });
+    const repairImpl = await relay("implementer", repairPrompt, config, state, {
+      resume: false,
+      requirements: phaseRequirements,
+      timeoutMs: perTaskLimits?.perTaskTimeoutMs,
+      taskRef: repairRef,
+      capEnabled: true,
+      contScope: `task:${framework}:cross-phase:${repair.taskId}`,
+    });
+    if (repairImpl?.policyViolation) {
+      if (typeof onPolicyViolation === "function") {
+        onPolicyViolation(repairImpl);
+      }
+      return {repaired: false, count, policyViolation: repairImpl.policyViolation, lastResult: repairImpl};
+    }
+    const touched = (repairImpl && Array.isArray(repairImpl.touchedFiles))
+      ? repairImpl.touchedFiles
+      : (repair.file ? [repair.file] : []);
+    markCrossPhaseRepairCompleted(state, key, repair.taskId, {files: touched});
+    if (repairOwnership) {
+      recordTaskOwnership(state, {
+        taskId: repair.taskId,
+        phaseIndex: repairOwnership.phaseIndex,
+        phaseNumber: repairOwnership.phaseNumber,
+        phaseName: repairOwnership.phaseName,
+        taskText: repairOwnership.taskText,
+        files: [...new Set([...(repairOwnership.files || []), ...touched])],
+        summary: repairOwnership.summary,
+      });
+    }
+    if (typeof saveState === "function") {
+      saveState(state);
+    }
+    if (typeof afterRepair === "function") {
+      afterRepair(repair);
+    }
+    count += 1;
+    lastRepairResult = repairImpl;
+    console.log(`  ✓ Targeted cross-phase repair completed for ${repair.taskId}`);
+  }
+  return {repaired: count > 0, count, lastResult: lastRepairResult};
 }
 
 // A record that outlives its findings is the bug class this codebase has

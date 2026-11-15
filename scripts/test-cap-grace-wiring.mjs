@@ -432,8 +432,8 @@ function tickRoleGraceUnit({usage, limits, events, graceWindow}) {
   const roleTurnUsage = (turns, growing = 10_000) => ({turns, cacheRead: growing, input: 0});
   for (const role of REVIEW_ROLES_031) {
     const limits = resolvePerRoleLimits(role, {});
-    const expTokens = role === "planner" ? 200_000 : role === "plan_reviewer" ? 250_000 : 150_000;
-    const expWrapup = role === "planner" ? 180_000 : role === "plan_reviewer" ? 225_000 : 135_000;
+    const expTokens = (role === "planner" || role === "verifier") ? 200_000 : 250_000;
+    const expWrapup = (role === "planner" || role === "verifier") ? 180_000 : 225_000;
     const expTokenCeiling = Math.ceil(expTokens * 1.1);
     const T = (role === "verifier" || role === "planner" || role === "plan_reviewer") ? 30 : 22; // backlog #59(b), #111: verifier/planner/plan_reviewer turn default 30
     check(`grace/${role}: defaults are ${T} turns / ${expTokens} tokens / ${expWrapup} wrap-up`,

@@ -337,6 +337,8 @@ case "$ROLE" in
             # TASK-22: the phasewide scenario needs the same three tasks.
             # TASK-23: the scoped-rereview scenarios need the same three tasks.
             # TASK-24: the findings_per_task* scenarios need the same three tasks.
+            elif [ "$SCENARIO" = "cross_phase_repair" ]; then
+              printf '## Phase 1: Setup\n\n- [ ] T001 Do the setup task\n\n## Phase 2: Feature\n\n- [ ] T002 Do the first feature task\n- [ ] T003 Do the second feature task\n' > "specs/$WANT_DIR/tasks.md"
             elif [ "$SCENARIO" = "carry_forward_tagged" ] || [ "$SCENARIO" = "carry_forward_untagged" ] || [ "$SCENARIO" = "carry_forward_overlap" ] || [ "$SCENARIO" = "carry_forward_gate" ] || [ "$SCENARIO" = "carry_forward_phasewide" ] || [ "$SCENARIO" = "scoped_rereview" ] || [ "$SCENARIO" = "scoped_rereview_fallback" ] || [ "$SCENARIO" = "findings_per_task" ] || [ "$SCENARIO" = "findings_per_task_phasewide" ]; then
               printf '## Phase 1: Do the fixture task\n\n- [ ] Do the first carry-forward task\n- [ ] Do the second carry-forward task\n- [ ] Do the third carry-forward task\n' > "specs/$WANT_DIR/tasks.md"
             # TASK-25: the sentinel scenarios need a TWO-task phase (the
@@ -753,7 +755,9 @@ case "$ROLE" in
               # TASK-22: the phasewide scenario needs the same three tasks.
               # TASK-23: the scoped-rereview scenarios need the same three tasks.
               # TASK-24: the findings_per_task* scenarios need the same three tasks.
-              elif [ "$SCENARIO" = "carry_forward_tagged" ] || [ "$SCENARIO" = "carry_forward_untagged" ] || [ "$SCENARIO" = "carry_forward_overlap" ] || [ "$SCENARIO" = "carry_forward_gate" ] || [ "$SCENARIO" = "carry_forward_phasewide" ] || [ "$SCENARIO" = "scoped_rereview" ] || [ "$SCENARIO" = "scoped_rereview_fallback" ] || [ "$SCENARIO" = "findings_per_task" ] || [ "$SCENARIO" = "findings_per_task_phasewide" ]; then
+              elif [ "$SCENARIO" = "cross_phase_repair" ]; then
+                printf '## Phase 1: Setup\n\n- [ ] Do the setup task — accept: done ; verify: none\n\n## Phase 2: Feature\n\n- [ ] Do the first feature task — accept: done ; verify: none\n- [ ] Do the second feature task — accept: done ; verify: none\n' > "$TASKS_FILE"
+            elif [ "$SCENARIO" = "carry_forward_tagged" ] || [ "$SCENARIO" = "carry_forward_untagged" ] || [ "$SCENARIO" = "carry_forward_overlap" ] || [ "$SCENARIO" = "carry_forward_gate" ] || [ "$SCENARIO" = "carry_forward_phasewide" ] || [ "$SCENARIO" = "scoped_rereview" ] || [ "$SCENARIO" = "scoped_rereview_fallback" ] || [ "$SCENARIO" = "findings_per_task" ] || [ "$SCENARIO" = "findings_per_task_phasewide" ]; then
                 printf '## Phase 1: General\n\n- [ ] Do the first carry-forward task — accept: done ; verify: none\n- [ ] Do the second carry-forward task — accept: done ; verify: none\n- [ ] Do the third carry-forward task — accept: done ; verify: none\n' > "$TASKS_FILE"
               # TASK-25: the sentinel scenarios need a TWO-task phase (see the
               # twin note in plan_new_feature's single-task branch).
@@ -1131,6 +1135,21 @@ case "$ROLE" in
           echo "implementer ok without a result line"
         fi
         exit 0
+      fi
+      emit_task_result
+      exit 0
+    fi
+    if [ "$SCENARIO" = "cross_phase_repair" ]; then
+      mkdir -p output
+      if printf '%s\n' "$PROMPT" | grep -q 'Cross-phase targeted repair'; then
+        printf 'cross phase repaired\n' > output/cross-phase-target.txt
+      elif printf '%s\n' "$PROMPT" | grep -E -i -q '(:P1:|phase 1/)'; then
+        printf 'cross phase initial\n' > output/cross-phase-target.txt
+      else
+        TID=$(printf '%s\n' "$PROMPT" | sed -n 's/^currentTaskId: //p' | head -n 1)
+        ORD=$(printf '%s' "$TID" | sed -n 's/.*:T\([0-9][0-9]*\):.*/\1/p')
+        if [ -z "$ORD" ]; then ORD="x"; fi
+        printf 'task output\n' > "output/carry-T$ORD.txt"
       fi
       emit_task_result
       exit 0
@@ -1528,6 +1547,14 @@ case "$ROLE" in
         printf 'AUTOPILOT_REVIEW={"decision":"FAIL","findings":[{"tasks":["T2"],"location":"docs/scoped-rereview.md","problem":"Task T2 ships a stub with no implementation.","correction":"Replace the stub with the real implementation."}]}\n'
       else
         review_output PASS ""
+      fi
+    elif [ "$SCENARIO" = "cross_phase_repair" ] && phase_review_call; then
+      if printf '%s\n' "$PROMPT" | grep -q 'FEEDBACK TO ADDRESS'; then
+        review_output PASS ""
+      elif printf '%s\n' "$PROMPT" | grep -E -i -q '(Phase: 1 of|phase 1|Phase: Setup)'; then
+        review_output PASS ""
+      else
+        printf 'AUTOPILOT_REVIEW={"decision":"FAIL","findings":[{"tasks":[],"location":"output/cross-phase-target.txt","problem":"Regression in cross-phase target.","correction":"Fix regression in cross-phase target."}]}\n'
       fi
     elif [ "$SCENARIO" = "findings_per_task" ] && phase_review_call; then
       # TASK-24: FAIL once with T1 + T3 findings, then PASS (no hang — the

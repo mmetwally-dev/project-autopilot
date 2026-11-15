@@ -63,7 +63,7 @@ if('config_metadata' in reread || 'model_source' in reread.roles.planner) throw 
 // handoff chars move under `advanced`.
 const impl = reread.caps?.implementer;
 if(!impl) throw new Error('caps.implementer missing');
-if(impl.max_turns!==40 || impl.max_tokens!==180000 || impl.extra_sessions!==5 || impl.wrap_up_at_tokens!==160000) throw new Error(`implementer caps not backfilled from code defaults: ${JSON.stringify(impl)}`);
+if(impl.max_turns!==40 || impl.max_tokens!==200000 || impl.extra_sessions!==5 || impl.wrap_up_at_tokens!==180000) throw new Error(`implementer caps not backfilled from code defaults: ${JSON.stringify(impl)}`);
 if(reread.advanced.handoff_max_chars!==2000 || reread.advanced.handoff_note_max_chars!==4000) throw new Error(`handoff chars not mapped: ${JSON.stringify(reread.advanced)}`);
 if(reread.retries.no_progress_sessions!==2 || reread.retries.final_review_fix_rounds!==2) throw new Error(`retries not mapped: ${JSON.stringify(reread.retries)}`);
 
@@ -72,8 +72,8 @@ const caps = reread.caps;
 const expectedRoles = ['planner', 'plan_reviewer', 'code_reviewer', 'verifier'];
 for (const role of expectedRoles) {
   if (!caps[role]) throw new Error(`Missing caps for role ${role}`);
-  const expTokens = role === 'planner' ? 200000 : role === 'plan_reviewer' ? 250000 : 150000;
-  const expWrapup = role === 'planner' ? 180000 : role === 'plan_reviewer' ? 225000 : 135000;
+  const expTokens = (role === 'planner' || role === 'verifier') ? 200000 : 250000;
+  const expWrapup = (role === 'planner' || role === 'verifier') ? 180000 : 225000;
   const expTurns = (role === "verifier" || role === "planner" || role === "plan_reviewer") ? 30 : 22; // backlog #59(b), #111
   const expSessions = role === "plan_reviewer" ? 4 : 2;
   if (caps[role].max_turns !== expTurns) throw new Error(`${role}.max_turns !== ${expTurns}: ${caps[role].max_turns}`);
@@ -84,7 +84,7 @@ for (const role of expectedRoles) {
 
 // Operator-set values are never overwritten.
 const preset={schema_version:'1.4',project:{planning_framework:'gsd'},roles:{},policy:{
-  per_task_max_tokens:200000,
+  per_task_max_tokens:220000,
   continuation_allowance:7,
   handoff_max_chars:800,
   handoff_note_max_chars:1500,
@@ -95,7 +95,7 @@ const preset={schema_version:'1.4',project:{planning_framework:'gsd'},roles:{},p
   }
 }};
 const presetLayout = layoutOf(preset);
-if(presetLayout.caps.implementer.max_tokens!==200000 || presetLayout.caps.implementer.extra_sessions!==7 || presetLayout.caps.implementer.wrap_up_at_tokens!==60000) throw new Error(`Operator implementer caps overwritten: ${JSON.stringify(presetLayout.caps.implementer)}`);
+if(presetLayout.caps.implementer.max_tokens!==220000 || presetLayout.caps.implementer.extra_sessions!==7 || presetLayout.caps.implementer.wrap_up_at_tokens!==60000) throw new Error(`Operator implementer caps overwritten: ${JSON.stringify(presetLayout.caps.implementer)}`);
 if(presetLayout.advanced.handoff_max_chars!==800 || presetLayout.advanced.handoff_note_max_chars!==1500) throw new Error(`Operator handoff values overwritten: ${JSON.stringify(presetLayout.advanced)}`);
 
 // Operator-set review caps are preserved; missing fields backfilled.
@@ -123,12 +123,12 @@ const legacyShipped = layoutOf({schema_version:'3.0', project:{planning_framewor
     verifier: {max_tokens: 170000, wrap_up_tokens_threshold: 160000},
   },
 }});
-if (legacyShipped.caps.implementer.max_tokens !== 180000) throw new Error(`legacy per_task_max_tokens 750000 not rewritten to the per-turn default: ${legacyShipped.caps.implementer.max_tokens}`);
-if (legacyShipped.caps.implementer.wrap_up_at_tokens !== 160000) throw new Error(`legacy handoff_wrapup_tokens 690000 not rewritten to the per-turn default: ${legacyShipped.caps.implementer.wrap_up_at_tokens}`);
+if (legacyShipped.caps.implementer.max_tokens !== 200000) throw new Error(`legacy per_task_max_tokens 750000 not rewritten to the per-turn default: ${legacyShipped.caps.implementer.max_tokens}`);
+if (legacyShipped.caps.implementer.wrap_up_at_tokens !== 180000) throw new Error(`legacy handoff_wrapup_tokens 690000 not rewritten to the per-turn default: ${legacyShipped.caps.implementer.wrap_up_at_tokens}`);
 const legacyCaps = legacyShipped.caps;
 for (const role of ['planner', 'plan_reviewer', 'code_reviewer']) {
-  const expTokens = role === 'planner' ? 200000 : role === 'plan_reviewer' ? 250000 : 150000;
-  const expWrapup = role === 'planner' ? 180000 : role === 'plan_reviewer' ? 225000 : 135000;
+  const expTokens = role === 'planner' ? 200000 : 250000;
+  const expWrapup = role === 'planner' ? 180000 : 225000;
   if (legacyCaps[role].max_tokens !== expTokens) throw new Error(`legacy ${role}.max_tokens not rewritten: ${legacyCaps[role].max_tokens}`);
   if (legacyCaps[role].wrap_up_at_tokens !== expWrapup) throw new Error(`legacy ${role}.wrap_up_at_tokens not rewritten: ${legacyCaps[role].wrap_up_at_tokens}`);
 }
@@ -172,15 +172,15 @@ const validateMigrated = (input, label) => {
 };
 const ex500k = layoutOf({schema_version:'3.0',project:{planning_framework:'gsd'},roles:{},policy:{handoff_wrapup_tokens:500000}});
 validateMigrated({schema_version:'3.0',project:{planning_framework:'gsd'},roles:{},policy:{handoff_wrapup_tokens:500000}}, '500K wrap-up');
-if (ex500k.caps.implementer.wrap_up_at_tokens !== 160000) throw new Error(`500K wrap-up not rewritten to the per-turn default: ${ex500k.caps.implementer.wrap_up_at_tokens}`);
+if (ex500k.caps.implementer.wrap_up_at_tokens !== 180000) throw new Error(`500K wrap-up not rewritten to the per-turn default: ${ex500k.caps.implementer.wrap_up_at_tokens}`);
 const ex950k = layoutOf({schema_version:'3.0',project:{planning_framework:'gsd'},roles:{},policy:{handoff_wrapup_tokens:950000}});
 validateMigrated({schema_version:'3.0',project:{planning_framework:'gsd'},roles:{},policy:{handoff_wrapup_tokens:950000}}, '950K wrap-up');
-if (ex950k.caps.implementer.wrap_up_at_tokens !== 160000) throw new Error(`950K wrap-up not rewritten to the per-turn default: ${ex950k.caps.implementer.wrap_up_at_tokens}`);
+if (ex950k.caps.implementer.wrap_up_at_tokens !== 180000) throw new Error(`950K wrap-up not rewritten to the per-turn default: ${ex950k.caps.implementer.wrap_up_at_tokens}`);
 const exCapsInput = {schema_version:'3.0',project:{planning_framework:'gsd'},roles:{},policy:{per_task_max_tokens:750000, caps:{verifier:{max_tokens:600000}}}};
 const exCaps = layoutOf(exCapsInput);
 validateMigrated(exCapsInput, '750K cap + 600K verifier cap');
-if (exCaps.caps.implementer.max_tokens !== 180000) throw new Error(`750K per_task_max_tokens not rewritten: ${exCaps.caps.implementer.max_tokens}`);
-if (exCaps.caps.verifier.max_tokens !== 150000) throw new Error(`600K verifier cap not rewritten: ${exCaps.caps.verifier.max_tokens}`);
+if (exCaps.caps.implementer.max_tokens !== 200000) throw new Error(`750K per_task_max_tokens not rewritten: ${exCaps.caps.implementer.max_tokens}`);
+if (exCaps.caps.verifier.max_tokens !== 200000) throw new Error(`600K verifier cap not rewritten: ${exCaps.caps.verifier.max_tokens}`);
 
 // THIS project's real config migrates and validates (read-only — never write
 // config.json).

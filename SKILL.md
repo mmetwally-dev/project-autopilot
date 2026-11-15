@@ -86,7 +86,8 @@ and `ap watch` do not exist; the WATCH-REPORT is the status view.
   one file, with exact paths, an `accept:` line and a `verify:` command; more than
   3 changes or 2 files means split it. The read-only plan reviewer APPROVES or
   DENIES with findings; the planner revises up to `retries.plan_revisions` times
-  (the spec review: `retries.spec_revisions`, default 3, then open findings pass
+  (a capped revision goes to review only when its hand-off note says every
+  finding is done, otherwise the planner continues; the spec review: `retries.spec_revisions`, default 3, then open findings pass
   to the plan stage). With the spec on, full plan-review rounds also cross-check
   SPEC/PLAN/TASKS (coverage, naming, ambiguity, duplicates, conflicts).
   Plan Review FAIL returns to Planning.
@@ -95,7 +96,10 @@ and `ap watch` do not exist; the WATCH-REPORT is the status view.
   fresh session continues it, up to `caps.implementer.extra_sessions`.
 - **Code review, per phase.** Read-only. Code Review FAIL returns to
   Implementation for the tasks the findings name; the re-review covers its own
-  findings plus the fix.
+  findings plus the fix. A finding in a file that an earlier phase's task wrote
+  gets one targeted repair of that task instead of re-running the current
+  phase's tasks; manual-check notes (browser, network) are kept as notes, not
+  findings.
 - **Gate.** Autopilot runs `tests.gate_commands` itself. Failing tests are re-run
   on the phase's starting code; failures that existed before are not blamed on
   the phase, new ones go back to the implementer.
@@ -314,9 +318,10 @@ migrate automatically with one timestamped backup.
   `plan_reviewer`, `implementer`, `code_reviewer`, `verifier`).
 - `ap config show [--path <key.path>] [--explain]` — effective values, marked `[default]` or
   `[from config.json]`; `--explain` adds a one-line explanation under each setting.
-- `ap config fill [--dry-run]` — add every missing setting at its default, keep
-  every existing value (including `null` and empty lists), rename old names in
-  place (`time_limits.mission_timeout_minutes` → `call_backstop_minutes`), repair
+- `ap config fill [--dry-run]` — add every missing setting at its default, move
+  old shipped cap defaults to the current ones, keep every existing value
+  (including `null` and empty lists), rename old names in place
+  (`time_limits.mission_timeout_minutes` → `call_backstop_minutes`), repair
   `$schema`; writes a `.bak-<timestamp>` backup first; never invents a `runtime`
   mode.
 

@@ -29,6 +29,8 @@
 // Anything malformed is dropped rather than repaired or fabricated, because
 // a wrong correction instruction is worse than none.
 
+import {splitManualCheckFindings} from "./task-requirements.mjs";
+
 export const MAX_FINDINGS = 20;
 export const MAX_FINDING_CHARS = 1000;
 export const MAX_CORRECTION_CHARS = 700;
@@ -86,9 +88,10 @@ export function renderFinding(finding, {clamped = true} = {}) {
 // and whole-list budgets are enforced here so no caller can bypass them.
 export function normalizeFindingsWithSource(raw) {
   if (!Array.isArray(raw)) return [];
+  const {implementationFindings} = splitManualCheckFindings(raw);
   const out = [];
   let total = 0;
-  for (const entry of raw) {
+  for (const entry of implementationFindings) {
     if (out.length >= MAX_FINDINGS) break;
     const rendered = renderFinding(entry);
     if (!rendered) continue;

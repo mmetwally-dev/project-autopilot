@@ -16,17 +16,17 @@ const root = path.resolve(here, '..');
 const setupScript = path.join(here, 'setup.mjs');
 const reviewRoles = ['planner', 'plan_reviewer', 'code_reviewer', 'verifier'];
 // Legacy format (from mergeRoleCaps) uses wrap_up_tokens_threshold
-const LEGACY_DEFAULTS = {max_turns: 22, max_tokens: 150000, extra_sessions: 2, wrap_up_tokens_threshold: 135000};
+const LEGACY_DEFAULTS = {max_turns: 22, max_tokens: 250000, extra_sessions: 2, wrap_up_tokens_threshold: 225000};
 const LEGACY_PLANNER_DEFAULTS = {max_turns: 30, max_tokens: 200000, extra_sessions: 2, wrap_up_tokens_threshold: 180000};
-const LEGACY_VERIFIER_DEFAULTS = {...LEGACY_DEFAULTS, max_turns: 30};
-const LEGACY_PLAN_REVIEWER_DEFAULTS = {...LEGACY_VERIFIER_DEFAULTS, max_tokens: 250000, extra_sessions: 4, wrap_up_tokens_threshold: 225000};
+const LEGACY_VERIFIER_DEFAULTS = {max_turns: 30, max_tokens: 200000, extra_sessions: 2, wrap_up_tokens_threshold: 180000};
+const LEGACY_PLAN_REVIEWER_DEFAULTS = {max_turns: 30, max_tokens: 250000, extra_sessions: 4, wrap_up_tokens_threshold: 225000};
 const legacyDefaultsFor = (role) => (role === "planner" ? LEGACY_PLANNER_DEFAULTS : role === "plan_reviewer" ? LEGACY_PLAN_REVIEWER_DEFAULTS : role === "verifier" ? LEGACY_VERIFIER_DEFAULTS : LEGACY_DEFAULTS);
 // v4 format (from toNewLayoutConfig) uses wrap_up_at_tokens
-const V4_DEFAULTS = {max_turns: 22, max_tokens: 150000, extra_sessions: 2, wrap_up_at_tokens: 135000};
+const V4_DEFAULTS = {max_turns: 22, max_tokens: 250000, extra_sessions: 2, wrap_up_at_tokens: 225000};
 const V4_PLANNER_DEFAULTS = {max_turns: 30, max_tokens: 200000, extra_sessions: 2, wrap_up_at_tokens: 180000};
-const V4_VERIFIER_DEFAULTS = {...V4_DEFAULTS, max_turns: 30};
-const V4_PLAN_REVIEWER_DEFAULTS = {...V4_VERIFIER_DEFAULTS, max_tokens: 250000, extra_sessions: 4, wrap_up_at_tokens: 225000};
-const V4_IMPLEMENTER_DEFAULTS = {max_turns: 40, max_tokens: 180000, extra_sessions: 5, wrap_up_at_tokens: 160000};
+const V4_VERIFIER_DEFAULTS = {max_turns: 30, max_tokens: 200000, extra_sessions: 2, wrap_up_at_tokens: 180000};
+const V4_PLAN_REVIEWER_DEFAULTS = {max_turns: 30, max_tokens: 250000, extra_sessions: 4, wrap_up_at_tokens: 225000};
+const V4_IMPLEMENTER_DEFAULTS = {max_turns: 40, max_tokens: 200000, extra_sessions: 5, wrap_up_at_tokens: 180000};
 const v4DefaultsFor = (role) => (role === "planner" ? V4_PLANNER_DEFAULTS : role === "plan_reviewer" ? V4_PLAN_REVIEWER_DEFAULTS : role === "verifier" ? V4_VERIFIER_DEFAULTS : (role === "implementer" ? V4_IMPLEMENTER_DEFAULTS : V4_DEFAULTS));
 
 let passed = 0;
@@ -62,7 +62,7 @@ function checkEqual(name, actual, expected) {
 
 // Full operator caps for one role are kept as-is.
 {
-  const full = {max_turns: 15, max_tokens: 200000, extra_sessions: 3, wrap_up_tokens_threshold: 180000};
+  const full = {max_turns: 15, max_tokens: 170000, extra_sessions: 3, wrap_up_tokens_threshold: 150000};
   const caps = mergeRoleCaps({verifier: full});
   checkEqual('full verifier kept', caps.verifier, full);
   checkEqual('full: planner default', caps.planner, LEGACY_PLANNER_DEFAULTS);
@@ -184,7 +184,7 @@ try {
   // under caps is rejected by config validation, so it is not seeded.)
   // Non-planner review roles must have max_tokens < global ceiling (180K).
   {
-    const full = {max_turns: 15, max_tokens: 150000, extra_sessions: 3, wrap_up_at_tokens: 135000};
+    const full = {max_turns: 15, max_tokens: 170000, extra_sessions: 3, wrap_up_at_tokens: 150000};
     const repo = makeRepo({planner: {max_turns: 30}, verifier: full});
     const r = await runSetup(repo, binDir);
     checkEqual('setup existing exit status', r.status, 0);

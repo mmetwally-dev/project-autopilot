@@ -14,7 +14,7 @@ import { pathToFileURL } from "node:url";
 
 import { DEFAULTS, migrateTimeLimitNames, migratePlanApprovalKey } from "./config-layout.mjs";
 import { schemaReferenceFor, schemaReferenceResolves } from "./config-schema-ref.mjs";
-import { loadAndMigrateConfig, CURRENT_SCHEMA } from "./config-migration.mjs";
+import { loadAndMigrateConfig, CURRENT_SCHEMA, migrateV4Caps } from "./config-migration.mjs";
 import { normalizeAgyModelEffort } from "./agy-model-effort.mjs";
 
 function isPlainObject(value) {
@@ -193,6 +193,7 @@ export function fillConfigFile(configPath, { dryRun = false } = {}) {
 
   let layoutToFill;
   let migrationResult = null;
+  let updated = [];
   if (!isV4) {
     migrationResult = loadAndMigrateConfig(configPath, { persist: false });
     if (!migrationResult.layout) {
@@ -200,7 +201,9 @@ export function fillConfigFile(configPath, { dryRun = false } = {}) {
     }
     layoutToFill = migrationResult.layout;
   } else {
-    layoutToFill = original;
+    const v4Caps = migrateV4Caps(original);
+    layoutToFill = v4Caps.layout;
+    updated = v4Caps.changes || [];
   }
 
   const {renamed} = migrateTimeLimitNames(isPlainObject(original) ? original : {});
@@ -212,14 +215,15 @@ export function fillConfigFile(configPath, { dryRun = false } = {}) {
     layoutToFill.$schema !== filled.$schema || Object.keys(layoutToFill)[0] !== Object.keys(filled)[0];
   // Compare against original to detect migration as a change.
   const changed =
-    added.length > 0 || renamed.length > 0 || removed.length > 0 || schemaChanged
+    added.length > 0 || renamed.length > 0 || removed.length > 0 || updated.length > 0 || schemaChanged
     || JSON.stringify(original) !== JSON.stringify(filled);
-  const result = { changed, added, renamed, removed, written: false, backupPath: null };
+  const result = { changed, added, renamed, removed, updated, written: false, backupPath: null };
 
   if (!changed) return result;
 
   for (const entry of renamed) console.log(`~ renamed ${entry.from} -> ${entry.to}`);
   for (const entry of removed) console.log(`- removed ${entry} (replaced by workflow.pause_for_plan_approval, default false)`);
+  for (const entry of updated) console.log(`~ ${entry.path} ${entry.from} -> ${entry.to}`);
   for (const entry of added) console.log(`+ ${entry}`);
   if (schemaChanged) console.log("~ $schema");
   if (dryRun) return result;
@@ -233,8 +237,9 @@ export function fillConfigFile(configPath, { dryRun = false } = {}) {
 
 const CONFIG_FILL_USAGE = `Usage: ap config fill [options]
 
-Fill .autopilot/config.json with every missing default setting. Existing
-values are preserved and the resolved $schema reference is repaired.
+Fill .autopilot/config.json with every missing default setting and move
+old shipped cap defaults to the current ones. Other existing values are
+preserved and the resolved $schema reference is repaired.
 
 Options:
   --dry-run           Print what would be added without writing anything

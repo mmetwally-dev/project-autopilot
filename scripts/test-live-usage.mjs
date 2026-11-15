@@ -177,8 +177,8 @@ check("cells: TURNS stays unprefixed while running",
   const ROLES_031 = ["code_reviewer", "verifier", "planner", "plan_reviewer"];
   for (const role of ROLES_031) {
     const limits = resolvePerRoleLimits(role, {});
-    const expTokens = role === "planner" ? 200000 : role === "plan_reviewer" ? 250000 : 150000;
-    const expWrapup = role === "planner" ? 180000 : role === "plan_reviewer" ? 225000 : 135000;
+    const expTokens = (role === "planner" || role === "verifier") ? 200000 : 250000;
+    const expWrapup = (role === "planner" || role === "verifier") ? 180000 : 225000;
     const expTurns = (role === "verifier" || role === "planner" || role === "plan_reviewer") ? 30 : 22; // backlog #59(b), #111 (plan_reviewer 30)
     const expAllowance = role === "plan_reviewer" ? 4 : 2;
     check(`caps/${role}: defaults are ${expTurns} turns / ${expTokens} tokens / allowance ${expAllowance}`,

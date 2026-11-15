@@ -22,10 +22,15 @@ import {
   renderHandledFindings, HANDLED_FINDINGS_HEADING,
   clearFindingTasks, clearFindingTasksByPrefix,
   FINDING_TASKS_STATE_KEY,
+  recordTaskOwnership, loadTaskOwnership, clearTaskOwnership,
+  findExactFileOwner, pendingCrossPhaseRepairs, markCrossPhaseRepairCompleted,
+  buildCrossPhaseRepairPrompt, executePendingCrossPhaseRepairs,
+  isManualCheckMarker, splitManualCheckFindings, TASK_OWNERSHIP_STATE_KEY,
 } from "./finding-task-locality.mjs";
 import {
   normalizeFindings, normalizeFindingsWithSource, saveReviewFeedback,
   loadReviewFeedback, MAX_FINDINGS, MAX_FINDING_CHARS, MAX_TOTAL_CHARS,
+  feedbackText,
 } from "./review-feedback.mjs";
 import {buildStandaloneHandoff} from "./standalone-handoff.mjs";
 import {phaseTaskDigest, CHECKPOINT_STATE_KEY} from "./phase-stage-checkpoint.mjs";
@@ -1079,6 +1084,570 @@ const FACTS = {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// 7.5 Cross-phase ownership, manual-check markers, and targeted repairs
+// ══════════════════════════════════════════════════════════════════════
+{
+  // 1. Task ownership state management & exact owner resolution
+  {
+    const state = {};
+    check("ownership: initial load from empty state is empty object",
+      JSON.stringify(loadTaskOwnership(state)) === "{}");
+
+    recordTaskOwnership(state, {
+      taskId: "standalone:P1:T0:0123456789ab",
+      phaseIndex: 0,
+      phaseNumber: 1,
+      phaseName: "foundation",
+      taskText: "Setup vitest config",
+      files: ["vitest.config.ts", "package.json:12"],
+      summary: "configured vitest runner",
+    });
+
+    const loaded = loadTaskOwnership(state);
+    check("ownership: records task entry with normalized files",
+      Array.isArray(loaded["standalone:P1:T0:0123456789ab"]?.files) &&
+      loaded["standalone:P1:T0:0123456789ab"].files.includes("vitest.config.ts") &&
+      loaded["standalone:P1:T0:0123456789ab"].files.includes("package.json"));
+
+    // Mutation resistance
+    loaded["standalone:P1:T0:0123456789ab"].files.push("sneaky.ts");
+    check("ownership: loadTaskOwnership returns deep copy",
+      !loadTaskOwnership(state)["standalone:P1:T0:0123456789ab"].files.includes("sneaky.ts"));
+
+    // findExactFileOwner
+    const owner = findExactFileOwner("vitest.config.ts:4:10", loaded, ["standalone:P2:T0:cdef01234567"]);
+    check("ownership: findExactFileOwner resolves exact match with line/col",
+      owner?.taskId === "standalone:P1:T0:0123456789ab" && owner.phaseIndex === 0);
+
+    const backslashOwner = findExactFileOwner("vitest.config.ts", loaded, []);
+    check("ownership: resolves Windows backslashes", backslashOwner?.taskId === "standalone:P1:T0:0123456789ab");
+
+    // No fuzzy matching
+    check("ownership: no fuzzy match on partial filename",
+      findExactFileOwner("config.ts", loaded, []) === null);
+    check("ownership: no match on unknown file",
+      findExactFileOwner("unknown.ts", loaded, []) === null);
+
+    // Exclusion of current-phase tasks
+    check("ownership: excludes current-phase task from cross-phase matching",
+      findExactFileOwner("vitest.config.ts", loaded, ["standalone:P1:T0:0123456789ab"]) === null);
+
+    // Multi-owner ambiguity returns null (does not guess)
+    recordTaskOwnership(state, {
+      taskId: "standalone:P1:T1:abcdef012345",
+      phaseIndex: 0,
+      phaseNumber: 1,
+      phaseName: "foundation",
+      files: ["vitest.config.ts"],
+    });
+    check("ownership: non-unique multi-owner returns null",
+      findExactFileOwner("vitest.config.ts", loadTaskOwnership(state), []) === null);
+
+    // clearTaskOwnership
+    clearTaskOwnership(state);
+    check("ownership: clearTaskOwnership clears the state key",
+      state[TASK_OWNERSHIP_STATE_KEY] === undefined);
+
+    // Re-recording task ownership merges files (union) rather than replacing (FIX B)
+    const stateMerge = {};
+    recordTaskOwnership(stateMerge, {
+      taskId: "standalone:P1:T0:test-merge",
+      files: ["a.ts"],
+      summary: "first pass",
+    });
+    recordTaskOwnership(stateMerge, {
+      taskId: "standalone:P1:T0:test-merge",
+      files: [],
+      summary: "retry with identical content",
+    });
+    const loadedMerge1 = loadTaskOwnership(stateMerge)["standalone:P1:T0:test-merge"];
+    check("ownership: record T with [a.ts] then [] keeps [a.ts]",
+      JSON.stringify(loadedMerge1?.files) === JSON.stringify(["a.ts"]) &&
+      loadedMerge1?.summary === "retry with identical content",
+      loadedMerge1);
+
+    recordTaskOwnership(stateMerge, {
+      taskId: "standalone:P1:T0:test-merge",
+      files: ["b.ts"],
+      summary: "retry with additional file",
+    });
+    const loadedMerge2 = loadTaskOwnership(stateMerge)["standalone:P1:T0:test-merge"];
+    check("ownership: record T again with [b.ts] produces union [a.ts, b.ts]",
+      Array.isArray(loadedMerge2?.files) &&
+      loadedMerge2.files.length === 2 &&
+      loadedMerge2.files.includes("a.ts") &&
+      loadedMerge2.files.includes("b.ts") &&
+      loadedMerge2.summary === "retry with additional file",
+      loadedMerge2);
+
+    const ownerAfterEmpty = findExactFileOwner("a.ts", loadTaskOwnership(stateMerge), ["standalone:P2:T0:current"]);
+    check("ownership: findExactFileOwner still finds a.ts after empty re-record",
+      ownerAfterEmpty?.taskId === "standalone:P1:T0:test-merge",
+      ownerAfterEmpty);
+  }
+
+  // 2. Run-221 shape: cross-phase finding, allMapped:true, carry unaffected current tasks, targeted repair
+  {
+    const state = {};
+    const earlierTaskId = "standalone:P1:T0:0123456789ab";
+    recordTaskOwnership(state, {
+      taskId: earlierTaskId,
+      phaseIndex: 0,
+      phaseNumber: 1,
+      phaseName: "setup",
+      taskText: "Setup vitest config",
+      files: ["vitest.config.ts"],
+      summary: "setup test runner",
+    });
+
+    const currentTaskIds = [
+      "standalone:P5:T0:111111111111",
+      "standalone:P5:T1:222222222222",
+    ];
+    const key = "standalone-phase:4";
+    const digest = "phase-5-digest";
+    const findings = [
+      {
+        tasks: [],
+        location: "vitest.config.ts:15:3",
+        problem: "Vitest config is missing tsconfigPaths plugin causing module resolution failures.",
+        correction: "Add tsconfigPaths() plugin to vitest.config.ts",
+      },
+    ];
+
+    saveReviewFeedback(state, key, findings);
+    recordFindingTasks(state, key, {
+      phaseTaskDigest: digest,
+      findings,
+      taskIds: currentTaskIds,
+      factsByTask: {
+        [currentTaskIds[0]]: {files: ["src/feature-a.ts"], summary: "implemented feature a"},
+        [currentTaskIds[1]]: {files: ["src/feature-b.ts"], summary: "implemented feature b"},
+      },
+      revision: 2,
+      carryAllowed: true,
+      taskOwnership: loadTaskOwnership(state),
+    });
+
+    const record = loadFindingTasks(state, key, {phaseTaskDigest: digest});
+    check("run-221: finding resolved with source cross-phase",
+      record?.entries?.[0]?.source === "cross-phase", record?.entries?.[0]);
+    check("run-221: finding mapped to earlier-phase owner",
+      record?.entries?.[0]?.taskIds?.[0] === earlierTaskId);
+    check("run-221: allMapped is true", record?.allMapped === true);
+    check("run-221: affected is empty (no current-phase tasks in affected)",
+      Array.isArray(record?.affected) && record.affected.length === 0, record?.affected);
+    check("run-221: crossPhase array contains targeted repair info",
+      Array.isArray(record?.crossPhase) && record.crossPhase.length === 1 &&
+      record.crossPhase[0].taskId === earlierTaskId &&
+      record.crossPhase[0].file === "vitest.config.ts");
+    check("run-221: carry map holds both current-phase tasks",
+      !!record?.carry?.[currentTaskIds[0]] && !!record?.carry?.[currentTaskIds[1]]);
+
+    // carryDecision on current-phase tasks
+    const progress = {
+      implementer: {
+        completedTaskIds: [],
+        factsByTask: {},
+      },
+    };
+    const c0 = carryDecision({record, taskId: currentTaskIds[0], progress, revision: 3, phaseTaskDigest: digest});
+    const c1 = carryDecision({record, taskId: currentTaskIds[1], progress, revision: 3, phaseTaskDigest: digest});
+    check("run-221: current task 0 carries forward", c0.carry === true, c0);
+    check("run-221: current task 1 carries forward", c1.carry === true, c1);
+
+    // pendingCrossPhaseRepairs
+    const pending = pendingCrossPhaseRepairs(record);
+    check("run-221: pendingCrossPhaseRepairs returns earlier owner",
+      pending.length === 1 && pending[0]?.taskId === earlierTaskId, pending);
+
+    // buildCrossPhaseRepairPrompt
+    const repairPrompt = buildCrossPhaseRepairPrompt({
+      owner: loadTaskOwnership(state)[earlierTaskId],
+      findingText: "Add tsconfigPaths() plugin to vitest.config.ts",
+      file: "vitest.config.ts",
+      taskRef: earlierTaskId,
+    });
+    check("run-221: repair prompt is targeted",
+      repairPrompt.includes("Cross-phase targeted repair") &&
+      repairPrompt.includes("standalone:P1:T0:0123456789ab") &&
+      repairPrompt.includes("vitest.config.ts") &&
+      repairPrompt.includes("tsconfigPaths"));
+
+    // executePendingCrossPhaseRepairs simulation
+    let executedRole = null;
+    let executedPrompt = null;
+    const mockRelay = async (role, prompt, config, state, options) => {
+      executedRole = role;
+      executedPrompt = prompt;
+      return {
+        status: "completed",
+        touchedFiles: ["vitest.config.ts"],
+        response: "Fixed vitest config by adding tsconfigPaths",
+      };
+    };
+
+    await executePendingCrossPhaseRepairs({
+      state,
+      key,
+      framework: "standalone",
+      relay: mockRelay,
+      config: {policy: {}},
+      phaseRequirements: "phase requirements",
+      perTaskLimits: {taskTimeoutMs: 60000, perTaskTokens: 100000},
+      feedback: "Vitest config syntax error",
+      onPolicyViolation: () => {},
+    });
+
+    check("run-221: repair executed via relay with implementer role",
+      executedRole === "implementer" && executedPrompt?.includes("Cross-phase targeted repair"));
+
+    // After repair execution:
+    const updatedRecord = loadFindingTasks(state, key, {phaseTaskDigest: digest});
+    check("run-221: repair recorded in completedCrossPhaseRepairs",
+      !!updatedRecord?.completedCrossPhaseRepairs?.[earlierTaskId]);
+    check("run-221: pendingCrossPhaseRepairs returns empty array after completion",
+      pendingCrossPhaseRepairs(updatedRecord).length === 0);
+
+    // Overlap handling: if current task 0 touched vitest.config.ts, it must re-run instead of carry
+    const overlappingRecord = {
+      ...updatedRecord,
+      carry: {
+        [currentTaskIds[0]]: {files: ["vitest.config.ts"], summary: "touched config"},
+        [currentTaskIds[1]]: {files: ["src/feature-b.ts"], summary: "disjoint"},
+      },
+    };
+    const cOverlap = carryDecision({record: overlappingRecord, taskId: currentTaskIds[0], progress, revision: 3, phaseTaskDigest: digest});
+    const cDisjoint = carryDecision({record: overlappingRecord, taskId: currentTaskIds[1], progress, revision: 3, phaseTaskDigest: digest});
+    check("run-221: overlapping current task does NOT carry forward",
+      cOverlap.carry === false && cOverlap.reason === "overlap", cOverlap);
+    check("run-221: disjoint current task still carries forward",
+      cDisjoint.carry === true, cDisjoint);
+  }
+
+  // 3. Run-108 shape: manual check markers filtered, structured findings mapped, unaffected carry
+  {
+    const state = {};
+    const taskIds = ["standalone:P1:T0:123456789abc", "standalone:P1:T1:def012345678"];
+    const key = "standalone-phase:0";
+    const digest = "phase-0-digest";
+
+    // Marker predicates
+    check("run-108: detects NETWORK TEST MANUAL RUN marker",
+      isManualCheckMarker("NETWORK TEST MANUAL RUN: verify stripe webhook live"));
+    check("run-108: detects MANUAL CHECK REQUIRED marker",
+      isManualCheckMarker("MANUAL CHECK REQUIRED: click navbar button"));
+    check("run-108: detects BROWSER TEST MANUAL RUN marker",
+      isManualCheckMarker("BROWSER TEST MANUAL RUN: check responsive layout"));
+    check("run-108: real finding string is not a manual check marker",
+      !isManualCheckMarker("Component navbar renders blank when logged out"));
+    check("run-108: structured finding is not a manual check marker",
+      !isManualCheckMarker({tasks: ["T1"], problem: "Bug"}));
+
+    // splitManualCheckFindings
+    const rawFindings = [
+      {tasks: ["T1"], location: "src/a.ts", problem: "Missing error handling in login"},
+      "NETWORK TEST MANUAL RUN: check webhook endpoint with curl",
+      "BROWSER TEST MANUAL RUN: verify modal animation",
+    ];
+    const split = splitManualCheckFindings(rawFindings);
+    check("run-108: split separates manual checks from implementation findings",
+      split.manualChecks.length === 2 && split.implementationFindings.length === 1);
+
+    // normalizeFindingsWithSource and normalizeFindings filter them
+    const normalized = normalizeFindings(rawFindings);
+    check("run-108: normalizeFindings filters manual check markers out of review feedback",
+      normalized.length === 1 && normalized[0].includes("Missing error handling"));
+
+    saveReviewFeedback(state, key, rawFindings);
+    // recordFindingTasks with mixed findings
+    recordFindingTasks(state, key, {
+      phaseTaskDigest: digest,
+      findings: rawFindings,
+      taskIds,
+      factsByTask: {
+        [taskIds[0]]: {files: ["src/a.ts"], summary: "auth"},
+        [taskIds[1]]: {files: ["src/b.ts"], summary: "profile"},
+      },
+      revision: 1,
+      carryAllowed: true,
+      taskOwnership: {},
+    });
+
+    const record = loadFindingTasks(state, key, {phaseTaskDigest: digest});
+    check("run-108: manualChecks stored in record as evidence",
+      Array.isArray(record?.manualChecks) && record.manualChecks.length === 2);
+    check("run-108: allMapped remains true because manual checks were separated",
+      record?.allMapped === true);
+    check("run-108: only T1 in affected",
+      Array.isArray(record?.affected) && record.affected.length === 1 && record.affected[0] === taskIds[0]);
+    check("run-108: unflagged T2 is in carry map",
+      !!record?.carry?.[taskIds[1]]);
+
+    const progress = {implementer: {completedTaskIds: [], factsByTask: {}}};
+    const cT1 = carryDecision({record, taskId: taskIds[0], progress, revision: 2, phaseTaskDigest: digest});
+    const cT2 = carryDecision({record, taskId: taskIds[1], progress, revision: 2, phaseTaskDigest: digest});
+    check("run-108: affected T1 does not carry", cT1.carry === false && cT1.reason === "affected");
+    check("run-108: unaffected T2 carries forward", cT2.carry === true, cT2);
+  }
+
+  // 4. Genuine phase-wide finding fails closed
+  {
+    const state = {};
+    const taskIds = ["standalone:P2:T0:aaa", "standalone:P2:T1:bbb"];
+    const key = "standalone-phase:1";
+    const digest = "phase-1-digest";
+    const findings = [
+      {tasks: [], location: "unowned/file.ts", problem: "Broad architecture violation"},
+    ];
+
+    saveReviewFeedback(state, key, findings);
+    recordFindingTasks(state, key, {
+      phaseTaskDigest: digest,
+      findings,
+      taskIds,
+      factsByTask: {
+        [taskIds[0]]: {files: ["src/a.ts"], summary: "a"},
+        [taskIds[1]]: {files: ["src/b.ts"], summary: "b"},
+      },
+      revision: 1,
+      carryAllowed: true,
+      taskOwnership: {},
+    });
+
+    const record = loadFindingTasks(state, key, {phaseTaskDigest: digest});
+    check("phase-wide: source is phase", record?.entries?.[0]?.source === "phase");
+    check("phase-wide: allMapped is false", record?.allMapped === false);
+    check("phase-wide: carry is empty", Object.keys(record?.carry || {}).length === 0);
+
+    const progress = {implementer: {completedTaskIds: [], factsByTask: {}}};
+    const c0 = carryDecision({record, taskId: taskIds[0], progress, revision: 2, phaseTaskDigest: digest});
+    const c1 = carryDecision({record, taskId: taskIds[1], progress, revision: 2, phaseTaskDigest: digest});
+    check("phase-wide: task 0 does not carry", c0.carry === false && c0.reason === "no-carry-entry");
+    check("phase-wide: task 1 does not carry", c1.carry === false && c1.reason === "no-carry-entry");
+  }
+
+  // 5. Genuine unlinked finding fails closed
+  {
+    const state = {};
+    const taskIds = ["standalone:P2:T0:aaa", "standalone:P2:T1:bbb"];
+    const key = "standalone-phase:1";
+    const digest = "phase-1-digest";
+    const findings = [
+      "Plain string unlinked implementation finding with no task tag",
+    ];
+
+    saveReviewFeedback(state, key, findings);
+    recordFindingTasks(state, key, {
+      phaseTaskDigest: digest,
+      findings,
+      taskIds,
+      factsByTask: {
+        [taskIds[0]]: {files: ["src/a.ts"], summary: "a"},
+        [taskIds[1]]: {files: ["src/b.ts"], summary: "b"},
+      },
+      revision: 1,
+      carryAllowed: true,
+      taskOwnership: {},
+    });
+
+    const record = loadFindingTasks(state, key, {phaseTaskDigest: digest});
+    check("unlinked: source is none", record?.entries?.[0]?.source === "none");
+    check("unlinked: allMapped is false", record?.allMapped === false);
+    check("unlinked: carry is empty", Object.keys(record?.carry || {}).length === 0);
+
+    const progress = {implementer: {completedTaskIds: [], factsByTask: {}}};
+    const c0 = carryDecision({record, taskId: taskIds[0], progress, revision: 2, phaseTaskDigest: digest});
+    check("unlinked: task 0 does not carry", c0.carry === false && c0.reason === "no-carry-entry");
+  }
+
+  // 6. Crash / resume of targeted repair
+  {
+    const state = {};
+    const earlierTaskId = "standalone:P1:T0:crash-test";
+    const key = "standalone-phase:2";
+    const digest = "phase-2-digest";
+    const findings = [{tasks: [], location: "config.json", problem: "invalid JSON schema"}];
+
+    recordTaskOwnership(state, {
+      taskId: earlierTaskId,
+      phaseIndex: 0,
+      phaseNumber: 1,
+      phaseName: "setup",
+      files: ["config.json"],
+    });
+
+    saveReviewFeedback(state, key, findings);
+    recordFindingTasks(state, key, {
+      phaseTaskDigest: digest,
+      findings,
+      taskIds: ["standalone:P3:T0:curr1"],
+      factsByTask: {["standalone:P3:T0:curr1"]: {files: ["src/curr.ts"], summary: "curr"}},
+      revision: 1,
+      carryAllowed: true,
+      taskOwnership: loadTaskOwnership(state),
+    });
+
+    // Before repair completes:
+    let r1 = loadFindingTasks(state, key, {phaseTaskDigest: digest});
+    check("crash-resume: pending repairs before run", pendingCrossPhaseRepairs(r1).length === 1);
+
+    // Simulate crash before completion: state is saved without completedCrossPhaseRepairs
+    const serialized = JSON.stringify(state);
+    const resumedState = JSON.parse(serialized);
+    let rResumed = loadFindingTasks(resumedState, key, {phaseTaskDigest: digest});
+    check("crash-resume: pending repairs preserved after resume before completion",
+      pendingCrossPhaseRepairs(rResumed).length === 1 && pendingCrossPhaseRepairs(rResumed)[0]?.taskId === earlierTaskId);
+
+    // Simulate completion
+    markCrossPhaseRepairCompleted(resumedState, key, earlierTaskId, {files: ["config.json"]});
+    const serializedAfter = JSON.stringify(resumedState);
+    const resumedState2 = JSON.parse(serializedAfter);
+    let rResumed2 = loadFindingTasks(resumedState2, key, {phaseTaskDigest: digest});
+    check("crash-resume: pending repairs empty after completion survives restart",
+      pendingCrossPhaseRepairs(rResumed2).length === 0);
+  }
+
+  // 6b. executePendingCrossPhaseRepairs: saveState, afterRepair, policyViolation
+  {
+    const state = {};
+    const earlierTaskId = "standalone:P1:T0:exec-test";
+    const key = "standalone-phase:2";
+    const digest = "phase-2-digest";
+    const findings = [{tasks: [], location: "config.json", problem: "invalid JSON schema"}];
+
+    recordTaskOwnership(state, {
+      taskId: earlierTaskId,
+      phaseIndex: 0,
+      phaseNumber: 1,
+      phaseName: "setup",
+      files: ["config.json"],
+    });
+
+    saveReviewFeedback(state, key, findings);
+    recordFindingTasks(state, key, {
+      phaseTaskDigest: digest,
+      findings,
+      taskIds: ["standalone:P3:T0:curr1"],
+      factsByTask: {["standalone:P3:T0:curr1"]: {files: ["src/curr.ts"], summary: "curr"}},
+      revision: 1,
+      carryAllowed: true,
+      taskOwnership: loadTaskOwnership(state),
+    });
+
+    let savedCount = 0;
+    let afterRepairCalled = 0;
+    let launches = 0;
+    const fakeRelay = async (role, prompt) => {
+      launches++;
+      return {status: "completed", touchedFiles: ["config.json"]};
+    };
+
+    // First run with crash simulated in afterRepair:
+    let crashed = false;
+    try {
+      await executePendingCrossPhaseRepairs({
+        state,
+        key,
+        phaseTaskDigest: digest,
+        framework: "standalone",
+        relay: fakeRelay,
+        saveState: () => { savedCount++; },
+        afterRepair: (repair) => {
+          afterRepairCalled++;
+          throw new Error("simulated crash after repair persist");
+        },
+      });
+    } catch (e) {
+      crashed = true;
+    }
+    check("execute-repair: crash after repair was triggered", crashed === true);
+    check("execute-repair: saveState was called before crash", savedCount === 1);
+    check("execute-repair: afterRepair was called", afterRepairCalled === 1);
+    check("execute-repair: exactly 1 relay launch occurred", launches === 1);
+
+    // Resume run: repair is already completed in state, so it must not launch again
+    const resumeRes = await executePendingCrossPhaseRepairs({
+      state,
+      key,
+      phaseTaskDigest: digest,
+      framework: "standalone",
+      relay: fakeRelay,
+      saveState: () => { savedCount++; },
+      afterRepair: (repair) => { afterRepairCalled++; },
+    });
+    check("execute-repair: resume does not re-run completed repair", resumeRes.count === 0 && resumeRes.repaired === false);
+    check("execute-repair: no additional relay launches on resume", launches === 1);
+
+    // Policy violation handling
+    const statePv = {};
+    recordTaskOwnership(statePv, {
+      taskId: earlierTaskId,
+      phaseIndex: 0,
+      phaseNumber: 1,
+      phaseName: "setup",
+      files: ["config.json"],
+    });
+    saveReviewFeedback(statePv, key, findings);
+    recordFindingTasks(statePv, key, {
+      phaseTaskDigest: digest,
+      findings,
+      taskIds: ["standalone:P3:T0:curr1"],
+      factsByTask: {["standalone:P3:T0:curr1"]: {files: ["src/curr.ts"], summary: "curr"}},
+      revision: 1,
+      carryAllowed: true,
+      taskOwnership: loadTaskOwnership(statePv),
+    });
+    let pvObserved = null;
+    const pvRelay = async () => ({status: "failed", policyViolation: {code: "FORBIDDEN_MUTATION"}});
+    const pvRes = await executePendingCrossPhaseRepairs({
+      state: statePv,
+      key,
+      phaseTaskDigest: digest,
+      framework: "standalone",
+      relay: pvRelay,
+      onPolicyViolation: (taskImpl) => { pvObserved = taskImpl.policyViolation; },
+    });
+    check("execute-repair: policyViolation was detected", pvRes.policyViolation?.code === "FORBIDDEN_MUTATION");
+    check("execute-repair: onPolicyViolation callback was called", pvObserved?.code === "FORBIDDEN_MUTATION");
+  }
+
+  // 7. Standalone and SpecKit parity
+  {
+    const state = {};
+    const digest = "parity-digest";
+    const taskIds = ["P1:T1", "P1:T2"];
+    const findings = [{tasks: ["T1"], problem: "fixme"}];
+
+    saveReviewFeedback(state, "standalone-phase:0", findings);
+    // Standalone key
+    recordFindingTasks(state, "standalone-phase:0", {
+      phaseTaskDigest: digest,
+      findings,
+      taskIds,
+      factsByTask: {[taskIds[0]]: {files: ["a.ts"], summary: "a"}, [taskIds[1]]: {files: ["b.ts"], summary: "b"}},
+      revision: 1,
+      carryAllowed: true,
+    });
+    // SpecKit key
+    saveReviewFeedback(state, "speckit-phase:0", findings);
+    recordFindingTasks(state, "speckit-phase:0", {
+      phaseTaskDigest: digest,
+      findings,
+      taskIds,
+      factsByTask: {[taskIds[0]]: {files: ["a.ts"], summary: "a"}, [taskIds[1]]: {files: ["b.ts"], summary: "b"}},
+      revision: 1,
+      carryAllowed: true,
+    });
+
+    const sRecord = loadFindingTasks(state, "standalone-phase:0", {phaseTaskDigest: digest});
+    const spRecord = loadFindingTasks(state, "speckit-phase:0", {phaseTaskDigest: digest});
+    check("parity: standalone and speckit produce structurally identical records",
+      JSON.stringify(sRecord) === JSON.stringify(spRecord));
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // 8. Behavioural: one real mission per framework, killed at the retry.
 // ══════════════════════════════════════════════════════════════════════
 function phasesOf(repo, framework, state) {
@@ -1822,6 +2391,127 @@ async function runOverlapBriefCase() {
   }
 }
 
+const CROSS_PHASE_MISSION = "002-cross-phase";
+function writeCrossPhaseStandaloneMission(repo) {
+  const planFile = standalone.planPath(repo, CROSS_PHASE_MISSION);
+  const tasksFile = standalone.tasksPath(repo, CROSS_PHASE_MISSION);
+  fs.mkdirSync(path.dirname(planFile), {recursive: true});
+  fs.writeFileSync(planFile, "# Plan\n\nObjective: cross-phase fixture task.\n");
+  fs.writeFileSync(tasksFile, [
+    "## Phase 1: Setup", "",
+    "- [ ] Do the setup task", "",
+    "## Phase 2: Feature", "",
+    "- [ ] Do the first feature task",
+    "- [ ] Do the second feature task", "",
+  ].join("\n"));
+  fs.mkdirSync(path.join(repo, ".autopilot"), {recursive: true});
+  fs.writeFileSync(path.join(repo, ".autopilot", "state.json"), JSON.stringify({
+    version: 1, phase: "tasks_ready", step: "tasks_ready",
+    phaseIndex: 0, attempt: 1, mission: CROSS_PHASE_MISSION, planningRequest: "fixture request",
+  }));
+  return {planFile, tasksFile};
+}
+
+async function runCrossPhaseRepairCase(label, framework) {
+  const tag = `${label}/cross_phase_repair`;
+  const repo = makeFixtureRepo(`cpr-${framework}`);
+  const binDir = makeFixtureBin(`cpr-${framework}`);
+  try {
+    let request = CARRY_REQUEST;
+    let tasksFile = null;
+    if (framework === "speckit") {
+      makeSpecKitWorkflowOnly(repo);
+      makeClaudeMdBaseline(repo);
+    } else {
+      request = "fixture request";
+    }
+    writeConfig(repo, {planningFramework: framework});
+    setScenario(repo, "cross_phase_repair");
+    if (framework !== "speckit") ({tasksFile} = writeCrossPhaseStandaloneMission(repo));
+
+    const run = runAutopilot(repo, binDir, {request, timeoutMs: CARRY_MISSION_MS});
+    if (framework === "speckit") tasksFile = speckitCarryTasksFile(repo);
+    const tasksText = fs.readFileSync(tasksFile, "utf8");
+    check(`${tag}: the run completes both phases (exit 0, every checkbox marked)`,
+      run.status === 0 && !/^- \[ \]/m.test(tasksText),
+      {status: run.status, timedOut: run.timedOut, tail: String(run.stderr || run.stdout || "").slice(-400)});
+    if (run.status !== 0) return;
+
+    const allImplBriefs = briefsFor(repo, "implementer");
+    const repairBriefs = allImplBriefs.filter((b) => b.includes("Cross-phase targeted repair"));
+    check(`${tag}: the retry launches EXACTLY ONE targeted repair implementer run`,
+      repairBriefs.length === 1, repairBriefs.length);
+
+    if (repairBriefs.length === 1) {
+      const b = repairBriefs[0];
+      check(`${tag}: repair brief announces Cross-phase targeted repair`,
+        b.includes("Cross-phase targeted repair"), b.slice(0, 300));
+      check(`${tag}: repair brief carries the finding text`,
+        b.includes("Regression in cross-phase target."), b.slice(0, 300));
+      check(`${tag}: repair brief cites the affected file`,
+        b.includes("output/cross-phase-target.txt"), b.slice(0, 300));
+    }
+
+    check(`${tag}: total implementer launches is 4 (no phase-2 task re-ran)`,
+      allImplBriefs.length === 4, allImplBriefs.length);
+
+    const reviews = briefsFor(repo, "code_reviewer").filter((b) => /^Phase: /m.test(b));
+    check(`${tag}: second phase review ran with FEEDBACK TO ADDRESS and passed`,
+      reviews.length >= 2 && reviews[reviews.length - 1].includes("FEEDBACK TO ADDRESS"),
+      reviews.length);
+  } finally {
+    cleanup(repo, binDir);
+  }
+}
+
+async function runCrossPhaseCrashCase(label, framework) {
+  const tag = `${label}/cross_phase_crash_after_repair`;
+  const repo = makeFixtureRepo(`cpr-crash-${framework}`);
+  const binDir = makeFixtureBin(`cpr-crash-${framework}`);
+  try {
+    let request = CARRY_REQUEST;
+    let tasksFile = null;
+    if (framework === "speckit") {
+      makeSpecKitWorkflowOnly(repo);
+      makeClaudeMdBaseline(repo);
+    } else {
+      request = "fixture request";
+    }
+    writeConfig(repo, {planningFramework: framework});
+    setScenario(repo, "cross_phase_repair");
+    if (framework !== "speckit") ({tasksFile} = writeCrossPhaseStandaloneMission(repo));
+
+    const marker = path.join(repo, ".autopilot", ".autopilot-test-crash-after-cross-phase-repair");
+    fs.mkdirSync(path.dirname(marker), {recursive: true});
+    fs.writeFileSync(marker, "");
+
+    const run1 = runAutopilot(repo, binDir, {request, timeoutMs: CARRY_MISSION_MS});
+    check(`${tag}: run 1 crashed with exit 137`, run1.status === 137, run1.status);
+    check(`${tag}: crash marker was consumed`, !fs.existsSync(marker));
+
+    const state1 = readState(repo);
+    const key = framework === "speckit" ? "speckit-phase:1" : "standalone-phase:1";
+    const record1 = state1?.[FINDING_TASKS_STATE_KEY]?.[key];
+    const completed1 = record1?.completedCrossPhaseRepairs ?? {};
+    check(`${tag}: repair was marked completed in state before crash`,
+      Object.keys(completed1).length === 1, completed1);
+
+    const run2 = runAutopilot(repo, binDir, {request, timeoutMs: CARRY_MISSION_MS});
+    if (framework === "speckit") tasksFile = speckitCarryTasksFile(repo);
+    const tasksText = fs.readFileSync(tasksFile, "utf8");
+    check(`${tag}: resumed run completes both phases (exit 0)`,
+      run2.status === 0 && !/^- \[ \]/m.test(tasksText),
+      {status: run2.status, tail: String(run2.stderr || run2.stdout || "").slice(-400)});
+
+    const allImplBriefs = briefsFor(repo, "implementer");
+    const repairBriefs = allImplBriefs.filter((b) => b.includes("Cross-phase targeted repair"));
+    check(`${tag}: repair implementer was launched EXACTLY ONCE across both runs`,
+      repairBriefs.length === 1, repairBriefs.length);
+  } finally {
+    cleanup(repo, binDir);
+  }
+}
+
 if (inShard()) await runScopedRereviewCase("speckit", "speckit");
 if (inShard()) await runScopedRereviewFallbackCase();
 
@@ -1841,6 +2531,12 @@ if (inShard()) await runFindingsPhasewideCase();
 if (inShard()) await runOverlapBriefCase();
 
 if (inShard()) await runFindingsPerTaskCase("standalone", "standalone");
+
+// Cross-phase repair end-to-end: both loops + crash/resume
+if (inShard()) await runCrossPhaseRepairCase("standalone", "standalone");
+if (inShard()) await runCrossPhaseRepairCase("speckit", "speckit");
+if (inShard()) await runCrossPhaseCrashCase("standalone", "standalone");
+if (inShard()) await runCrossPhaseCrashCase("speckit", "speckit");
 
 console.log(`\n${ok} passed, ${failed} failed.`);
 process.exit(failed ? 1 : 0);

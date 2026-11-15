@@ -7,7 +7,8 @@ import { peekSummary } from "./watch-summary.mjs";
 import { defaultIsPidAlive } from "./run-recovery.mjs";
 import { growingTerm } from "./per-task-budget.mjs";
 import { readOwnerPid, ownerPidAlive } from "./owner-pid.mjs";
-import { buildReportModel, renderReport, formatStamp, readBriefExtras, parseVitestGateLog } from "./watch-report.mjs";
+import { buildReportModel, renderReport, formatStamp, readBriefExtras, parseVitestGateLog, sameMission } from "./watch-report.mjs";
+export { sameMission };
 import { detectUiProject } from "./e2e-detect.mjs";
 import { formatNotRunInMissions } from "./command-probe.mjs";
 import { phases as standalonePhases } from "../adapters/standalone.mjs";
@@ -692,6 +693,37 @@ export function appendNoE2eNoteToReport(repo, file) {
   } catch { return false; }
 }
 
+function deriveForeignMissionState(repo, mission) {
+  const base = { mission: String(mission), phase: "idle", step: "idle" };
+  if (!repo || !mission) return base;
+  const logFile = path.join(repo, ".autopilot", "missions", String(mission), "orchestrator.log");
+  try {
+    if (!fs.existsSync(logFile)) return base;
+    const stat = fs.statSync(logFile);
+    const bytes = Math.min(stat.size, 16384);
+    const fd = fs.openSync(logFile, "r");
+    let tailText = "";
+    try {
+      const buf = Buffer.alloc(bytes);
+      fs.readSync(fd, buf, 0, bytes, Math.max(0, stat.size - bytes));
+      tailText = buf.toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+    const lines = tailText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(-10);
+    if (lines.some((l) => l.includes("ALL WORK COMPLETE"))) {
+      return { mission: String(mission), phase: "complete", step: "done" };
+    }
+    if (lines.some((l) => /\bESCALATED\b/.test(l) || l.includes("STOP — human intervention required"))) {
+      return { mission: String(mission), phase: "escalated", step: "escalated" };
+    }
+    if (lines.some((l) => l.includes("PLANNING COMPLETE") || l.includes("Stage 'planning' complete"))) {
+      return { mission: String(mission), phase: "tasks_ready", step: "tasks_ready", command: { stopAfter: "planning" } };
+    }
+  } catch { /* unreadable log -> STOPPED */ }
+  return base;
+}
+
 export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAlive, phases, policy, events, now, skill, gateLog, ownerAlive: explicitOwnerAlive } = {}) {
   const d = now ? new Date(now) : new Date();
   const p = (n) => String(n).padStart(2, "0");
@@ -704,7 +736,9 @@ export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAl
     stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   }
   const runsDir = watchRunsDir(repo, mission);
-  const state = readJsonFile(path.join(repo, ".autopilot", "state.json"));
+  const rawState = readJsonFile(path.join(repo, ".autopilot", "state.json"));
+  const isForeignState = Boolean(rawState?.mission && mission && !sameMission(rawState.mission, mission));
+  const state = isForeignState ? deriveForeignMissionState(repo, mission) : rawState;
   const configResult = loadAndMigrateConfig(path.join(repo, ".autopilot", "config.json"), {persist: false});
   const config = configResult?.config ?? null;
   // Mission 094 Phase 3 task 3.2: serve the run list from the compact
@@ -766,6 +800,15 @@ export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAl
     const withFlag = Array.isArray(runs) ? runs.find((r) => typeof r?.ownerAlive === "boolean") : null;
     if (withFlag) ownerAlive = withFlag.ownerAlive === true;
   }
+  if (ownerAlive === undefined) {
+    try {
+      const o = readOwnerPid(repo);
+      const probe = ownerProbe || ownerPidAlive;
+      if (o && Number.isInteger(o.pid) && (o.platform == null || o.platform === process.platform)) {
+        ownerAlive = probe(o.pid) === true;
+      }
+    } catch { /* unknown */ }
+  }
   // The open orchestrator gate's log tail is where live test-file progress is
   // written (backlog #35h); a gate_start without a later gate_result is open.
   let openGatePhase = null;
@@ -821,13 +864,29 @@ export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAl
 
 // Resolve authoritative phase list across frameworks for watch report rendering.
 export function resolveMissionPhases(repo, mission, config, state) {
-  const st = state ?? readJsonFile(path.join(repo, ".autopilot", "state.json"));
+  const stRaw = state ?? readJsonFile(path.join(repo, ".autopilot", "state.json"));
+  const st = (stRaw && (!mission || !stRaw.mission || sameMission(stRaw.mission, mission))) ? stRaw : null;
   const cfg = config ?? loadAndMigrateConfig(path.join(repo, ".autopilot", "config.json"), {persist: false})?.config;
 
-  const isSpeckit = st?.phaseExecutionCheckpoint?.framework === "speckit"
+  const explicitStandalone = st?.phaseExecutionCheckpoint?.framework === "standalone"
+    || st?.planningDetection?.framework === "standalone"
+    || st?.planApproval?.framework === "standalone"
+    || cfg?.project?.planning_framework === "standalone";
+
+  const explicitSpeckit = st?.phaseExecutionCheckpoint?.framework === "speckit"
     || st?.planningDetection?.framework === "speckit"
     || st?.planApproval?.framework === "speckit"
-    || Boolean(st?.speckitFeatureDir)
+    || Boolean(st?.speckitFeatureDir);
+
+  if (!explicitSpeckit) {
+    try {
+      const p = standalonePhases(repo, mission);
+      if (p && p.length) return p;
+    } catch {}
+    if (explicitStandalone) return [];
+  }
+
+  const isSpeckit = explicitSpeckit
     || cfg?.project?.planning_framework === "speckit"
     || (cfg?.project?.planning_framework !== "standalone" && fs.existsSync(path.join(repo, ".specify", "workflows", "speckit", "workflow.yml")));
 

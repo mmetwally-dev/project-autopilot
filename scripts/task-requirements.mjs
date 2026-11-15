@@ -53,6 +53,9 @@ export function isBrowserCheckFinding(text) {
   if (trimmed.toLowerCase().startsWith(BROWSER_CHECK_NOTE_PREFIX.toLowerCase())) {
     return true;
   }
+  if (/^(?:manual (?:check|test) (?:required|needed|run)|browser (?:check|test) (?:required|not possible|manual run))/i.test(trimmed)) {
+    return true;
+  }
   return /not (?:been )?(?:checked|verified|tested) in a (?:real )?browser|no approved browser(?: or playwright)? command/i.test(trimmed);
 }
 
@@ -116,6 +119,25 @@ export function splitNetworkTestFindings(review) {
   return splitFindings(review, (item) => isNetworkGatedFindingItem(item), "network");
 }
 
+export function isManualCheckMarker(item) {
+  const text = typeof item === "string" ? item : (item == null ? "" : JSON.stringify(item));
+  return isBrowserFindingItem(item, text) || isNetworkGatedFindingItem(item);
+}
+
+export function splitManualCheckFindings(findings) {
+  const list = Array.isArray(findings) ? findings : [];
+  const implementationFindings = [];
+  const manualChecks = [];
+  for (const item of list) {
+    if (isManualCheckMarker(item)) {
+      manualChecks.push(item);
+    } else {
+      implementationFindings.push(item);
+    }
+  }
+  return {implementationFindings, manualChecks};
+}
+
 export function moveManualCheckFindings(review) {
   if (!review) return { moved: [] };
   const findings = Array.isArray(review) ? review : review.findings;
@@ -128,6 +150,11 @@ export function moveManualCheckFindings(review) {
     review.push(...rest);
   } else {
     review.findings = rest;
+  }
+  if (review && typeof review === "object" && Array.isArray(review.rawFindings)) {
+    const { browser: rawB, rest: afterRawB } = splitBrowserFindings(review.rawFindings);
+    const { network: rawN, rest: rawRest } = splitNetworkTestFindings(afterRawB);
+    review.rawFindings = rawRest;
   }
   return { moved };
 }

@@ -81,7 +81,7 @@ import {appendManualChecks} from "./manual-checks.mjs";
 import {buildRoleRequirements, requirementFailure} from "./role-requirements.mjs";
 import { classifyPlanningRequest } from "./planning-request.mjs";
 import { appendWatchEvent } from "./watch-events.mjs";
-import { listSpecKitFeatureDirNames, evaluatePlanningWriteBoundary, normalizeRel, CLAUDE_MD_MARKER_BEGIN, CLAUDE_MD_MARKER_END } from "./planning-boundary.mjs";
+import { listSpecKitFeatureDirNames, evaluatePlanningWriteBoundary, splitGitIgnoredTouched, normalizeRel, CLAUDE_MD_MARKER_BEGIN, CLAUDE_MD_MARKER_END } from "./planning-boundary.mjs";
 import { validatePlanningStagePostcondition, formatPostconditionError } from "./speckit-planning-postconditions.mjs";
 import { initRun, observe, finalizeRun, formatDuration, updateRunUsage, updateRunModel, updateRunSnapshots, setRunPreparing, prepareRun } from "./run-observability.mjs";
 import { changedFilesStat } from "./changed-files-stat.mjs";
@@ -93,7 +93,7 @@ import { recordCodeReviewRound, clearCodeReviewHistory, codeReviewerRoundLines, 
 import { normalizeEscalationModel, scheduleEscalation, pendingEscalationModel, consumeEscalationFor, formatEscalationLog, recordVerifierRound, clearVerifierHistory, verifierRoundLines, scheduleNoProgressEscalation, formatNoProgressEscalationLog, noProgressDecision, endNoProgressRound, budgetEscalationDecision, formatBudgetEscalationLog, budgetEscalationModel, implementerModelFor, clearBudgetEscalation } from "./escalation-model.mjs";
 import { recordPlanReviewRound, seedPlanReviewHistory, clearPlanReviewHistory, planReviewPassNeedsConfirmation, planReviewConfirmationPending, markPlanReviewConfirmationPending, clearPlanReviewConfirmation, planReviewRevisionCount, recordPlanReviewRevision, clearPlanReviewRevisions, planReviewerRoundLines, planReviewerConfirmationLines, plannerEarlierRoundsText, recordPlanReviewNotes, planReviewNotesText, recordPlanPassNotes, planPassNotesText, allPlanPassNotes, firstTaskPassNotes, firstGsdUnitPassNotes, planPassNoteEntries, applyPlanPassNoteMarks, phaseCodeReviewPassNotesText, finalReviewPassNotesText, formatPlanPassNotesLines, PLAN_REVIEW_FULL_LINE, PLAN_REVIEW_SEVERITY_LINE, demoteLowSeverityFindings, STANDALONE_SPEC_ANALYZE_LINE, isFullPlanReviewRound, REVIEW_CONTINUATION_LINE, formatReviewBriefForContinuation, hasReviewContinuationSignal, parseTaskBlocks, changedTaskIds, taskSizeConfirmationLine, demoteUnchangedTaskSizeFindings, recordPlanReviewTaskHashes, getPlanReviewTaskHashes } from "./plan-review-rounds.mjs";
 import { saveReviewFeedback, loadReviewFeedback, clearReviewFeedback, clearReviewFeedbackByPrefix, feedbackText } from "./review-feedback.mjs";
-import { taskLabel, recordFindingTasks, loadFindingTasks, carryDecision, findingsForTask, renderHandledFindings, fixPassBriefExcerpts, clearFindingTasks, clearFindingTasksByPrefix, FINDING_TASKS_STATE_KEY } from "./finding-task-locality.mjs";
+import { taskLabel, recordFindingTasks, loadFindingTasks, carryDecision, findingsForTask, renderHandledFindings, fixPassBriefExcerpts, clearFindingTasks, clearFindingTasksByPrefix, FINDING_TASKS_STATE_KEY, recordTaskOwnership, loadTaskOwnership, clearTaskOwnership, TASK_OWNERSHIP_STATE_KEY, executePendingCrossPhaseRepairs } from "./finding-task-locality.mjs";
 import { runFinalReviewFixRounds, finalReviewNextStep, runCappedFixSessions, parseGateGreenFiles, isNoWorkPerformed, isReviewerFeedbackFixPass, buildNoWorkAnswerSection } from "./final-review-fix-rounds.mjs";
 import { classifyGateFailures, parseGateFailures, taskLinkedTestFiles, formatGateFailureEscalation } from "./gate-failure-locality.mjs";
 import { importsDeltaFile } from "./gate-locality-imports.mjs";
@@ -115,7 +115,7 @@ import {prepareTaskInvocation, commitTaskResult, evaluateCrashResume} from "./ro
 import {attributionMap, changedPaths as attributedChangedPaths, detectWorkAhead} from "./task-attribution.mjs";
 import { stageFilesChangedSinceReview, stageFilesChangedLine, recordReviewFailSnapshot, clearReviewFailSnapshot, speckitStageFilePaths, speckitGateNote, standalonePlanFeedbackNote, standaloneSpecFeedbackNote, gsdStageFiles } from "./revision-files-changed.mjs";
 import {parseTaskResultContract} from "./task-result-contract.mjs";
-import {taskSizingRuleText, taskSizeReviewText, resolveTaskSizeTargetTurns, resolveMaxPhaseTasks, resolveMinPhaseTasks, resolvePerTaskLimits, resolvePerRoleLimits, checkCapBreach, capUnitLabel, growingTerm, evaluateCapGraceWindow, checkWrapupTrigger, sessionStoreRelDir, sessionStoreSandboxSubpath, consumeContinuation, clearContinuationRound, clearTaskContinuation, recordRolloverDeadEnd, readRolloverDeadEnds, clearRolloverDeadEnds, deadEndTail, sessionWorkDigest, resolveHandoffMaxChars, resolveHandoffNoteMaxChars, resolveHandoffWrapupTokens, handoffNoteRelPath, continuationBudgetKey, CONTINUATION_BUDGET_KEY_PREFIX, resolveContinuationAllowance, RELAY_TIMEOUT_DEFAULT_MS, HANDOFF_WRAPUP_TOKENS_DEFAULT, PER_ROLE_WRAPUP_TOKENS_DEFAULT, WRAPUP_MAX_TURNS, WRAPUP_TIMEOUT_MS, SESSION_STORE_WARN_BYTES, recordGenerationProgress, resolveNoProgressGenerations, clearNoProgress, noProgressDisplayLabel, handoffNoteCitedExcerpts, resolveIdleHangMs, resolveFirstOutputMs, resolveMaxSilenceMs, isHandoffNoteFresh, buildOrchestratorFallbackNote, scratchHandoffNotePath, SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, pickFresherHandoffNote, handoffBudgetReminder, mergeFallbackWithPreviousNote, resolveBackstopRawTokens, evaluateBackstopBreach, recordBackstopFiring, readBackstopFirings, clearBackstopFirings, backstopLedgerKey, evaluateBackstopEscalation, handleRoleBackstopFiring, resolveSessionNumber, carriedScratchDir, copyCarriedScratch, seedPreviousScratch, deleteCarriedScratch, noteSaysOnlyGateLeft} from "./per-task-budget.mjs";
+import {taskSizingRuleText, taskSizeReviewText, resolveTaskSizeTargetTurns, resolveMaxPhaseTasks, resolveMinPhaseTasks, resolvePerTaskLimits, resolvePerRoleLimits, checkCapBreach, capUnitLabel, growingTerm, evaluateCapGraceWindow, checkWrapupTrigger, sessionStoreRelDir, sessionStoreSandboxSubpath, consumeContinuation, clearContinuationRound, clearTaskContinuation, recordRolloverDeadEnd, readRolloverDeadEnds, clearRolloverDeadEnds, deadEndTail, sessionWorkDigest, resolveHandoffMaxChars, resolveHandoffNoteMaxChars, resolveHandoffWrapupTokens, handoffNoteRelPath, continuationBudgetKey, CONTINUATION_BUDGET_KEY_PREFIX, resolveContinuationAllowance, RELAY_TIMEOUT_DEFAULT_MS, HANDOFF_WRAPUP_TOKENS_DEFAULT, PER_ROLE_WRAPUP_TOKENS_DEFAULT, WRAPUP_MAX_TURNS, WRAPUP_TIMEOUT_MS, SESSION_STORE_WARN_BYTES, recordGenerationProgress, resolveNoProgressGenerations, clearNoProgress, noProgressDisplayLabel, handoffNoteCitedExcerpts, resolveIdleHangMs, resolveFirstOutputMs, resolveMaxSilenceMs, isHandoffNoteFresh, buildOrchestratorFallbackNote, scratchHandoffNotePath, SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, pickFresherHandoffNote, handoffBudgetReminder, mergeFallbackWithPreviousNote, resolveBackstopRawTokens, evaluateBackstopBreach, recordBackstopFiring, readBackstopFirings, clearBackstopFirings, backstopLedgerKey, evaluateBackstopEscalation, handleRoleBackstopFiring, resolveSessionNumber, carriedScratchDir, copyCarriedScratch, seedPreviousScratch, deleteCarriedScratch, noteSaysOnlyGateLeft, noteSaysRevisionDone} from "./per-task-budget.mjs";
 import {createIdleWatch, noteIdleOutput, noteIdleStdoutChunk, noteIdleStderrText, evaluateIdleWatch, formatIdleHangMessage, formatRateLimitedMessage, adapterMarkerFor, extractSessionIdFromChunk, noteIdleSessionId, IDLE_HANG_KILL_GRACE_MS, FREE_QUOTA_REASON, PROVIDER_BALANCE_REASON} from "./idle-hang-watchdog.mjs";
 import {deriveRoleDeadline, collectRoleSamples, ROLE_DEADLINE_FLOOR_MS} from "./role-deadline.mjs";
 import {assembleAdapterLaunchPlan} from "./launch-plan.mjs";
@@ -429,6 +429,7 @@ const MISSION_SCOPED_STATE_KEYS=Object.freeze([
   // with the review feedback it is paired with — a map that outlives its
   // findings is the stale-record bug class this codebase already paid for.
   FINDING_TASKS_STATE_KEY,
+  TASK_OWNERSHIP_STATE_KEY,
   // TASK-39 follow-up: the fixture-git-block warning is THIS mission's
   // property — shown in the next brief/WATCH-REPORT, never inherited.
   "fixtureGitBlockWarning","fixtureGitBlockWarningPhaseIndex","gitGuardWarning",
@@ -2315,6 +2316,7 @@ function maybeApplyPendingContinuationReset(s,contScope){
 // watch write must never break a run.
 let lastWatchRefresh=0;
 function refreshWatchReport(s, opts = {}){
+  if (s?.phase === "idle" && !s?.mission) return;
   // While the orchestrator is shutting down it must not report itself alive.
   const o=(shuttingDown && opts.ownerAlive===undefined)?{...opts,ownerAlive:false}:opts;
   try{ writeWatchReportFile(repo,missionFor(repo,s), o); }catch{}
@@ -3824,7 +3826,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     (typeof modelBriefLines === "function" ? modelBriefLines({ model: role?.model, roleName }) : []).join("\n") || null,
     "You are a delegated worker. The orchestrator owns Git history: never run git commit or git push, and never create git worktrees, branches, stashes or tags — the git guard blocks them and the mission stops. To see a committed version use `git show HEAD:<path>` or `git diff`.",
     "Run every command in the foreground and wait for its output in the same turn. Never start background jobs (&, nohup, setsid, run_in_background), never poll with sleep/ps/pgrep loops: your session ends when you end your turn.",
-    ((roleName==="planner" || roleName==="implementer") && !readOnly && ((typeof relayTask==="string" && (relayTask.includes("REJECTED the previous attempt") || relayTask.includes("This is a REVISION round") || relayTask.includes("Reviewer feedback from the previous attempt that MUST be addressed") || relayTask.includes("reviewer findings that MUST be addressed") || relayTask.includes("Plan reviewer feedback that MUST be addressed") || relayTask.includes("review FAIL (fix round"))) || (Number.isInteger(planRevision)&&planRevision>0))) ? "Revision: make the cited edits, update the hand-off note, then end your turn. Do not re-run git status/git log or re-read files you just edited to double-check. If a cited location already contains the required fix, say so for that finding and do not edit or explore it further." : null,
+    ((roleName==="planner" || roleName==="implementer") && !readOnly && ((typeof relayTask==="string" && (relayTask.includes("REJECTED the previous attempt") || relayTask.includes("This is a REVISION round") || relayTask.includes("Reviewer feedback from the previous attempt that MUST be addressed") || relayTask.includes("reviewer findings that MUST be addressed") || relayTask.includes("Plan reviewer feedback that MUST be addressed") || relayTask.includes("review FAIL (fix round"))) || (Number.isInteger(planRevision)&&planRevision>0))) ? "Revision: make the cited edits, update the hand-off note, then end your turn. Do not re-run git status/git log or re-read files you just edited to double-check. If a cited location already contains the required fix, say so for that finding and do not edit or explore it further. In the note's Next section write `none — all cited findings addressed` only when every cited finding is fixed; otherwise list what is left (file:line)." : null,
     roleName==="implementer"?"Some tests read source files as text and anchor on exact function signatures/calls; when you change a signature, run the tests that grep for it (grep -rl '<old text>' scripts/test-*.mjs) and keep them passing.":null,
     (typeof offlineGateBriefLine === "function" ? offlineGateBriefLine({roleName, config:c}) : null),
     "If a git diff shows whole-file churn, re-run it EOL-normalized (git diff --ignore-cr-at-eol or git -c core.autocrlf=input diff) and trust the normalized stat.",
@@ -5459,6 +5461,7 @@ function review(reviewer,task,c,s,feedback="",requirements=[],taskRef=null,timeo
             console.log(`Manual network-test run recorded in MANUAL-CHECKS.md (${network.length} note(s)) — not counted as a review finding.`);
           }
           result.review.findings = rest;
+          if(result?.verdict) moveManualCheckFindings(result.verdict);
           if(rest.length === 0){
             result.review.decision = "PASS";
           }
@@ -5508,7 +5511,21 @@ function acceptCappedFinalVerdict(subject,result){
   if(result.review.decision==="FAIL") result.failure=verdictFailure(result.role,{status:"available",decision:"FAIL",findings:result.review.findings||[]});
   return true;
 }
-function acceptCappedPlannerRevision({subject,result,touchedFiles,isRevision,candidateArtifacts}){
+function readFreshPlannerHandoffNote(missionName, taskRef, runStartedAtMs){
+  let noteText="";
+  try{ noteText=readHandoffNote(missionName, taskRef); }catch{ noteText=""; }
+  let noteFresh=false;
+  try{
+    if(missionName && taskRef && Number.isFinite(runStartedAtMs)){
+      const notePath=path.join(repo, handoffNoteRelPath(missionName, taskRef));
+      if(fs.existsSync(notePath)){
+        noteFresh=fs.statSync(notePath).mtimeMs >= runStartedAtMs;
+      }
+    }
+  }catch{ noteFresh=false; }
+  return {noteText, noteFresh};
+}
+function acceptCappedPlannerRevision({subject,result,touchedFiles,isRevision,candidateArtifacts,noteText,noteFresh}){
   if(!result?.capped || !isRevision) return null;
   if(result.capped.backstop===true || result.capped.type==="backstop") return null;
   const touched=Array.isArray(touchedFiles)?touchedFiles:[];
@@ -5531,13 +5548,17 @@ function acceptCappedPlannerRevision({subject,result,touchedFiles,isRevision,can
   }
   if(!matchedFile) return null;
   const type=result.capped.type||"unknown";
+  if(noteFresh!==true || !noteSaysRevisionDone(noteText)){
+    console.log(`${subject} hit the ${type} cap after editing ${matchedFile} but its hand-off note does not say the cited findings are all done; continuing the planner instead of sending an unfinished revision to review.`);
+    return null;
+  }
   console.log(`${subject} hit the ${type} cap after editing ${matchedFile}; sending the revision to review instead of another session.`);
   result.status="completed";
   result.cappedRevisionAccepted=true;
   delete result.capped;
   return matchedFile;
 }
-function handleCappedPlanningResult({c,s,framework,role,result,subject,touchedFiles,step,stage,planRevision}){
+function handleCappedPlanningResult({c,s,framework,role,result,subject,touchedFiles,step,stage,planRevision,runStartedAtMs}){
   const {taskRef,contScope}=planningScopeParts(framework,role);
   const mission=s.mission||null;
   if(result.capped.backstop===true||result.capped.type==="backstop"){
@@ -5573,7 +5594,8 @@ function handleCappedPlanningResult({c,s,framework,role,result,subject,touchedFi
       else if(stage==="discuss") candidateArtifacts = ["CONTEXT.md","DISCUSS.md"];
       else candidateArtifacts = [".planning"];
     }
-    const acceptedFile = acceptCappedPlannerRevision({subject, result, touchedFiles, isRevision, candidateArtifacts});
+    const { noteText, noteFresh } = readFreshPlannerHandoffNote(mission, taskRef, runStartedAtMs);
+    const acceptedFile = acceptCappedPlannerRevision({subject, result, touchedFiles, isRevision, candidateArtifacts, noteText, noteFresh});
     if(acceptedFile) return true;
   }
   maybeApplyPendingContinuationReset(s,contScope);
@@ -6375,9 +6397,10 @@ ${request}`;
     // gate-failure revisions, whose corrective findings are already embedded
     // in `task` above), so resuming here would only ever mean falling back to
     // an unrelated prior session, not this one.
+    const plannerStartedAtMs=Date.now();
     const r=await relay("planner",task,c,s,{resume:false,capEnabled:true,taskRef,planRevision});
     if(r.capped){
-      if(handleCappedPlanningResult({c,s,framework:"speckit",role:"planner",result:r,subject:`SpecKit planner ${step}`,touchedFiles:r.touchedFiles||[],step,planRevision})){
+      if(handleCappedPlanningResult({c,s,framework:"speckit",role:"planner",result:r,subject:`SpecKit planner ${step}`,touchedFiles:r.touchedFiles||[],step,planRevision,runStartedAtMs:plannerStartedAtMs})){
         finalR=r;
         break;
       }
@@ -6632,9 +6655,14 @@ function classifyRecoverableBoundaryViolation(step,evaluation){
 // required.
 function enforcePlanningWriteBoundary(s,step,touchedFiles,{revision=false}={}){
   if(!Array.isArray(s.planningPreexistingFeatureDirs) || !SPECKIT_PLANNING_STAGES.has(step)) return;
+  const {kept,ignored}=splitGitIgnoredTouched(repo,touchedFiles);
+  if(ignored.length){
+    const preview=ignored.slice(0,5).join(", ")+(ignored.length>5?`, +${ignored.length-5} more`:"");
+    console.log(`SpecKit planning write boundary: ignoring git-ignored tool output in phase '${step}': ${preview}`);
+  }
   const evaluation=evaluatePlanningWriteBoundary({
     stage:step,
-    touchedFiles,
+    touchedFiles:kept,
     preexistingFeatureDirs:s.planningPreexistingFeatureDirs,
     resolvedFeatureDir:s.speckitFeatureDir||null,
     readFile:(rel)=>{ try{ return fs.readFileSync(path.join(repo,rel),"utf8"); }catch{ return null; } },
@@ -6828,6 +6856,7 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
       ].filter(Boolean).join("\n\n");
       const specMtimeBefore = fs.existsSync(specFile) ? fs.statSync(specFile).mtimeMs : 0;
       const codemapMtimeBefore = fs.existsSync(codemapFile) ? fs.statSync(codemapFile).mtimeMs : 0;
+      const plannerStartedAtMs = Date.now();
       const planner = await relayAsync("planner", prompt, c, s, { resume: false, capEnabled: true, taskRef: 'standalone-spec-planner', planRevision: revision });
       const specTouched = [...(planner.touchedFiles || [])];
       if (fs.existsSync(specFile) && fs.statSync(specFile).mtimeMs > specMtimeBefore) specTouched.push(specFile);
@@ -6851,12 +6880,15 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
         clearBackstopFirings(s, contScope);
         const isRevision = Number(revision) > 0 || loadReviewFeedback(s, STANDALONE_SPEC_FEEDBACK_KEY).length > 0 || !!feedback;
         const candidateArtifacts = [specFile, path.relative(repo, specFile), normalizeRel(path.relative(repo, specFile)), "SPEC.md"].filter(Boolean);
+        const { noteText, noteFresh } = readFreshPlannerHandoffNote(mission, 'standalone-spec-planner', plannerStartedAtMs);
         const acceptedFile = acceptCappedPlannerRevision({
           subject: "Standalone spec planner",
           result: planner,
           touchedFiles: specTouched,
           isRevision,
-          candidateArtifacts
+          candidateArtifacts,
+          noteText,
+          noteFresh
         });
         if (!acceptedFile) {
           maybeApplyPendingContinuationReset(s, contScope);
@@ -7234,6 +7266,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
     // planner session to reach 1.26M cached input tokens.
     const tasksMtimeBefore = fs.existsSync(tasksFile) ? fs.statSync(tasksFile).mtimeMs : 0;
     const planMtimeBefore = fs.existsSync(file) ? fs.statSync(file).mtimeMs : 0;
+    const plannerStartedAtMs=Date.now();
     const planner=await relayAsync("planner",prompt,c,s,{resume:false,capEnabled:true,taskRef:'standalone-planning-planner',planRevision:revision});
     const standaloneTouched = [...(planner.touchedFiles || [])];
     if (fs.existsSync(tasksFile) && fs.statSync(tasksFile).mtimeMs > tasksMtimeBefore) standaloneTouched.push(tasksFile);
@@ -7269,12 +7302,15 @@ async function runStandalonePlanning(c,s,request,opts={}){
       clearBackstopFirings(s,contScope);
       const isRevision = Number(revision) > 0 || loadReviewFeedback(s, STANDALONE_PLAN_FEEDBACK_KEY).length > 0 || !!feedback;
       const candidateArtifacts = [tasksFile, file, path.relative(repo, tasksFile), path.relative(repo, file), normalizeRel(path.relative(repo, tasksFile)), normalizeRel(path.relative(repo, file)), "TASKS.md", "PLAN.md"].filter(Boolean);
+      const { noteText, noteFresh } = readFreshPlannerHandoffNote(mission, 'standalone-planning-planner', plannerStartedAtMs);
       const acceptedFile = acceptCappedPlannerRevision({
         subject: "Planner",
         result: planner,
         touchedFiles: standaloneTouched,
         isRevision,
-        candidateArtifacts
+        candidateArtifacts,
+        noteText,
+        noteFresh
       });
       if(!acceptedFile){
         // Backlog #27: a queued `ap reset --scope <continuation>` applies at
@@ -8198,9 +8234,10 @@ async function gsdPlanningStage(c,s,{stage,phase,request,resume=false,planRevisi
       `Keep a hand-off note at ${handoffNoteRelPath(s.mission, taskRef)}. OVERWRITE it (never append) at each milestone — after every important finding, before writing the stage artifact — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${budgetReminder ? ` ${budgetReminder}` : ""}`,
       `Project request/context:\n${request}`
     ].filter(Boolean).join("\n\n");
+    const plannerStartedAtMs=Date.now();
     const r=await relayAsync("planner",prompt,c,s,{readOnly:false,resume,capEnabled:true,taskRef,planRevision});
     if(r.capped){
-      if(handleCappedPlanningResult({c,s,framework:"gsd",role:"planner",result:r,subject:`GSD planner ${stage}`,touchedFiles:r.touchedFiles||[],stage,planRevision})){
+      if(handleCappedPlanningResult({c,s,framework:"gsd",role:"planner",result:r,subject:`GSD planner ${stage}`,touchedFiles:r.touchedFiles||[],stage,planRevision,runStartedAtMs:plannerStartedAtMs})){
         finalR=r;
         break;
       }
@@ -9423,6 +9460,60 @@ async function runStandaloneFinalReviewFixRounds({c,s,site,initialReview,mission
   return standaloneFixResult;
 }
 
+function maybeInjectCrossPhaseRepairCrash(taskId){
+  const marker=path.join(repo,".autopilot",".autopilot-test-crash-after-cross-phase-repair");
+  let armed=null;
+  try{ armed=fs.readFileSync(marker,"utf8").trim(); }
+  catch{ return; }
+  if(armed&&armed!==String(taskId)) return;
+  try{ fs.rmSync(marker,{force:true}); }catch{ /* best-effort */ }
+  process.exit(137);
+}
+
+async function runPhaseCrossPhaseRepairs({
+  state,
+  key,
+  phaseTaskDigest,
+  framework,
+  frameworkLabel,
+  checkboxSnapshotKey,
+  preAttemptTasks,
+  checkpoint,
+  config,
+  phaseRequirements,
+  perTaskLimits,
+  feedback,
+  relay,
+}) {
+  return executePendingCrossPhaseRepairs({
+    state,
+    key,
+    phaseTaskDigest,
+    framework,
+    relay,
+    config,
+    phaseRequirements,
+    perTaskLimits,
+    feedback,
+    saveState: () => {
+      state[CHECKPOINT_STATE_KEY] = checkpoint;
+      saveState(state);
+    },
+    afterRepair: (repair) => {
+      maybeInjectCrossPhaseRepairCrash(repair.taskId);
+    },
+    onPolicyViolation: (taskImpl) => {
+      reconcileTaskCheckboxesBeforePolicyDie(state, preAttemptTasks, frameworkLabel, checkboxSnapshotKey);
+      state.phase = "escalated";
+      state.step = "relay_policy_violation";
+      state.relayPolicyViolation = taskImpl.policyViolation;
+      state[CHECKPOINT_STATE_KEY] = checkpoint;
+      saveState(state);
+      die(formatRelayPolicyViolation(state.relayPolicyViolation, taskImpl.touchedFiles));
+    },
+  });
+}
+
 async function runStandaloneImplementation(c,s){
   const stopStage=activeStage;
   ensureStandaloneMigrated(repo,s);
@@ -9683,6 +9774,7 @@ async function runStandaloneImplementation(c,s){
         factsByTask:checkpoint.roleProgress?.implementer?.factsByTask,
         revision:checkpoint.revision,
         carryAllowed,
+        taskOwnership:loadTaskOwnership(s),
       });
     };
 
@@ -9800,6 +9892,21 @@ async function runStandaloneImplementation(c,s){
         // carriedForwardTasks; attempt runs before the first carry record
         // null. Never fabricated — only real carryDecision results enter.
         const carriedTasks=[];
+        const crossPhaseRepairs=await runPhaseCrossPhaseRepairs({
+          state: s,
+          key: phaseKey,
+          phaseTaskDigest: phaseTaskDigestValue,
+          framework: "standalone",
+          frameworkLabel: "Standalone",
+          checkboxSnapshotKey: "pendingStandaloneCheckboxSnapshot",
+          preAttemptTasks,
+          checkpoint,
+          config: c,
+          phaseRequirements,
+          perTaskLimits,
+          feedback,
+          relay,
+        });
         for(;;){
           const cursorResume=evaluateCrashResume({progress:checkpoint.roleProgress,role:"implementer",taskIds:phaseTaskIds});
           if(cursorResume.action==="complete") break;
@@ -9852,6 +9959,15 @@ async function runStandaloneImplementation(c,s){
               s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
               die(`Standalone Implementer carry-forward commit failed: ${carryCommitted.reason}. STOP — human intervention required.`);
             }
+            recordTaskOwnership(s, {
+              taskId,
+              phaseIndex: s.phaseIndex,
+              phaseNumber: s.phaseIndex + 1,
+              phaseName: phase.name,
+              taskText: phaseTasks[taskIndex]?.text,
+              files: carried.facts?.files,
+              summary: carried.facts?.summary,
+            });
             checkpoint.roleProgress=carryCommitted.progress;
             clearTaskContinuation(s,`task:standalone:phase-${s.phaseIndex}:${taskId}`);
             clearRolloverDeadEnds(s,`task:standalone:phase-${s.phaseIndex}:${taskId}`);
@@ -10146,6 +10262,15 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
             die(`Standalone Implementer task commit failed: ${committed.reason}. STOP — human intervention required.`);
           }
+          recordTaskOwnership(s, {
+            taskId,
+            phaseIndex: s.phaseIndex,
+            phaseNumber: s.phaseIndex + 1,
+            phaseName: phase.name,
+            taskText: phaseTasks[taskIndex]?.text,
+            files: normalized.facts?.files,
+            summary: normalized.facts?.summary,
+          });
           checkpoint.roleProgress=committed.progress;
           // Backlog 003#17: task converged — its continuation allowance and
           // dead ends die with it, never leaking into the next task.
@@ -10171,6 +10296,9 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             checkpoint.roleProgressWorkAhead=[...(checkpoint.roleProgressWorkAhead??[]),{taskId,workAhead:workAhead.tasks}];
           }
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+        }
+        if(!impl){
+          impl = crossPhaseRepairs?.lastResult || (carriedTasks.length > 0 ? {status: "completed", carried: true, summary: "All tasks carried forward"} : null);
         }
         // TASK-21: `impl` is whatever the last REAL launch set — carried
         // tasks never touch it, so checkpoint.implementer.summary (which the
@@ -10711,6 +10839,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         }
         if(vv.review){
           const {moved}=moveManualCheckFindings(vv.review);
+          if(vv.verdict) moveManualCheckFindings(vv.verdict);
           if(moved.length){
             const phaseKey=phase?.name||String(s.phaseIndex);
             const fresh=filterUnrecordedManualChecks(s,phaseKey,moved);
@@ -11215,7 +11344,10 @@ async function runImplementation(c){
   if(recovered.interrupted.length){
     console.log(`Recovered ${recovered.interrupted.length} stale run(s) as INTERRUPTED.`);
   }
-  refreshWatchReport(s);
+  const startupTerminal=["complete","completed","cancelled","escalated"].includes(String(s.phase||""));
+  if(recovered.interrupted.length || !startupTerminal){
+    refreshWatchReport(s);
+  }
   const rawRequest=process.env.AUTOPILOT_SPEC || c.project?.spec || "";
   const request=rawRequest || "Use the current project request/context.";
   console.log("\nProject Autopilot — run");
@@ -11532,6 +11664,7 @@ async function runImplementation(c){
         factsByTask:checkpoint.roleProgress?.implementer?.factsByTask,
         revision:checkpoint.revision,
         carryAllowed,
+        taskOwnership:loadTaskOwnership(s),
       });
     };
 
@@ -11646,6 +11779,21 @@ async function runImplementation(c){
       // carriedForwardTasks; attempt runs before the first carry record
       // null. Never fabricated — only real carryDecision results enter.
       const carriedTasks=[];
+      const crossPhaseRepairs=await runPhaseCrossPhaseRepairs({
+        state: s,
+        key: speckitPhaseFeedbackKey(s.phaseIndex),
+        phaseTaskDigest: phaseTaskDigestValue,
+        framework: "speckit",
+        frameworkLabel: "SpecKit",
+        checkboxSnapshotKey: "pendingCheckboxSnapshot",
+        preAttemptTasks,
+        checkpoint,
+        config: c,
+        phaseRequirements,
+        perTaskLimits,
+        feedback,
+        relay,
+      });
       for(;;){
         const cursorResume=evaluateCrashResume({progress:checkpoint.roleProgress,role:"implementer",taskIds:phaseTaskIds});
         if(cursorResume.action==="complete") break;
@@ -11689,6 +11837,15 @@ async function runImplementation(c){
             s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
             die(`SpecKit Implementer carry-forward commit failed: ${carryCommitted.reason}. STOP — human intervention required.`);
           }
+          recordTaskOwnership(s, {
+            taskId,
+            phaseIndex: s.phaseIndex,
+            phaseNumber: s.phaseIndex + 1,
+            phaseName: phase.name,
+            taskText: phaseTasks[taskIndex]?.text,
+            files: carried.facts?.files,
+            summary: carried.facts?.summary,
+          });
           checkpoint.roleProgress=carryCommitted.progress;
           clearTaskContinuation(s,`task:speckit:phase-${s.phaseIndex}:${taskId}`);
           clearRolloverDeadEnds(s,`task:speckit:phase-${s.phaseIndex}:${taskId}`);
@@ -11945,7 +12102,16 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
           die(`SpecKit Implementer task commit failed: ${committed.reason}. STOP — human intervention required.`);
         }
-          checkpoint.roleProgress=committed.progress;
+        recordTaskOwnership(s, {
+          taskId,
+          phaseIndex: s.phaseIndex,
+          phaseNumber: s.phaseIndex + 1,
+          phaseName: phase.name,
+          taskText: phaseTasks[taskIndex]?.text,
+          files: normalized.facts?.files,
+          summary: normalized.facts?.summary,
+        });
+        checkpoint.roleProgress=committed.progress;
           // Backlog 003#17: task converged — its continuation allowance and
           // dead ends die with it, never leaking into the next task.
           clearTaskContinuation(s,`task:speckit:phase-${s.phaseIndex}:${taskId}`);
@@ -11969,6 +12135,9 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           checkpoint.roleProgressWorkAhead=[...(checkpoint.roleProgressWorkAhead??[]),{taskId,workAhead:workAhead.tasks}];
         }
         s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+      }
+      if(!impl){
+        impl = crossPhaseRepairs?.lastResult || (carriedTasks.length > 0 ? {status: "completed", carried: true, summary: "All tasks carried forward"} : null);
       }
       // TASK-21: `impl` is whatever the last REAL launch set — carried tasks
       // never touch it, so checkpoint.implementer.summary (which the next
@@ -12035,7 +12204,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
       // an earlier attempt's visible work). A scopedDelta/list failure
       // degrades to "proceed as before" — the guard fires only on
       // positive evidence, never on an unreadable signal.
-      if(impl.status==="completed" && !impl.policyViolation){
+      if(impl?.status==="completed" && !impl?.policyViolation){
         let phaseDeltaEmpty=false;
         try{ phaseDeltaEmpty=scopedDelta(repo,phaseBaselineKey).trim()===""; }
         catch{ phaseDeltaEmpty=false; }
@@ -12514,6 +12683,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         }
         if(vv.review){
           const {moved}=moveManualCheckFindings(vv.review);
+          if(vv.verdict) moveManualCheckFindings(vv.verdict);
           if(moved.length){
             const phaseKey=phase?.name||String(s.phaseIndex);
             const fresh=filterUnrecordedManualChecks(s,phaseKey,moved);

@@ -77,9 +77,9 @@ export function taskSizeReviewText(target = TASK_SIZE_TARGET_TURNS_DEFAULT) {
 export const RELAY_TIMEOUT_DEFAULT_MS = 200 * 60 * 1000;
 // Backlog 003#15: default ceiling on the per-turn context size
 // (maxSingleTurnContext per invocation). Sized from mission evidence as a
-// single-turn context ceiling (~180K), not a cumulative total: well-behaved
-// turns stay far below it, bloated turns exceed it.
-export const PER_TASK_MAX_TOKENS_DEFAULT = 180_000;
+// single-turn context ceiling (~200K, raised in backlog #9 from 180K), not a
+// cumulative total: well-behaved turns stay far below it, bloated turns exceed it.
+export const PER_TASK_MAX_TOKENS_DEFAULT = 200_000;
 // Backlog 003#17: default continuation allowance per task (generations of a
 // rolled-over task), independent of every failure budget. 5 continuations =
 // 6 sessions in total per task.
@@ -129,23 +129,22 @@ export const PER_ROLE_CAPS_DEFAULT = {
   // Operator decision 2026-10-28: 4, because with working hand-off notes two 30-turn sessions cost less than one long session and long full reviews were stopping missions at 2.
   // Backlog #8: 250K so a full plan re-check finishes in one session on a large plan instead of splitting at ~135K.
   plan_reviewer: {maxTurns: 30, maxTokens: 250_000, extraSessions: 4},
-  code_reviewer: {maxTurns: 22, maxTokens: 150_000, extraSessions: 2},
-  // Backlog #59(b): the verifier was cut at 22 in test mission 048 trial 3
-  // and re-ran in full (392K priced) — raised with the implementer.
-  verifier: {maxTurns: 30, maxTokens: 150_000, extraSessions: 2},
+  // Backlog #9: 250K so code review finishes without splitting at 135K.
+  code_reviewer: {maxTurns: 22, maxTokens: 250_000, extraSessions: 2},
+  // Backlog #59(b), #9: verifier raised with the implementer to 200K.
+  verifier: {maxTurns: 30, maxTokens: 200_000, extraSessions: 2},
 };
 
 // Per-role wrap-up token thresholds (mission 031 Phase 1 task 1.1; mission
 // 044 Phase 1 task 1.3: per-turn values).
 // Must be strictly below the role's maxTokens so wrap-up can fire before the cap.
-// planner uses 180K (~one turn headroom below 200K), plan_reviewer uses 225K
-// (~one turn headroom below its 250K cap, backlog #8); the other review roles
-// use 135K (~one turn headroom below 150K).
+// planner and verifier use 180K (~one turn headroom below 200K), plan_reviewer
+// and code_reviewer use 225K (~one turn headroom below their 250K cap, backlog #8, #9).
 export const PER_ROLE_WRAPUP_TOKENS_DEFAULT = {
   planner: 180_000,
   plan_reviewer: 225_000,
-  code_reviewer: 135_000,
-  verifier: 135_000,
+  code_reviewer: 225_000,
+  verifier: 180_000,
 };
 
 // Setup's policy.caps merge (mission 031 task 1.5), kept here so it is
@@ -161,20 +160,38 @@ const LEGACY_CUMULATIVE_CAPS = {
   code_reviewer: {max_tokens: 500_000, wrap_up_tokens_threshold: 450_000},
   verifier: {max_tokens: 500_000, wrap_up_tokens_threshold: 450_000},
 };
+// Backlog #9: previous per-turn shipped defaults (150K/135K for code_reviewer and verifier).
+// Untouched configs holding these previous defaults are migrated to the new defaults.
+const PREVIOUS_SHIPPED_CAPS = {
+  code_reviewer: {max_tokens: 150_000, wrap_up_tokens_threshold: 135_000},
+  verifier: {max_tokens: 150_000, wrap_up_tokens_threshold: 135_000},
+};
 export function mergeRoleCaps(existingCaps = {}) {
   const caps = {...existingCaps};
   for (const [role, defaults] of Object.entries(PER_ROLE_CAPS_DEFAULT)) {
     const existing = {...(existingCaps[role] || {})};
+    if (existing.wrap_up_tokens_threshold == null && existing.wrap_up_at_tokens != null) {
+      existing.wrap_up_tokens_threshold = existing.wrap_up_at_tokens;
+    }
+    delete existing.wrap_up_at_tokens;
     const legacy = LEGACY_CUMULATIVE_CAPS[role];
     if (legacy && existing.max_tokens === legacy.max_tokens) delete existing.max_tokens;
     if (legacy && existing.wrap_up_tokens_threshold === legacy.wrap_up_tokens_threshold) delete existing.wrap_up_tokens_threshold;
+    const prev = PREVIOUS_SHIPPED_CAPS[role];
+    if (prev && existing.max_tokens === prev.max_tokens) delete existing.max_tokens;
+    if (prev && existing.wrap_up_tokens_threshold === prev.wrap_up_tokens_threshold) delete existing.wrap_up_tokens_threshold;
     // Backlog #59(b): a shipped 22 on a role whose default moved is untouched.
     if (existing.max_turns === LEGACY_MAX_TURNS_DEFAULT && defaults.maxTurns !== LEGACY_MAX_TURNS_DEFAULT) delete existing.max_turns;
+    const defaultWrapup = PER_ROLE_WRAPUP_TOKENS_DEFAULT[role];
+    const effectiveMaxTokens = existing.max_tokens ?? defaults.maxTokens;
+    const safeDefaultWrapup = (defaultWrapup != null && defaultWrapup < effectiveMaxTokens)
+      ? defaultWrapup
+      : Math.max(1, Math.floor(effectiveMaxTokens * 0.9));
     caps[role] = {
       max_turns: defaults.maxTurns,
       max_tokens: defaults.maxTokens,
       extra_sessions: defaults.extraSessions,
-      wrap_up_tokens_threshold: PER_ROLE_WRAPUP_TOKENS_DEFAULT[role],
+      wrap_up_tokens_threshold: safeDefaultWrapup,
       ...existing
     };
   }
@@ -240,7 +257,7 @@ export function isHandoffNoteFresh({
 // policy.handoff_wrapup_tokens only overrides it per project. Must be a
 // positive integer strictly below the effective per-task token ceiling, or
 // the wrap-up could never fire before the cap.
-export const HANDOFF_WRAPUP_TOKENS_DEFAULT = 160_000;
+export const HANDOFF_WRAPUP_TOKENS_DEFAULT = 180_000;
 // Wrap-up turn's own ceiling: exempt from the per-task cap, but bounded
 // itself — max turns and wall-clock timeout for the resumed wrap-up relay.
 export const WRAPUP_MAX_TURNS = 3;
@@ -974,6 +991,8 @@ export function extractNoteSections(noteText) {
   return sections;
 }
 
+const FILE_REF_PATTERN = /\b[\w.-]+\.(?:mjs|cjs|js|ts|jsx|tsx|json|md|py|sh|yaml|yml|css|html)\b|\b[\w.-]+\/[\w.-]+|:\d+(?:-\d+)?\b/i;
+
 export function noteSaysOnlyGateLeft(noteText) {
   if (typeof noteText !== "string" || !noteText.trim()) return false;
   const sections = extractNoteSections(noteText);
@@ -993,11 +1012,28 @@ export function noteSaysOnlyGateLeft(noteText) {
   const ACTIONABLE_PATTERN = /\b(?:edit|edits|editing|modify|modifying|modification|fix|fixes|fixing|change|changes|changing|patch|patching|write|writing|update|updating|refactor|refactoring|remove|removing|delete|deleting|add|adding|create|creating|rebut|rebuttal|re-?review|implement|implementing|investigate|investigating|check|checking|inspect|inspecting|verify|verifying|re-?check|re-?test)\b/i;
   if (ACTIONABLE_PATTERN.test(next)) return false;
 
-  const FILE_REF_PATTERN = /\b[\w.-]+\.(?:mjs|cjs|js|ts|jsx|tsx|json|md|py|sh|yaml|yml|css|html)\b|\b[\w.-]+\/[\w.-]+|:\d+(?:-\d+)?\b/i;
   if (FILE_REF_PATTERN.test(next)) return false;
 
   const FINDINGS_PATTERN = /\b(?:findings?|defects?|bugs?|issues?|task|tasks|todo)\b/i;
   if (FINDINGS_PATTERN.test(next)) return false;
+
+  return true;
+}
+
+export function noteSaysRevisionDone(noteText) {
+  if (typeof noteText !== "string" || !noteText.trim()) return false;
+  if (noteText.toLowerCase().includes("(orchestrator fallback")) return false;
+  const sections = extractNoteSections(noteText);
+  const next = sections.next;
+  if (!next || !next.trim()) return false;
+
+  const DONE_PATTERN = /\b(?:none|nothing\s+(?:left|remaining|else)|no\s+(?:remaining|open|further)\s+(?:work|edits?|findings?)|all\s+(?:cited\s+)?findings\s+(?:are\s+)?(?:addressed|fixed|done|resolved)|ready\s+for\s+(?:re-?)?review|send\s+to\s+(?:the\s+)?review(?:er)?)\b/i;
+  if (!DONE_PATTERN.test(next)) return false;
+
+  if (FILE_REF_PATTERN.test(next)) return false;
+
+  const REMAINING_WORK_PATTERN = /\b(?:still|remaining\s+(?:findings?|items?|work|edits?|issues?)|todo|fix|edit|update|add|need(?:s)?\s+to|must|pending|incomplete)\b|\bleft\s*:/i;
+  if (REMAINING_WORK_PATTERN.test(next)) return false;
 
   return true;
 }

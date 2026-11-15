@@ -66,9 +66,9 @@ const runtimeConfig = {
     continuation_allowance: 5,
     caps: {
       planner: { max_tokens: 200000, wrap_up_tokens_threshold: 180000 },
-      plan_reviewer: { max_tokens: 150000, wrap_up_tokens_threshold: 135000 },
-      code_reviewer: { max_tokens: 150000, wrap_up_tokens_threshold: 135000 },
-      verifier: { max_tokens: 150000, wrap_up_tokens_threshold: 135000 },
+      plan_reviewer: { max_tokens: 250000, wrap_up_tokens_threshold: 225000 },
+      code_reviewer: { max_tokens: 250000, wrap_up_tokens_threshold: 225000 },
+      verifier: { max_tokens: 200000, wrap_up_tokens_threshold: 180000 },
     },
   },
 };
@@ -101,7 +101,7 @@ const outFile3 = writeWatchReportFile(repo3, mission);
 const text3 = fs.readFileSync(outFile3, "utf8");
 // The header carries the render time (=== HH:MM:SS) and live elapsed values;
 // drop the clock line so two renders a second apart still compare equal.
-const stable = (t) => t.replace(/^=== \d{2}:\d{2}:\d{2} — /m, "=== — ").replace(/elapsed \d+:\d{2}:\d{2}/g, "elapsed -");
+const stable = (t) => t.replace(/^=== (?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2}:\d{2} — /m, "=== — ").replace(/elapsed \d+:\d{2}:\d{2}/g, "elapsed -");
 check("3.x: same output as v4", stable(textV4) === stable(text3));
 
 // --- stop event + newer running run ---

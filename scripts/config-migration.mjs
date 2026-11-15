@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { PER_TASK_MAX_TURNS_DEFAULT, PER_TASK_MAX_TOKENS_DEFAULT, CONTINUATION_ALLOWANCE_DEFAULT, HANDOFF_MAX_CHARS_DEFAULT, HANDOFF_NOTE_MAX_CHARS_DEFAULT, HANDOFF_WRAPUP_TOKENS_DEFAULT, NO_PROGRESS_GENERATIONS_DEFAULT, FINAL_REVIEW_FIX_ROUNDS_DEFAULT, RELAY_TIMEOUT_DEFAULT_MS, PER_TASK_TIMEOUT_DEFAULT_MS, resolveIdleHangMs, PER_ROLE_CAPS_DEFAULT, PER_ROLE_WRAPUP_TOKENS_DEFAULT, BACKSTOP_RAW_TOKENS_DEFAULT, LEGACY_MAX_TURNS_DEFAULT, PREVIOUS_MAX_TURNS_DEFAULT } from "./per-task-budget.mjs";
-import { CONFIG_SCHEMA_VERSION, toNewLayoutConfig, toRuntimeConfig, migrateTimeLimitNames, migratePlanApprovalKey } from "./config-layout.mjs";
+import { CONFIG_SCHEMA_VERSION, toNewLayoutConfig, toRuntimeConfig, migrateTimeLimitNames, migratePlanApprovalKey, REVIEW_ROLES } from "./config-layout.mjs";
 import { fillLayout } from "./config-fill.mjs";
 
 // Backlog #1 (mission 096 Phase 1 task 1.3): migration now yields the v4
@@ -145,8 +145,9 @@ function migrateLegacyRuntime(input, existingMeta = {}) {
   // config persisted the old shipped numbers (750K cap / 690K wrap-up for the
   // implementer-scale global policy); only those exact legacy values are
   // rewritten, everything else is kept as the operator set it.
-  if (out.policy.per_task_max_tokens === 750_000) { out.policy.per_task_max_tokens = PER_TASK_MAX_TOKENS_DEFAULT; changed = true; }
-  if (out.policy.handoff_wrapup_tokens === 690_000) { out.policy.handoff_wrapup_tokens = HANDOFF_WRAPUP_TOKENS_DEFAULT; changed = true; }
+  // Backlog #9: old shipped defaults (180K / 160K) also migrate to the new defaults.
+  if (out.policy.per_task_max_tokens === 750_000 || out.policy.per_task_max_tokens === 180_000) { out.policy.per_task_max_tokens = PER_TASK_MAX_TOKENS_DEFAULT; changed = true; }
+  if (out.policy.handoff_wrapup_tokens === 690_000 || out.policy.handoff_wrapup_tokens === 160_000) { out.policy.handoff_wrapup_tokens = HANDOFF_WRAPUP_TOKENS_DEFAULT; changed = true; }
   // Backlog #52 final review: the exact rewrites above catch only the SHIPPED
   // cumulative defaults — every other cumulative-era value (500K/950K wrap-ups,
   // 600K role caps) survived migration and failed validatePolicyConfig, so
@@ -204,10 +205,21 @@ function migrateLegacyRuntime(input, existingMeta = {}) {
     code_reviewer: {max_tokens: 500_000, wrap_up_tokens_threshold: 450_000},
     verifier: {max_tokens: 500_000, wrap_up_tokens_threshold: 450_000},
   };
+  // Backlog #9: previous per-turn shipped defaults (code_reviewer 150K/135K, verifier 150K/135K).
+  const prevShippedCaps = {
+    code_reviewer: {max_tokens: 150_000, wrap_up_tokens_threshold: 135_000},
+    verifier: {max_tokens: 150_000, wrap_up_tokens_threshold: 135_000},
+  };
   for (const role of reviewRoles) {
     const roleCaps = out.policy.caps[role] || {};
+    if (roleCaps.wrap_up_tokens_threshold == null && roleCaps.wrap_up_at_tokens != null) {
+      roleCaps.wrap_up_tokens_threshold = roleCaps.wrap_up_at_tokens;
+      delete roleCaps.wrap_up_at_tokens;
+    }
     if (roleCaps.max_tokens === legacyCaps[role].max_tokens) { roleCaps.max_tokens = PER_ROLE_CAPS_DEFAULT[role].maxTokens; changed = true; }
     if (roleCaps.wrap_up_tokens_threshold === legacyCaps[role].wrap_up_tokens_threshold) { roleCaps.wrap_up_tokens_threshold = PER_ROLE_WRAPUP_TOKENS_DEFAULT[role]; changed = true; }
+    if (prevShippedCaps[role] && roleCaps.max_tokens === prevShippedCaps[role].max_tokens) { roleCaps.max_tokens = PER_ROLE_CAPS_DEFAULT[role].maxTokens; changed = true; }
+    if (prevShippedCaps[role] && roleCaps.wrap_up_tokens_threshold === prevShippedCaps[role].wrap_up_tokens_threshold) { roleCaps.wrap_up_tokens_threshold = PER_ROLE_WRAPUP_TOKENS_DEFAULT[role]; changed = true; }
     // Backlog #52 final review: same cumulative-era rule as the global keys —
     // any review-role cap above the threshold is a leftover, not an operator value.
     if (Number(roleCaps.max_tokens) > CUMULATIVE_TOKEN_THRESHOLD) { roleCaps.max_tokens = PER_ROLE_CAPS_DEFAULT[role].maxTokens; changed = true; }
@@ -219,39 +231,39 @@ function migrateLegacyRuntime(input, existingMeta = {}) {
     if ((role !== "plan_reviewer" || defaults111Pending) && roleCaps.max_turns === LEGACY_MAX_TURNS_DEFAULT && defaultCaps?.maxTurns != null && defaultCaps.maxTurns !== LEGACY_MAX_TURNS_DEFAULT) { roleCaps.max_turns = defaultCaps.maxTurns; changed = true; }
     if (roleCaps.max_tokens == null && defaultCaps?.maxTokens != null) { roleCaps.max_tokens = defaultCaps.maxTokens; changed = true; }
     if (roleCaps.extra_sessions == null && defaultCaps?.extraSessions != null) { roleCaps.extra_sessions = defaultCaps.extraSessions; changed = true; }
-    if (roleCaps.wrap_up_tokens_threshold == null && defaultWrapup != null) { roleCaps.wrap_up_tokens_threshold = defaultWrapup; changed = true; }
+    const effectiveCap = Number(roleCaps.max_tokens);
+    const safeDefaultWrapup = (defaultWrapup != null && (!Number.isInteger(effectiveCap) || effectiveCap <= 0 || defaultWrapup < effectiveCap))
+      ? defaultWrapup
+      : Math.max(1, Math.floor(effectiveCap * 0.9));
+    if (roleCaps.wrap_up_tokens_threshold == null && defaultWrapup != null) { roleCaps.wrap_up_tokens_threshold = safeDefaultWrapup; changed = true; }
     if (Object.keys(roleCaps).length > 0) out.policy.caps[role] = roleCaps;
   }
   // Backlog #52 final review, backstop: a kept operator value can still make
-  // the policy invalid — a wrap-up at/above its cap, or a non-planner role cap
-  // at/above the global ceiling. Degrade the offending value to its default so
-  // migrateConfig never returns a config validatePolicyConfig rejects (the
-  // comparisons mirror validatePolicyConfig exactly, planner and plan_reviewer
-  // exempt from the global-ceiling check like they are there).
+  // the policy invalid — a wrap-up at/above its cap. Degrade the offending value
+  // to its default so migrateConfig never returns a config validatePolicyConfig rejects
+  // (backlog #9: review role caps are independent of the global ceiling, matching validatePolicyConfig).
   const effectiveCeiling = Number.isInteger(out.policy.per_task_max_tokens) && out.policy.per_task_max_tokens > 0
     ? out.policy.per_task_max_tokens
     : PER_TASK_MAX_TOKENS_DEFAULT;
   const policyWrapup = Number(out.policy.handoff_wrapup_tokens);
   if (Number.isInteger(policyWrapup) && policyWrapup > 0 && policyWrapup >= effectiveCeiling) {
-    out.policy.handoff_wrapup_tokens = HANDOFF_WRAPUP_TOKENS_DEFAULT;
+    out.policy.handoff_wrapup_tokens = HANDOFF_WRAPUP_TOKENS_DEFAULT < effectiveCeiling
+      ? HANDOFF_WRAPUP_TOKENS_DEFAULT
+      : Math.max(1, Math.floor(effectiveCeiling * 0.9));
     changed = true;
   }
   for (const role of reviewRoles) {
     const roleCaps = out.policy.caps?.[role];
     if (!roleCaps || typeof roleCaps !== "object" || Array.isArray(roleCaps)) continue;
-    if (role !== "planner" && role !== "plan_reviewer") {
-      const capTokens = Number(roleCaps.max_tokens);
-      if (Number.isInteger(capTokens) && capTokens > 0 && capTokens >= effectiveCeiling) {
-        roleCaps.max_tokens = PER_ROLE_CAPS_DEFAULT[role].maxTokens;
-        changed = true;
-      }
-    }
     const effectiveRoleCap = Number(roleCaps.max_tokens);
     const roleWrapup = Number(roleCaps.wrap_up_tokens_threshold);
     if (Number.isInteger(roleWrapup) && roleWrapup > 0
       && Number.isInteger(effectiveRoleCap) && effectiveRoleCap > 0
       && roleWrapup >= effectiveRoleCap) {
-      roleCaps.wrap_up_tokens_threshold = PER_ROLE_WRAPUP_TOKENS_DEFAULT[role];
+      const defaultWrapup = PER_ROLE_WRAPUP_TOKENS_DEFAULT[role];
+      roleCaps.wrap_up_tokens_threshold = (defaultWrapup != null && defaultWrapup < effectiveRoleCap)
+        ? defaultWrapup
+        : Math.max(1, Math.floor(effectiveRoleCap * 0.9));
       changed = true;
     }
   }
@@ -323,6 +335,113 @@ function extractMeta(runtime) {
   return meta;
 }
 
+// Backlog #9: migrate previous shipped defaults in v4 layout.
+// implementer 180K/160K -> 200K/180K (and advanced.handoff_wrapup_tokens 160K -> 180K)
+// code_reviewer 150K/135K -> 250K/225K
+// verifier 150K/135K -> 200K/180K
+export function migrateV4Caps(layout = {}) {
+  let changed = false;
+  const changes = [];
+  const out = JSON.parse(JSON.stringify(layout));
+  if (out.caps && typeof out.caps === "object" && !Array.isArray(out.caps)) {
+    if (out.caps.implementer && typeof out.caps.implementer === "object") {
+      if (out.caps.implementer.max_tokens === 180_000 || out.caps.implementer.max_tokens === 750_000) {
+        const from = out.caps.implementer.max_tokens;
+        out.caps.implementer.max_tokens = PER_TASK_MAX_TOKENS_DEFAULT;
+        changes.push({ path: "caps.implementer.max_tokens", from, to: PER_TASK_MAX_TOKENS_DEFAULT });
+        changed = true;
+      }
+      if (out.caps.implementer.wrap_up_at_tokens === 160_000 || out.caps.implementer.wrap_up_at_tokens === 690_000) {
+        const from = out.caps.implementer.wrap_up_at_tokens;
+        out.caps.implementer.wrap_up_at_tokens = HANDOFF_WRAPUP_TOKENS_DEFAULT;
+        changes.push({ path: "caps.implementer.wrap_up_at_tokens", from, to: HANDOFF_WRAPUP_TOKENS_DEFAULT });
+        changed = true;
+      }
+      const impCap = Number(out.caps.implementer.max_tokens);
+      const impWrap = Number(out.caps.implementer.wrap_up_at_tokens);
+      if (Number.isInteger(impCap) && impCap > 0 && Number.isInteger(impWrap) && impWrap > 0 && impWrap >= impCap) {
+        const from = layout.caps?.implementer?.wrap_up_at_tokens ?? out.caps.implementer.wrap_up_at_tokens;
+        const to = HANDOFF_WRAPUP_TOKENS_DEFAULT < impCap
+          ? HANDOFF_WRAPUP_TOKENS_DEFAULT
+          : Math.max(1, Math.floor(impCap * 0.9));
+        out.caps.implementer.wrap_up_at_tokens = to;
+        const existingChange = changes.find(c => c.path === "caps.implementer.wrap_up_at_tokens");
+        if (existingChange) {
+          existingChange.to = to;
+        } else {
+          changes.push({ path: "caps.implementer.wrap_up_at_tokens", from, to });
+        }
+        changed = true;
+      }
+    }
+    if (out.caps.code_reviewer && typeof out.caps.code_reviewer === "object") {
+      if (out.caps.code_reviewer.max_tokens === 150_000 || out.caps.code_reviewer.max_tokens === 500_000) {
+        const from = out.caps.code_reviewer.max_tokens;
+        out.caps.code_reviewer.max_tokens = PER_ROLE_CAPS_DEFAULT.code_reviewer.maxTokens;
+        changes.push({ path: "caps.code_reviewer.max_tokens", from, to: PER_ROLE_CAPS_DEFAULT.code_reviewer.maxTokens });
+        changed = true;
+      }
+      if (out.caps.code_reviewer.wrap_up_at_tokens === 135_000 || out.caps.code_reviewer.wrap_up_at_tokens === 450_000) {
+        const from = out.caps.code_reviewer.wrap_up_at_tokens;
+        out.caps.code_reviewer.wrap_up_at_tokens = PER_ROLE_WRAPUP_TOKENS_DEFAULT.code_reviewer;
+        changes.push({ path: "caps.code_reviewer.wrap_up_at_tokens", from, to: PER_ROLE_WRAPUP_TOKENS_DEFAULT.code_reviewer });
+        changed = true;
+      }
+    }
+    if (out.caps.verifier && typeof out.caps.verifier === "object") {
+      if (out.caps.verifier.max_tokens === 150_000 || out.caps.verifier.max_tokens === 500_000) {
+        const from = out.caps.verifier.max_tokens;
+        out.caps.verifier.max_tokens = PER_ROLE_CAPS_DEFAULT.verifier.maxTokens;
+        changes.push({ path: "caps.verifier.max_tokens", from, to: PER_ROLE_CAPS_DEFAULT.verifier.maxTokens });
+        changed = true;
+      }
+      if (out.caps.verifier.wrap_up_at_tokens === 135_000 || out.caps.verifier.wrap_up_at_tokens === 450_000) {
+        const from = out.caps.verifier.wrap_up_at_tokens;
+        out.caps.verifier.wrap_up_at_tokens = PER_ROLE_WRAPUP_TOKENS_DEFAULT.verifier;
+        changes.push({ path: "caps.verifier.wrap_up_at_tokens", from, to: PER_ROLE_WRAPUP_TOKENS_DEFAULT.verifier });
+        changed = true;
+      }
+    }
+    for (const role of REVIEW_ROLES) {
+      const rc = out.caps[role];
+      if (!rc || typeof rc !== "object") continue;
+      if (rc.wrap_up_at_tokens == null && rc.wrap_up_tokens_threshold != null) {
+        const from = rc.wrap_up_tokens_threshold;
+        rc.wrap_up_at_tokens = rc.wrap_up_tokens_threshold;
+        delete rc.wrap_up_tokens_threshold;
+        changes.push({ path: `caps.${role}.wrap_up_at_tokens`, from, to: rc.wrap_up_at_tokens });
+        changed = true;
+      }
+      const cap = Number(rc.max_tokens);
+      const wrap = Number(rc.wrap_up_at_tokens);
+      if (Number.isInteger(cap) && cap > 0 && Number.isInteger(wrap) && wrap > 0 && wrap >= cap) {
+        const from = layout.caps?.[role]?.wrap_up_at_tokens ?? rc.wrap_up_at_tokens;
+        const defWrap = PER_ROLE_WRAPUP_TOKENS_DEFAULT[role];
+        const to = (defWrap != null && defWrap < cap)
+          ? defWrap
+          : Math.max(1, Math.floor(cap * 0.9));
+        rc.wrap_up_at_tokens = to;
+        const existingChange = changes.find(c => c.path === `caps.${role}.wrap_up_at_tokens`);
+        if (existingChange) {
+          existingChange.to = to;
+        } else {
+          changes.push({ path: `caps.${role}.wrap_up_at_tokens`, from, to });
+        }
+        changed = true;
+      }
+    }
+  }
+  if (out.advanced && typeof out.advanced === "object" && !Array.isArray(out.advanced)) {
+    if (out.advanced.handoff_wrapup_tokens === 160_000 || out.advanced.handoff_wrapup_tokens === 690_000) {
+      const from = out.advanced.handoff_wrapup_tokens;
+      out.advanced.handoff_wrapup_tokens = HANDOFF_WRAPUP_TOKENS_DEFAULT;
+      changes.push({ path: "advanced.handoff_wrapup_tokens", from, to: HANDOFF_WRAPUP_TOKENS_DEFAULT });
+      changed = true;
+    }
+  }
+  return { layout: out, changed, changes };
+}
+
 // Migrates any pre-v4 config to the v4 layout. A v4 config is returned
 // unchanged (byte-for-byte equivalent object). The returned `config` IS the v4
 // layout; `loadAndMigrateConfig` adapts it to the runtime shape.
@@ -342,7 +461,9 @@ export function migrateConfig(input, existingMeta = {}) {
     // the time-limit rename this is not reported as a migration change; `ap
     // config fill` is what removes it from the file.
     const planApproval = migratePlanApprovalKey(renamed.layout);
-    const v4Layout = planApproval.layout;
+    const v4Caps = migrateV4Caps(planApproval.layout);
+    const v4Layout = v4Caps.layout;
+    const changed = renamed.changed || v4Caps.changed;
     // For v4 configs, machine-written fields are in config.meta.json, not in the
     // config file itself. Merge existingMeta (from meta file) with any meta
     // extracted from the config (should be empty for true v4).
@@ -354,7 +475,7 @@ export function migrateConfig(input, existingMeta = {}) {
     // Clean up empty objects.
     if (!Object.keys(mergedMeta.config_metadata).length) delete mergedMeta.config_metadata;
     if (!Object.keys(mergedMeta.roles).length) delete mergedMeta.roles;
-    return {config: v4Layout, layout: v4Layout, changed: renamed.changed, from: incoming, to: CURRENT_SCHEMA, meta: mergedMeta, removedCertificationFields: false};
+    return {config: v4Layout, layout: v4Layout, changed, from: incoming, to: CURRENT_SCHEMA, meta: mergedMeta, removedCertificationFields: false};
   }
   const legacy = migrateLegacyRuntime(input, existingMeta);
   const meta = extractMeta(legacy.runtime);

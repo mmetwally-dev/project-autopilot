@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildReportModel, renderReport, enrichRun } from "./watch-report.mjs";
+import { buildReportModel, renderReport, enrichRun, readBriefExtras } from "./watch-report.mjs";
 import { rebuildSummary } from "./watch-summary.mjs";
 
 const failures = [];
@@ -192,6 +192,44 @@ try {
   check("summary entry JSON size is real (> 50 bytes)", summarySize > 50, { summarySize });
 } finally {
   fs.rmSync(fixtureRepo, { recursive: true, force: true });
+}
+
+// readBriefExtras: SpecKit first-draft planner briefs vs revision briefs vs generic briefs
+const briefTempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ap-brief-extras-"));
+try {
+  const allThreePaths = "SpecKit artifact paths (absolute, sandbox-visible): spec: /repo/specs/001-test/spec.md; plan: /repo/specs/001-test/plan.md; tasks: /repo/specs/001-test/tasks.md";
+
+  const runBriefCase = (name, content) => {
+    const dir = path.join(briefTempRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "brief.txt"), content);
+    return readBriefExtras(dir);
+  };
+
+  // (a) first-draft specify brief with all three artifact paths -> "spec"
+  const resSpecify = runBriefCase("case-a", `Planning phase: specify\n\n${allThreePaths}\n`);
+  check("readBriefExtras first-draft specify brief -> spec", resSpecify.briefArtifacts === "spec", resSpecify);
+
+  // (b) first-draft plan brief with all three artifact paths -> "plan"
+  const resPlan = runBriefCase("case-b", `Planning phase: plan\n\n${allThreePaths}\n`);
+  check("readBriefExtras first-draft plan brief -> plan", resPlan.briefArtifacts === "plan", resPlan);
+
+  // (c) first-draft tasks brief with all three artifact paths -> "tasks"
+  const resTasks = runBriefCase("case-c", `Planning phase: tasks\n\n${allThreePaths}\n`);
+  check("readBriefExtras first-draft tasks brief -> tasks", resTasks.briefArtifacts === "tasks", resTasks);
+
+  // (d) revision brief: "Planning phase: plan" + "The plan reviewer REJECTED ..." -> findings-derived label
+  const resRevision = runBriefCase(
+    "case-d",
+    `Planning phase: plan\n\nThe plan reviewer REJECTED the previous attempt:\n- specs/x/plan.md:42: missing detail\n\n${allThreePaths}\n`,
+  );
+  check("readBriefExtras revision brief keeps findings-derived label", resRevision.briefArtifacts === "plan", resRevision);
+
+  // (e) brief without a "Planning phase:" line -> unchanged generic fallback
+  const resGeneric = runBriefCase("case-e", `Standalone planning brief\n\n${allThreePaths}\n`);
+  check("readBriefExtras brief without Planning phase line keeps generic fallback", resGeneric.briefArtifacts === "spec/plan/tasks", resGeneric);
+} finally {
+  fs.rmSync(briefTempRoot, { recursive: true, force: true });
 }
 
 if (failures.length) {

@@ -110,17 +110,17 @@ Per-role turn, token and session caps plus the mission token backstop.
 | `caps.plan_reviewer.extra_sessions` | `4` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
 | `caps.plan_reviewer.wrap_up_at_tokens` | `225000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
 | `caps.implementer.max_turns` | `40` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
-| `caps.implementer.max_tokens` | `180000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
+| `caps.implementer.max_tokens` | `200000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.implementer.extra_sessions` | `5` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
-| `caps.implementer.wrap_up_at_tokens` | `160000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
+| `caps.implementer.wrap_up_at_tokens` | `180000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
 | `caps.code_reviewer.max_turns` | `22` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
-| `caps.code_reviewer.max_tokens` | `150000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
+| `caps.code_reviewer.max_tokens` | `250000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.code_reviewer.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
-| `caps.code_reviewer.wrap_up_at_tokens` | `135000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
+| `caps.code_reviewer.wrap_up_at_tokens` | `225000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
 | `caps.verifier.max_turns` | `30` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
-| `caps.verifier.max_tokens` | `150000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
+| `caps.verifier.max_tokens` | `200000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.verifier.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
-| `caps.verifier.wrap_up_at_tokens` | `135000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
+| `caps.verifier.wrap_up_at_tokens` | `180000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
 | `caps.mission_token_backstop` | `6000000` | >= 1 | Cumulative raw tokens (input, cached input and output) allowed across one task; when exceeded the role wraps up and continues in a new backstop session, and two firings in a row stop the task with BACKSTOP_CONSECUTIVE_FIRINGS. |
 
 ### retries
@@ -256,7 +256,7 @@ Paths, hand-off limits and capability defaults.
 | `advanced.runs_dir` | `".autopilot/runs"` | — | Intended directory holding run records. Fixed in this version; changing it has no effect. |
 | `advanced.handoff_max_chars` | `2000` | >= 500 | Maximum characters in a role hand-off document; longer text is cut, and values below 500 are rejected. |
 | `advanced.handoff_note_max_chars` | `4000` | >= 1000 | Maximum characters in a hand-off note; longer text is cut, and values below 1000 are rejected. |
-| `advanced.handoff_wrapup_tokens` | `160000` | >= 1 | Token count at which a role is told to wrap up its hand-off; it must be below the implementer token cap. |
+| `advanced.handoff_wrapup_tokens` | `180000` | >= 1 | Token count at which a role is told to wrap up its hand-off; it must be below the implementer token cap. |
 | `advanced.fallback_retry_primary_minutes` | `60` | >= 0 | Minutes to wait before retrying the primary model after a fallback took over; 0 uses the built-in 60-minute wait. |
 | `advanced.checkpoint_after_task` | `true` | — | Intended to write a checkpoint after each task. Fixed in this version; changing it has no effect. |
 | `advanced.checkpoint_after_phase` | `true` | — | Intended to write a checkpoint after each phase. Fixed in this version; changing it has no effect. |

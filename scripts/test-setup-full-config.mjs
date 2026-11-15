@@ -230,7 +230,7 @@ async function main() {
     check('advanced.runs_dir', config.advanced.runs_dir === '.autopilot/runs');
     check('advanced.handoff_max_chars', config.advanced.handoff_max_chars === 2000);
     check('advanced.handoff_note_max_chars', config.advanced.handoff_note_max_chars === 4000);
-    check('advanced.handoff_wrapup_tokens', config.advanced.handoff_wrapup_tokens === 160000);
+    check('advanced.handoff_wrapup_tokens', config.advanced.handoff_wrapup_tokens === 180000);
     check('advanced.fallback_retry_primary_minutes', config.advanced.fallback_retry_primary_minutes === 60);
     check('advanced.checkpoint_after_task', config.advanced.checkpoint_after_task === true);
     check('advanced.checkpoint_after_phase', config.advanced.checkpoint_after_phase === true);

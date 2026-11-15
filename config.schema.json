@@ -791,21 +791,21 @@
         },
         "implementer": {
           "max_turns": 40,
-          "max_tokens": 180000,
+          "max_tokens": 200000,
           "extra_sessions": 5,
-          "wrap_up_at_tokens": 160000
+          "wrap_up_at_tokens": 180000
         },
         "code_reviewer": {
           "max_turns": 22,
-          "max_tokens": 150000,
+          "max_tokens": 250000,
           "extra_sessions": 2,
-          "wrap_up_at_tokens": 135000
+          "wrap_up_at_tokens": 225000
         },
         "verifier": {
           "max_turns": 30,
-          "max_tokens": 150000,
+          "max_tokens": 200000,
           "extra_sessions": 2,
-          "wrap_up_at_tokens": 135000
+          "wrap_up_at_tokens": 180000
         },
         "mission_token_backstop": 6000000
       },
@@ -913,9 +913,9 @@
           "description": "Caps for the implementer role.",
           "default": {
             "max_turns": 40,
-            "max_tokens": 180000,
+            "max_tokens": 200000,
             "extra_sessions": 5,
-            "wrap_up_at_tokens": 160000
+            "wrap_up_at_tokens": 180000
           },
           "properties": {
             "max_turns": {
@@ -927,7 +927,7 @@
             "max_tokens": {
               "type": "number",
               "description": "Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
-              "default": 180000,
+              "default": 200000,
               "minimum": 1
             },
             "extra_sessions": {
@@ -939,7 +939,7 @@
             "wrap_up_at_tokens": {
               "type": "number",
               "description": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
-              "default": 160000,
+              "default": 180000,
               "minimum": 1
             }
           },
@@ -953,9 +953,9 @@
           "description": "Caps for the code reviewer role.",
           "default": {
             "max_turns": 22,
-            "max_tokens": 150000,
+            "max_tokens": 250000,
             "extra_sessions": 2,
-            "wrap_up_at_tokens": 135000
+            "wrap_up_at_tokens": 225000
           },
           "properties": {
             "max_turns": {
@@ -967,7 +967,7 @@
             "max_tokens": {
               "type": "number",
               "description": "Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
-              "default": 150000,
+              "default": 250000,
               "minimum": 1
             },
             "extra_sessions": {
@@ -979,7 +979,7 @@
             "wrap_up_at_tokens": {
               "type": "number",
               "description": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
-              "default": 135000,
+              "default": 225000,
               "minimum": 1
             }
           },
@@ -993,9 +993,9 @@
           "description": "Caps for the verifier role.",
           "default": {
             "max_turns": 30,
-            "max_tokens": 150000,
+            "max_tokens": 200000,
             "extra_sessions": 2,
-            "wrap_up_at_tokens": 135000
+            "wrap_up_at_tokens": 180000
           },
           "properties": {
             "max_turns": {
@@ -1007,7 +1007,7 @@
             "max_tokens": {
               "type": "number",
               "description": "Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
-              "default": 150000,
+              "default": 200000,
               "minimum": 1
             },
             "extra_sessions": {
@@ -1019,7 +1019,7 @@
             "wrap_up_at_tokens": {
               "type": "number",
               "description": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
-              "default": 135000,
+              "default": 180000,
               "minimum": 1
             }
           },
@@ -1821,7 +1821,7 @@
         "runs_dir": ".autopilot/runs",
         "handoff_max_chars": 2000,
         "handoff_note_max_chars": 4000,
-        "handoff_wrapup_tokens": 160000,
+        "handoff_wrapup_tokens": 180000,
         "fallback_retry_primary_minutes": 60,
         "checkpoint_after_task": true,
         "checkpoint_after_phase": true,
@@ -1858,7 +1858,7 @@
         "handoff_wrapup_tokens": {
           "type": "number",
           "description": "Token count at which a role is told to wrap up its hand-off; it must be below the implementer token cap.",
-          "default": 160000,
+          "default": 180000,
           "minimum": 1
         },
         "fallback_retry_primary_minutes": {

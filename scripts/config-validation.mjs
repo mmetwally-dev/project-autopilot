@@ -268,19 +268,16 @@ export function validatePolicyConfig(policy = {}) {
     // Mission 031 Phase 1 task 1.4: validate policy.caps per-role entries.
     // Review roles: planner, plan_reviewer, code_reviewer, verifier.
     // Each entry requires positive integer max_turns, max_tokens, extra_sessions;
-    // max_tokens < effective token ceiling (planner and plan_reviewer exempt);
     // extra_sessions >= 0;
     // wrap_up_tokens_threshold optional, if present must be < max_tokens for review roles.
+    // Backlog #9: review role caps are independent of the implementer ceiling (the
+    // relay enforces each review role via resolvePerRoleLimits at its own cap).
     const caps = policy.caps;
     if (caps !== undefined) {
       if (caps === null || typeof caps !== "object" || Array.isArray(caps)) {
         errors.push("policy.caps must be an object mapping role names to cap objects.");
       } else {
         const reviewRoles = ["planner", "plan_reviewer", "code_reviewer", "verifier"];
-        const globalMaxTokens = policy.per_task_max_tokens;
-        const globalCeiling = Number.isInteger(globalMaxTokens) && globalMaxTokens > 0
-          ? globalMaxTokens
-          : PER_TASK_MAX_TOKENS_DEFAULT;
         for (const [roleName, roleCaps] of Object.entries(caps)) {
           if (!reviewRoles.includes(roleName)) {
             errors.push(`policy.caps.${roleName}: unknown role (valid review roles: ${reviewRoles.join(", ")}).`);
@@ -297,15 +294,6 @@ export function validatePolicyConfig(policy = {}) {
           const maxTokens = roleCaps.max_tokens;
           if (maxTokens == null || !Number.isInteger(maxTokens) || maxTokens <= 0) {
             errors.push(`policy.caps.${roleName}.max_tokens must be a positive integer.`);
-          } else if (maxTokens >= globalCeiling && roleName !== "planner" && roleName !== "plan_reviewer") {
-            // Mission 039 task 1.4: planner is exempt from the sub-ceiling
-            // check. Its code default (200K per-turn) intentionally exceeds the
-            // ~180K implementer-oriented global default, and the relay enforces
-            // planner caps via resolvePerRoleLimits, so the planner cap fires
-            // at its own max regardless of the global ceiling. Backlog #8:
-            // plan_reviewer is exempt for the same reason — its code default is
-            // now 250K so a full plan re-check no longer splits at ~135K.
-            errors.push(`policy.caps.${roleName}.max_tokens (${maxTokens}) must be strictly below the effective token ceiling (${globalCeiling}); otherwise the cap can never fire.`);
           }
           const extraSessions = roleCaps.extra_sessions;
           if (extraSessions == null || !Number.isInteger(extraSessions) || extraSessions < 0) {

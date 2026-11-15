@@ -572,7 +572,9 @@ export function toRuntimeConfig(layout = {}) {
     if (has(roleCaps, "extra_sessions")) entry.extra_sessions = roleCaps.extra_sessions;
     else if (has(legacyRoleCaps, "extra_sessions")) entry.extra_sessions = legacyRoleCaps.extra_sessions;
     if (has(roleCaps, "wrap_up_at_tokens")) entry.wrap_up_tokens_threshold = roleCaps.wrap_up_at_tokens;
+    else if (has(roleCaps, "wrap_up_tokens_threshold")) entry.wrap_up_tokens_threshold = roleCaps.wrap_up_tokens_threshold;
     else if (has(legacyRoleCaps, "wrap_up_tokens_threshold")) entry.wrap_up_tokens_threshold = legacyRoleCaps.wrap_up_tokens_threshold;
+    else if (has(legacyRoleCaps, "wrap_up_at_tokens")) entry.wrap_up_tokens_threshold = legacyRoleCaps.wrap_up_at_tokens;
     // Mission 047 backstop: a per-role raw-token backstop override is an operator
     // value, not a shipped default, so it round-trips even though it has no
     // DEFAULTS entry (mission 096 PLAN.md:108,113-115 — behaviour must not change).
@@ -866,6 +868,7 @@ export function toNewLayoutConfig(runtimeConfig = {}, schemaRef = "./config.sche
     if (has(entry, "max_tokens")) layout.caps[role].max_tokens = entry.max_tokens;
     if (has(entry, "extra_sessions")) layout.caps[role].extra_sessions = entry.extra_sessions;
     if (has(entry, "wrap_up_tokens_threshold")) layout.caps[role].wrap_up_at_tokens = entry.wrap_up_tokens_threshold;
+    else if (has(entry, "wrap_up_at_tokens")) layout.caps[role].wrap_up_at_tokens = entry.wrap_up_at_tokens;
     if (has(entry, "backstop_raw_tokens")) layout.caps[role].backstop_raw_tokens = entry.backstop_raw_tokens;
   }
   if (has(policy, "per_task_max_turns")) layout.caps.implementer.max_turns = policy.per_task_max_turns;

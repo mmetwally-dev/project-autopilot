@@ -57,14 +57,14 @@ const policyCases = [
   ["note at floor accepted", {handoff_note_max_chars: 1000}, true],
   ["note default accepted", {handoff_note_max_chars: 4000}, true],
   ["non-integer note rejected", {handoff_note_max_chars: 1500.5}, false],
-  ["wrap-up default accepted", {handoff_wrapup_tokens: 160000}, true],
+  ["wrap-up default accepted", {handoff_wrapup_tokens: 180000}, true],
   ["wrap-up below the ceiling accepted", {handoff_wrapup_tokens: 60000}, true],
-  ["wrap-up at the ceiling rejected", {handoff_wrapup_tokens: 180000}, false],
-  ["wrap-up above the ceiling rejected", {handoff_wrapup_tokens: 200000, per_task_max_tokens: 180000}, false],
+  ["wrap-up at the ceiling rejected", {handoff_wrapup_tokens: 200000}, false],
+  ["wrap-up above the ceiling rejected", {handoff_wrapup_tokens: 220000, per_task_max_tokens: 200000}, false],
   ["wrap-up below a custom ceiling accepted", {handoff_wrapup_tokens: 60000, per_task_max_tokens: 100000}, true],
   ["wrap-up at a custom ceiling rejected", {handoff_wrapup_tokens: 100000, per_task_max_tokens: 100000}, false],
   ["zero wrap-up rejected", {handoff_wrapup_tokens: 0}, false],
-  ["non-integer wrap-up rejected", {handoff_wrapup_tokens: 160000.5}, false],
+  ["non-integer wrap-up rejected", {handoff_wrapup_tokens: 180000.5}, false],
   ["no-progress default accepted", {no_progress_generations: 2}, true],
   ["no-progress 1 accepted", {no_progress_generations: 1}, true],
   ["zero no-progress rejected", {no_progress_generations: 0}, false],
@@ -157,20 +157,14 @@ const capsCases = [
   ["missing max_tokens rejected", {
     caps: {planner: {max_turns: 20, extra_sessions: 1}}
   }, false],
-  ["max_tokens at ceiling rejected", {
-    caps: {verifier: {max_turns: 20, max_tokens: 180000, extra_sessions: 1}},
-    per_task_max_tokens: 180000
-  }, false],
-  ["max_tokens above ceiling rejected", {
+  ["verifier max_tokens at or above ceiling accepted", {
     caps: {verifier: {max_turns: 20, max_tokens: 200000, extra_sessions: 1}},
-    per_task_max_tokens: 180000
-  }, false],
-  ["stale cumulative 300K verifier rejected under per-turn ceiling", {
-    caps: {verifier: {max_turns: 20, max_tokens: 300000, extra_sessions: 1}},
-  }, false],
-  ["stale cumulative 450K verifier rejected under per-turn ceiling", {
-    caps: {verifier: {max_turns: 20, max_tokens: 450000, extra_sessions: 1}},
-  }, false],
+    per_task_max_tokens: 200000
+  }, true],
+  ["verifier max_tokens above ceiling accepted", {
+    caps: {verifier: {max_turns: 20, max_tokens: 250000, extra_sessions: 1}},
+    per_task_max_tokens: 200000
+  }, true],
   ["planner max_tokens above global ceiling accepted", {
     caps: {planner: {max_turns: 22, max_tokens: 200000, extra_sessions: 2}},
   }, true],
@@ -180,9 +174,9 @@ const capsCases = [
   ["plan_reviewer defaults above global ceiling accepted", {
     caps: {plan_reviewer: {max_turns: 30, max_tokens: 250000, extra_sessions: 4, wrap_up_tokens_threshold: 225000}},
   }, true],
-  ["code_reviewer max_tokens above global ceiling rejected", {
+  ["code_reviewer max_tokens above global ceiling accepted", {
     caps: {code_reviewer: {max_turns: 22, max_tokens: 250000, extra_sessions: 2}},
-  }, false],
+  }, true],
   ["max_tokens below custom ceiling accepted", {
     caps: {planner: {max_turns: 20, max_tokens: 200000, extra_sessions: 1}},
     per_task_max_tokens: 300000

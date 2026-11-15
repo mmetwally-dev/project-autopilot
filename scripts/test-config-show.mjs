@@ -214,7 +214,7 @@ console.log("Test 11: Full config render produces output");
   assert(output.length > 1000, "Full config output should be substantial");
   assertContains(output, 'project.planning_framework: "gsd" [from config.json]', "Should contain overridden value");
   assertContains(output, "caps.implementer.max_turns: 60 [from config.json]", "Should contain overridden cap");
-  assertContains(output, "caps.implementer.max_tokens: 180000 [default]", "Should contain default cap");
+  assertContains(output, "caps.implementer.max_tokens: 200000 [default]", "Should contain default cap");
   console.log("  PASS");
 }
 

@@ -5,6 +5,15 @@ import { normalizeFindings } from "./review-feedback.mjs";
 import { formatPrimaryModelFallbackLine, primaryModelFallbackEntries } from "./primary-model-fallback.mjs";
 import { allPlanPassNotes, planPassNoteEntries, formatPlanPassNotesLines } from "./plan-review-rounds.mjs";
 import { defaultIsPidAlive } from "./run-recovery.mjs";
+import { missionSeqOf } from "./mission-naming.mjs";
+
+export function sameMission(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  if (a === b) return true;
+  const sa = missionSeqOf(a);
+  const sb = missionSeqOf(b);
+  return Boolean(sa && sb && sa === sb);
+}
 
 // Mission 094 Phase 1 task 1.1 — the core report model.
 //
@@ -115,11 +124,18 @@ export function readBriefExtras(dir, { gate = null, briefArtifacts = null } = {}
           else if (/\breview-spec\b/i.test(briefHead)) g = "review-spec";
         }
         if (artifacts == null) {
-          const match = briefHead.match(/The plan reviewer REJECTED[^:]*:\s*([\s\S]+?)(?:\n\n|\n[A-Z]|$)/i);
-          if (match) {
-            artifacts = artifactFilesFromFindings(match[1]);
-          } else if (/\b(?:spec|plan|tasks)\.md\b/i.test(briefHead)) {
-            artifacts = artifactFilesFromFindings(briefHead);
+          const stageMatch = briefHead.match(/^Planning phase:\s*(specify|plan|tasks)\b/im);
+          const hasRejected = /The plan reviewer REJECTED/i.test(briefHead);
+          if (stageMatch && !hasRejected) {
+            const stage = stageMatch[1].toLowerCase();
+            artifacts = stage === "specify" ? "spec" : stage;
+          } else {
+            const match = briefHead.match(/The plan reviewer REJECTED[^:]*:\s*([\s\S]+?)(?:\n\n|\n[A-Z]|$)/i);
+            if (match) {
+              artifacts = artifactFilesFromFindings(match[1]);
+            } else if (!stageMatch && /\b(?:spec|plan|tasks)\.md\b/i.test(briefHead)) {
+              artifacts = artifactFilesFromFindings(briefHead);
+            }
           }
         }
       }
@@ -368,8 +384,8 @@ function aggregateCarriedForward(runs) {
 // the implementation runs' refs ordered by their start (the runtime truth when
 // the adapter's descriptor has no refs).
 function phaseTaskRefs(phase) {
-  const fromDef = (phase?.tasks || []).map((t) => t.ref).filter(Boolean);
-  const defRefs = [...new Set(fromDef)];
+  const fromDef = (phase?.tasks || []).length ? phaseTaskDisplayRefs(phase) : [];
+  const defRefs = [...new Set(fromDef.filter(Boolean))];
   if (defRefs.length) return defRefs;
   const ordered = (phase?.runs || [])
     .filter((r) => IMPLEMENTATION_ROLES.has(roleOf(r)))
@@ -1179,12 +1195,19 @@ export function buildGateEntries(events) {
       open = null;
     }
   }
+  for (let i = 0; i < list.length; i++) {
+    const g = list[i];
+    if (g.status !== "running") continue;
+    const hasLaterSamePhase = list.some((other, j) => j > i && other.phase === g.phase);
+    if (hasLaterSamePhase) g.status = "interrupted";
+  }
   return list;
 }
 
 export function gateStatusText(gate) {
   if (!gate) return "-";
   if (gate.status === "running") return "RUNNING";
+  if (gate.status === "interrupted") return "INTERRUPTED";
   if (gate.status === "completed") return gate.ok === false ? "FAIL" : "PASS";
   return "-";
 }
@@ -1880,7 +1903,16 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
   }
   const operatorEvents = buildOperatorEvents(eventList);
   const gates = buildGateEntries(eventList);
-  const statusInfo = classifyStatus(state, { operatorEvents, runs: enrichedRuns, ownerAlive: resolvedOwnerAlive, isAlive, gates });
+  const effectiveState = (state?.mission && missionFallback && !sameMission(state.mission, missionFallback))
+    ? { mission: missionFallback, phase: "idle", step: "idle" }
+    : state;
+  const statusInfo = classifyStatus(effectiveState, { operatorEvents, runs: enrichedRuns, ownerAlive: resolvedOwnerAlive, isAlive, gates });
+  const TERMINAL_MISSION_STATUSES = new Set(["COMPLETED", "ESCALATED", "STOPPED", "CANCELLED"]);
+  if (resolvedOwnerAlive === false || TERMINAL_MISSION_STATUSES.has(statusInfo.status)) {
+    for (const g of gates) {
+      if (g.status === "running") g.status = "interrupted";
+    }
+  }
   const gateCommand = gates.map((g) => g.command).filter(Boolean).pop() ?? null;
   const operatorResetBudgetDomains = operatorResetDomains(eventList);
 
@@ -3384,6 +3416,10 @@ function gateRow(gate, model, task, tracker = null) {
     note = p.total != null
       ? `full test suite${cmd} · ${p.passed ?? 0}/${p.total} runs · running`
       : `full test suite${cmd} · running`;
+  } else if (gate.status === "interrupted") {
+    note = p.total != null
+      ? `full test suite${cmd} · ${p.passed ?? 0}/${p.total} runs · interrupted`
+      : `full test suite${cmd} · interrupted`;
   } else {
     note = `full test suite${cmd} · runs before verify`;
   }

@@ -27,6 +27,7 @@
 // tasks.md written during plan, is rejected as a wrong-stage artifact even
 // though it lives inside the correct feature directory.
 
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -48,6 +49,51 @@ export function listSpecKitFeatureDirNames(repo) {
     .filter(e => e.isDirectory())
     .map(e => e.name)
     .sort();
+}
+
+function isProtectedPlanningPath(rel) {
+  if (rel === "specs" || rel.startsWith("specs/")) return true;
+  if (rel === ".specify" || rel.startsWith(".specify/")) return true;
+  if (rel === "CLAUDE.md") return true;
+  const base = path.posix.basename(rel);
+  return base === ".env" || base.startsWith(".env.");
+}
+
+// Partition touchedFiles into { kept, ignored } using `git check-ignore
+// -z --stdin` in `repo` (without `--no-index`, so tracked files are never
+// reported as ignored—only untracked ignored output is dropped). Protected
+// planning/secret paths (specs/, .specify/, CLAUDE.md, and .env / .env.*
+// at any depth) are NEVER dropped even if git-ignored. Fails closed: if
+// git fails (exit != 0 && != 1 or spawn error), nothing is treated as
+// ignored.
+export function splitGitIgnoredTouched(repo, touchedFiles = []) {
+  const files = Array.isArray(touchedFiles) ? touchedFiles.map(normalizeRel).filter(Boolean) : [];
+  if (files.length === 0) return { kept: [], ignored: [] };
+  const candidates = files.filter(rel => !isProtectedPlanningPath(rel));
+  if (candidates.length === 0) return { kept: files, ignored: [] };
+  if (!repo || typeof repo !== "string") return { kept: files, ignored: [] };
+
+  const res = spawnSync("git", ["check-ignore", "-z", "--stdin"], {
+    cwd: repo,
+    input: `${candidates.join("\0")}\0`,
+    encoding: "utf8",
+    windowsHide: true
+  });
+  // git check-ignore exits 1 when none of the paths are ignored (not an error).
+  if (res.error || (res.status !== 0 && res.status !== 1)) {
+    return { kept: files, ignored: [] };
+  }
+  if (res.status === 1) {
+    return { kept: files, ignored: [] };
+  }
+  const ignoredSet = new Set(String(res.stdout || "").split("\0").filter(Boolean));
+  const kept = [];
+  const ignored = [];
+  for (const rel of files) {
+    if (!isProtectedPlanningPath(rel) && ignoredSet.has(rel)) ignored.push(rel);
+    else kept.push(rel);
+  }
+  return { kept, ignored };
 }
 
 // ---------------------------------------------------------------------

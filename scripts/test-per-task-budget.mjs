@@ -68,10 +68,10 @@ const fixture = path.join(here, "test-fixtures", "fake-observable-adapter.mjs");
   check("limits: explicit values win",
     JSON.stringify(resolvePerTaskLimits({per_task_timeout_ms: 5000, per_task_max_turns: 7}, 60000)) ===
     JSON.stringify({perTaskTimeoutMs: 5000, perTaskMaxTurns: 7, perTaskMaxTokens: PER_TASK_MAX_TOKENS_DEFAULT, relayTimeoutMs: 60000}));
-  check("limits: token ceiling explicit wins, default is 180K and turns default 40 (code defaults, #59b)",
+  check("limits: token ceiling explicit wins, default is 200K and turns default 40 (code defaults, #59b)",
     resolvePerTaskLimits({per_task_max_tokens: 123}).perTaskMaxTokens === 123 &&
     resolvePerTaskLimits({}).perTaskMaxTokens === PER_TASK_MAX_TOKENS_DEFAULT &&
-    PER_TASK_MAX_TOKENS_DEFAULT === 180000 &&
+    PER_TASK_MAX_TOKENS_DEFAULT === 200000 &&
     resolvePerTaskLimits({}).perTaskMaxTurns === 40 && PER_TASK_MAX_TURNS_DEFAULT === 40);
   check("limits: low relay timeout degrades instead of failing",
     resolvePerTaskLimits({}, 2000).perTaskTimeoutMs === 1999, resolvePerTaskLimits({}, 2000));
@@ -252,39 +252,39 @@ const fixture = path.join(here, "test-fixtures", "fake-observable-adapter.mjs");
     continuationBudgetKey("task:standalone:phase-1:X") === "continuationAllowance:task:standalone:phase-1:X");
 }
 
-// ── Backlog #26 Step B: forced wrap-up trigger (fixed 160K, not a turn %) ─
+// ── Backlog #26 Step B: forced wrap-up trigger (fixed 180K, not a turn %) ─
 {
-  check("wrapup: default is 160000 with ceiling constants",
-    HANDOFF_WRAPUP_TOKENS_DEFAULT === 160000
+  check("wrapup: default is 180000 with ceiling constants",
+    HANDOFF_WRAPUP_TOKENS_DEFAULT === 180000
     && WRAPUP_MAX_TURNS === 3 && WRAPUP_TIMEOUT_MS === 180000
     && SESSION_STORE_WARN_BYTES === 50 * 1024 * 1024);
-  check("wrapup: default resolves below the 180K cap",
-    resolveHandoffWrapupTokens({}, 180000) === 160000
-    && resolveHandoffWrapupTokens({}, PER_TASK_MAX_TOKENS_DEFAULT) === 160000);
+  check("wrapup: default resolves below the 200K cap",
+    resolveHandoffWrapupTokens({}, 200000) === 180000
+    && resolveHandoffWrapupTokens({}, PER_TASK_MAX_TOKENS_DEFAULT) === 180000);
   check("wrapup: operator override wins when below the ceiling",
-    resolveHandoffWrapupTokens({handoff_wrapup_tokens: 100000}, 180000) === 100000);
+    resolveHandoffWrapupTokens({handoff_wrapup_tokens: 100000}, 200000) === 100000);
   check("wrapup: at/above-ceiling and invalid values fall back to the default, never disable",
-    resolveHandoffWrapupTokens({handoff_wrapup_tokens: 180000}, 180000) === 160000
-    && resolveHandoffWrapupTokens({handoff_wrapup_tokens: 200000}, 180000) === 160000
-    && resolveHandoffWrapupTokens({handoff_wrapup_tokens: 0}, 180000) === 160000
-    && resolveHandoffWrapupTokens({handoff_wrapup_tokens: "lots"}, 180000) === 160000);
+    resolveHandoffWrapupTokens({handoff_wrapup_tokens: 200000}, 200000) === 180000
+    && resolveHandoffWrapupTokens({handoff_wrapup_tokens: 220000}, 200000) === 180000
+    && resolveHandoffWrapupTokens({handoff_wrapup_tokens: 0}, 200000) === 180000
+    && resolveHandoffWrapupTokens({handoff_wrapup_tokens: "lots"}, 200000) === 180000);
   const below = {input: 50000, cacheCreation: 0, cacheRead: 100000, output: 1, turns: 5, maxSingleTurnContext: 150000};
-  check("wrapup: per-turn term below 160K is no trigger",
-    checkWrapupTrigger({usage: below, perTaskMaxTurns: 22, perTaskMaxTokens: 180000, wrapupTokens: 160000}) === null);
-  const at = {input: 60000, cacheCreation: 0, cacheRead: 100000, output: 1, turns: 5, maxSingleTurnContext: 160000};
-  check("wrapup: per-turn term at/above 160K triggers tokens with used/limit",
-    (() => { const t = checkWrapupTrigger({usage: at, perTaskMaxTurns: 22, perTaskMaxTokens: 180000, wrapupTokens: 160000});
-      return t?.type === "tokens" && t.used === 160000 && t.limit === 160000; })());
-  check("wrapup: 180K hard-cap path unchanged (fires at the ceiling, not the threshold)",
-    checkCapBreach({usage: at, perTaskMaxTurns: 22, perTaskMaxTokens: 180000}) === null
-    && checkCapBreach({usage: {...at, maxSingleTurnContext: 180001}, perTaskMaxTurns: 22, perTaskMaxTokens: 180000})?.type === "tokens");
-  check("wrapup: turn-cap breach before 160K triggers turns too",
-    (() => { const t = checkWrapupTrigger({usage: {input: 1, cacheCreation: 0, cacheRead: 1, output: 1, turns: 23, maxSingleTurnContext: 2}, perTaskMaxTurns: 22, perTaskMaxTokens: 180000, wrapupTokens: 160000});
+  check("wrapup: per-turn term below 180K is no trigger",
+    checkWrapupTrigger({usage: below, perTaskMaxTurns: 22, perTaskMaxTokens: 200000, wrapupTokens: 180000}) === null);
+  const at = {input: 80000, cacheCreation: 0, cacheRead: 100000, output: 1, turns: 5, maxSingleTurnContext: 180000};
+  check("wrapup: per-turn term at/above 180K triggers tokens with used/limit",
+    (() => { const t = checkWrapupTrigger({usage: at, perTaskMaxTurns: 22, perTaskMaxTokens: 200000, wrapupTokens: 180000});
+      return t?.type === "tokens" && t.used === 180000 && t.limit === 180000; })());
+  check("wrapup: 200K hard-cap path unchanged (fires at the ceiling, not the threshold)",
+    checkCapBreach({usage: at, perTaskMaxTurns: 22, perTaskMaxTokens: 200000}) === null
+    && checkCapBreach({usage: {...at, maxSingleTurnContext: 200001}, perTaskMaxTurns: 22, perTaskMaxTokens: 200000})?.type === "tokens");
+  check("wrapup: turn-cap breach before 180K triggers turns too",
+    (() => { const t = checkWrapupTrigger({usage: {input: 1, cacheCreation: 0, cacheRead: 1, output: 1, turns: 23, maxSingleTurnContext: 2}, perTaskMaxTurns: 22, perTaskMaxTokens: 200000, wrapupTokens: 180000});
       return t?.type === "turns" && t.used === 23 && t.limit === 22; })());
   check("wrapup: turns win when both violated (same order as the cap)",
-    checkWrapupTrigger({usage: {...at, turns: 23}, perTaskMaxTurns: 22, perTaskMaxTokens: 180000, wrapupTokens: 160000})?.type === "turns");
+    checkWrapupTrigger({usage: {...at, turns: 23}, perTaskMaxTurns: 22, perTaskMaxTokens: 200000, wrapupTokens: 180000})?.type === "turns");
   check("wrapup: null usage is null, never a trigger",
-    checkWrapupTrigger({usage: null, perTaskMaxTurns: 22, perTaskMaxTokens: 180000, wrapupTokens: 160000}) === null);
+    checkWrapupTrigger({usage: null, perTaskMaxTurns: 22, perTaskMaxTokens: 200000, wrapupTokens: 180000}) === null);
   // Mission 044 Phase 1 task 1.4: single turn exceeding review role cap triggers both breach and wrap-up.
   const overCap = {input: 100000, cacheCreation: 0, cacheRead: 100000, output: 1, turns: 1, maxSingleTurnContext: 200000};
   const b4 = checkCapBreach({usage: overCap, perTaskMaxTurns: 22, perTaskMaxTokens: 150000});
@@ -496,8 +496,8 @@ const fixture = path.join(here, "test-fixtures", "fake-observable-adapter.mjs");
   const expectedRoleDefaults = {
     planner: {tokens: 200000, wrapup: 180000, allowance: 2},
     plan_reviewer: {tokens: 250000, wrapup: 225000, allowance: 4},
-    code_reviewer: {tokens: 150000, wrapup: 135000, allowance: 2},
-    verifier: {tokens: 150000, wrapup: 135000, allowance: 2},
+    code_reviewer: {tokens: 250000, wrapup: 225000, allowance: 2},
+    verifier: {tokens: 200000, wrapup: 180000, allowance: 2},
   };
   for (const role of reviewRoles) {
     const limits = resolvePerRoleLimits(role, {});
@@ -528,12 +528,12 @@ const fixture = path.join(here, "test-fixtures", "fake-observable-adapter.mjs");
   // Invalid config values fall back to defaults
   const badPolicy = {caps: {verifier: {max_turns: 0, max_tokens: -1, extra_sessions: "lots", wrap_up_tokens_threshold: 0}}};
   const verifierBad = resolvePerRoleLimits("verifier", badPolicy);
-  check("resolvePerRoleLimits: invalid config falls back to defaults", verifierBad.perTaskMaxTurns === 30 && verifierBad.perTaskMaxTokens === 150000 && verifierBad.continuationAllowance === 2 && verifierBad.wrapUpTokenThreshold === 135000, verifierBad);
+  check("resolvePerRoleLimits: invalid config falls back to defaults", verifierBad.perTaskMaxTurns === 30 && verifierBad.perTaskMaxTokens === 200000 && verifierBad.continuationAllowance === 2 && verifierBad.wrapUpTokenThreshold === 180000, verifierBad);
 
   // wrapUpTokenThreshold >= maxTokens falls back to default
   const highWrapupPolicy = {caps: {verifier: {wrap_up_tokens_threshold: 600000}}};
   const verifierHighWrapup = resolvePerRoleLimits("verifier", highWrapupPolicy);
-  check("resolvePerRoleLimits: wrapUpTokens >= maxTokens falls back", verifierHighWrapup.wrapUpTokenThreshold === 135000, verifierHighWrapup);
+  check("resolvePerRoleLimits: wrapUpTokens >= maxTokens falls back", verifierHighWrapup.wrapUpTokenThreshold === 180000, verifierHighWrapup);
 
   // Implementer honors policy.per_task_max_turns / per_task_max_tokens (operator-facing keys)
   const implPolicy = {per_task_max_turns: 10, per_task_max_tokens: 400000};

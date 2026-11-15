@@ -20,7 +20,7 @@
 //        (brief shows the fallback note above the digest).
 //   S2 wrap-up trigger — 45 slow token-heavy turns (2M per-turn context) vs
 //        per_task_max_tokens 3M (turn cap 1000 to isolate): stopped at the
-//        160K wrap-up threshold (not the 3M cap) → orchestrator fallback
+//        180K wrap-up threshold (not the 3M cap) → orchestrator fallback
 //        note → gen-2 completes.
 //   S3 exhaustion   — always-spin + continuation_allowance 1: two breaches
 //        (each recorded as orchestrator_fallback), then
@@ -282,7 +282,7 @@ function splitGenerations(repo, impls) {
   } finally { if (!process.env.KEEP_CAP_FIXTURE) cleanup(repo, binDir); }
 }
 
-// ── S2: fixed-token wrap-up trigger (160K per-turn context, below the 3M cap) ──
+// ── S2: fixed-token wrap-up trigger (180K per-turn context, below the 3M cap) ──
 {
   const {repo, binDir} = setupCapMission("cap-s2", "cap_tokens", {per_task_max_turns: 1000, per_task_max_tokens: 3000000});
   try {
@@ -292,8 +292,8 @@ function splitGenerations(repo, impls) {
     check("s2: wrap-up trigger produced gen-1, then gen-2 — no wrap-up run (two runs)",
       impls.length === 2 && generations.length === 2 && wrapups.length === 0, impls.length);
     const gen1 = generations[0]?.data;
-    check("s2: generation 1 stopped at the 160K wrap-up threshold, not the 3M cap",
-      gen1?.capped?.type === "tokens" && gen1.capped.used >= 160000 && gen1.capped.limit === 160000
+    check("s2: generation 1 stopped at the 180K wrap-up threshold, not the 3M cap",
+      gen1?.capped?.type === "tokens" && gen1.capped.used >= 180000 && gen1.capped.limit === 180000
       && gen1.capped.wrapUp === true && gen1.capped.trigger === "tokens", gen1?.capped);
     check("s2: capped generation recorded the orchestrator fallback note",
       gen1?.wrapUp?.status === "orchestrator_fallback" && gen1?.wrapUp?.reason === "note_missing_or_stale"
@@ -504,20 +504,23 @@ function relayWrapupTokens(roleName, policy) {
 {
   const reviewerCaps = resolvePerRoleLimits("code_reviewer", {});
   const reviewerTokens = relayWrapupTokens("code_reviewer", {});
-  const reviewerUsage = {turns: 1, maxSingleTurnContext: 140_000}; // per-turn 140K
+  const globalTokens = resolveHandoffWrapupTokens({}, reviewerCaps.perTaskMaxTokens);
+  const reviewerUsage = {turns: 1, maxSingleTurnContext: 230_000}; // per-turn 230K
   const reviewerTrigger = checkWrapupTrigger({usage: reviewerUsage, perTaskMaxTurns: reviewerCaps.perTaskMaxTurns, perTaskMaxTokens: reviewerCaps.perTaskMaxTokens, wrapupTokens: reviewerTokens});
-  const reviewerGlobal = checkWrapupTrigger({usage: reviewerUsage, perTaskMaxTurns: reviewerCaps.perTaskMaxTurns, perTaskMaxTokens: reviewerCaps.perTaskMaxTokens, wrapupTokens: resolveHandoffWrapupTokens({}, reviewerCaps.perTaskMaxTokens)});
+  const reviewerGlobal = checkWrapupTrigger({usage: reviewerUsage, perTaskMaxTurns: reviewerCaps.perTaskMaxTurns, perTaskMaxTokens: reviewerCaps.perTaskMaxTokens, wrapupTokens: globalTokens});
   check("per-role wrapup: review role uses own threshold",
-    reviewerTokens === 135_000 && reviewerTrigger?.type === "tokens" && reviewerTrigger?.limit === 135_000 && reviewerGlobal === null,
-    {reviewerTokens, reviewerTrigger, reviewerGlobal});
-  const plannerCaps = resolvePerRoleLimits("planner", {});
-  const plannerTokens = relayWrapupTokens("planner", {});
+    reviewerTokens === 225_000 && globalTokens === 180_000 && reviewerTokens !== globalTokens && reviewerTrigger?.type === "tokens" && reviewerTrigger?.limit === 225_000,
+    {reviewerTokens, globalTokens, reviewerTrigger, reviewerGlobal});
+  const plannerPolicy = {handoff_wrapup_tokens: 150_000};
+  const plannerCaps = resolvePerRoleLimits("planner", plannerPolicy);
+  const plannerTokens = relayWrapupTokens("planner", plannerPolicy);
+  const plannerGlobalTokens = resolveHandoffWrapupTokens(plannerPolicy, plannerCaps.perTaskMaxTokens);
   const plannerUsage = {turns: 1, maxSingleTurnContext: 170_000}; // per-turn 170K
   const plannerTrigger = checkWrapupTrigger({usage: plannerUsage, perTaskMaxTurns: plannerCaps.perTaskMaxTurns, perTaskMaxTokens: plannerCaps.perTaskMaxTokens, wrapupTokens: plannerTokens});
-  const plannerGlobal = checkWrapupTrigger({usage: plannerUsage, perTaskMaxTurns: plannerCaps.perTaskMaxTurns, perTaskMaxTokens: plannerCaps.perTaskMaxTokens, wrapupTokens: resolveHandoffWrapupTokens({}, plannerCaps.perTaskMaxTokens)});
+  const plannerGlobal = checkWrapupTrigger({usage: plannerUsage, perTaskMaxTurns: plannerCaps.perTaskMaxTurns, perTaskMaxTokens: plannerCaps.perTaskMaxTokens, wrapupTokens: plannerGlobalTokens});
   check("per-role wrapup: planner waits for its own threshold",
-    plannerTokens === 180_000 && plannerTrigger === null && plannerGlobal?.type === "tokens",
-    {plannerTokens, plannerTrigger, plannerGlobal});
+    plannerTokens === 180_000 && plannerGlobalTokens === 150_000 && plannerTrigger === null && plannerGlobal?.type === "tokens" && plannerGlobal?.limit === 150_000,
+    {plannerTokens, plannerGlobalTokens, plannerTrigger, plannerGlobal});
   const implPolicy = {handoff_wrapup_tokens: 150_000};
   const implCaps = resolvePerRoleLimits("implementer", implPolicy);
   const implTokens = relayWrapupTokens("implementer", implPolicy);

@@ -39,10 +39,10 @@ const v4 = {
   caps: {
     task_size_target_turns: 12,
     planner: { max_turns: 30, max_tokens: 200000, extra_sessions: 2, wrap_up_at_tokens: 180000 },
-    plan_reviewer: { max_turns: 30, max_tokens: 150000, extra_sessions: 4, wrap_up_at_tokens: 135000 },
-    implementer: { max_turns: 40, max_tokens: 180000, extra_sessions: 5, wrap_up_at_tokens: 160000 },
-    code_reviewer: { max_turns: 22, max_tokens: 150000, extra_sessions: 2, wrap_up_at_tokens: 135000 },
-    verifier: { max_turns: 30, max_tokens: 150000, extra_sessions: 2, wrap_up_at_tokens: 135000 },
+    plan_reviewer: { max_turns: 30, max_tokens: 250000, extra_sessions: 4, wrap_up_at_tokens: 225000 },
+    implementer: { max_turns: 40, max_tokens: 200000, extra_sessions: 5, wrap_up_at_tokens: 180000 },
+    code_reviewer: { max_turns: 22, max_tokens: 250000, extra_sessions: 2, wrap_up_at_tokens: 225000 },
+    verifier: { max_turns: 30, max_tokens: 200000, extra_sessions: 2, wrap_up_at_tokens: 180000 },
     mission_token_backstop: 6000000,
   },
   retries: { plan_revisions: 8, implementation: 4, verification: 4, final_review_fix_rounds: 2, cli_errors: 3, infrastructure: 3, no_progress_sessions: 2, extra_sessions_per_task: 5 },
@@ -66,7 +66,7 @@ check('persist:false layout present', !!r0.layout);
 check('persist:false config present', !!r0.config);
 check('persist:false config.policy.caps present', !!r0.config?.policy?.caps);
 check('persist:false config.policy.per_task_max_turns', r0.config?.policy?.per_task_max_turns === 40);
-check('persist:false config.policy.per_task_max_tokens', r0.config?.policy?.per_task_max_tokens === 180000);
+check('persist:false config.policy.per_task_max_tokens', r0.config?.policy?.per_task_max_tokens === 200000);
 for (const role of ['planner', 'plan_reviewer', 'implementer', 'code_reviewer', 'verifier']) {
   check(`persist:false config.roles.${role}.adapter`, r0.config?.roles?.[role]?.adapter === v4.roles[role].cli);
 }

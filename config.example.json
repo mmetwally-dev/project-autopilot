@@ -69,21 +69,21 @@
     },
     "implementer": {
       "max_turns": 40,
-      "max_tokens": 180000,
+      "max_tokens": 200000,
       "extra_sessions": 5,
-      "wrap_up_at_tokens": 160000
+      "wrap_up_at_tokens": 180000
     },
     "code_reviewer": {
       "max_turns": 22,
-      "max_tokens": 150000,
+      "max_tokens": 250000,
       "extra_sessions": 2,
-      "wrap_up_at_tokens": 135000
+      "wrap_up_at_tokens": 225000
     },
     "verifier": {
       "max_turns": 30,
-      "max_tokens": 150000,
+      "max_tokens": 200000,
       "extra_sessions": 2,
-      "wrap_up_at_tokens": 135000
+      "wrap_up_at_tokens": 180000
     },
     "mission_token_backstop": 6000000
   },
@@ -185,7 +185,7 @@
     "runs_dir": ".autopilot/runs",
     "handoff_max_chars": 2000,
     "handoff_note_max_chars": 4000,
-    "handoff_wrapup_tokens": 160000,
+    "handoff_wrapup_tokens": 180000,
     "fallback_retry_primary_minutes": 60,
     "checkpoint_after_task": true,
     "checkpoint_after_phase": true,

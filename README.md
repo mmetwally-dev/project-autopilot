@@ -212,7 +212,11 @@ verify it, for example:
 
 The read-only plan reviewer then reads the plan against the request and the
 code. If it finds problems (verdict **DENIED**), the planner revises and the
-reviewer looks again, up to `retries.plan_revisions` rounds (default 8). The
+reviewer looks again, up to `retries.plan_revisions` rounds (default 8). A
+revision cut off by its cap goes back to the reviewer only when its own hand-off
+note says every finding is done; otherwise a new planner session continues it.
+Untracked git-ignored files that tools write during planning (for example
+`playwright-report/`) are logged, not treated as a write outside the plan. The
 spec has its own review first, up to `retries.spec_revisions` revisions (default
 3); if they run out, the open findings go to the plan stage instead of stopping
 the mission. With the spec on, the full plan-review rounds also cross-check
@@ -232,6 +236,9 @@ For each phase:
 2. **Code review** — the read-only code reviewer checks the phase's changes. On
    DENIED, only the tasks named by the findings are re-run with the findings
    attached, and the reviewer then checks just its earlier findings plus the fix.
+   A finding in a file that a task from an earlier phase wrote gets one targeted
+   repair of that task, not a re-run of every task in the current phase.
+   Manual-check notes (browser, network) are kept as notes, not findings.
 3. **Gate** — Autopilot itself runs your test commands (`tests.gate_commands`,
    for example `npm test`). If tests fail, it re-runs them against the code as it
    was before the phase: tests that also failed before are not blamed on this
@@ -605,7 +612,9 @@ GATE (orchestrator)        -                         T1.1 > T1.7  PASS       00:
 ```
 
 - **STATUS** — `COMPLETED` (a writing role finished), `APPROVED`/`DENIED` (a
-  reviewer's verdict), `PASS`/`FAIL` (the gate), `INTERRUPTED` (stopped by `ap stop`).
+  reviewer's verdict), `PASS`/`FAIL` (the gate), `INTERRUPTED` (stopped by `ap stop`,
+  or a gate that never got a result because a later gate started, the mission
+  ended or its process died).
 - **PRICE** — tokens used; it starts with `~` while the run is still going.
   **CONTEXT** — the largest context the session reached. **TURNS** — model turns.
   `-` means the CLI reports no usage.
@@ -779,11 +788,11 @@ gate run.
   your values plus the code defaults, each marked `[default]` or `[from config.json]`.
   `--explain` adds a one-line explanation under each setting.
 - **`ap config fill [--dry-run]`** adds every missing setting at its default
-  (useful after an upgrade or a hand edit). It keeps every existing value
-  (including `null` and empty lists), renames old setting names in place (for
-  example `mission_timeout_minutes` → `call_backstop_minutes`, value kept), and
-  repairs the `$schema` path so editors find `config.schema.json`. `--dry-run`
-  only prints what would change. A timestamped `config.json.bak-<time>` backup is
+  (useful after an upgrade or a hand edit). It moves old shipped cap defaults to
+  the current ones, keeps every existing value (including `null` and empty lists),
+  renames old setting names in place (for example `mission_timeout_minutes` →
+  `call_backstop_minutes`, value kept), and repairs the `$schema` path so editors
+  find `config.schema.json`. `--dry-run` only prints what would change. A timestamped `config.json.bak-<time>` backup is
   written before any change. It never invents a `runtime` mode you did not choose.
 - **Editor help.** The `$schema` line points at the installed
   `config.schema.json`, so editors such as VS Code show descriptions,
