@@ -102,7 +102,7 @@ function taskScopeLines(phaseTasks) {
   return (phaseTasks || []).map((t, i) => `- [${taskLabel(i)}] ${t.text} (${t.file}:${t.line})`).join("\n");
 }
 
-function diffLineCounts(text) {
+export function diffLineCounts(text) {
   let added = 0;
   let removed = 0;
   for (const line of String(text || "").split("\n")) {

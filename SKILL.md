@@ -99,7 +99,9 @@ and `ap watch` do not exist; the WATCH-REPORT is the status view.
   findings plus the fix. A finding in a file that an earlier phase's task wrote
   gets one targeted repair of that task instead of re-running the current
   phase's tasks; manual-check notes (browser, network) are kept as notes, not
-  findings.
+  findings. A large diff goes to a file the reviewer reads, not into the brief;
+  a role whose first turn alone exceeds its cap stops with a clear message
+  instead of restarting sessions.
 - **Gate.** Autopilot runs `tests.gate_commands` itself. Failing tests are re-run
   on the phase's starting code; failures that existed before are not blamed on
   the phase, new ones go back to the implementer.

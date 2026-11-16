@@ -27,6 +27,8 @@
 // So label "T1" ↔ ordinal 0 ↔ the ID at `taskIds[0]`. The conversion exists in
 // exactly two functions (`taskLabel`, `labelToIndex`); every call site uses
 // them and none re-derives the offset inline.
+import fs from "node:fs";
+import path from "node:path";
 import {
   normalizeFindingsWithSource,
   loadReviewFeedback,
@@ -42,6 +44,9 @@ import {
   isManualCheckMarker,
   splitManualCheckFindings,
 } from "./task-requirements.mjs";
+import { stableTaskId } from "./role-progress-ids.mjs";
+import { taskDisplayRef } from "./role-progress-prompt.mjs";
+import { sanitizeKeySegment } from "./implementation-baseline.mjs";
 
 export {isManualCheckMarker, splitManualCheckFindings};
 
@@ -190,6 +195,198 @@ export function clearTaskOwnership(state) {
   if (state?.[TASK_OWNERSHIP_STATE_KEY] && typeof state[TASK_OWNERSHIP_STATE_KEY] === "object") {
     delete state[TASK_OWNERSHIP_STATE_KEY];
   }
+}
+
+function matchTask(tasks, taskRef) {
+  if (!Array.isArray(tasks) || !taskRef) return -1;
+  const target = String(taskRef).trim();
+  const targetLower = target.toLowerCase();
+  const targetNoT = targetLower.replace(/^t/, "");
+
+  for (let i = 0; i < tasks.length; i++) {
+    const t = tasks[i];
+    if (!t) continue;
+    // 1. Check direct taskDisplayRef
+    const dRef = taskDisplayRef(t, i);
+    if (dRef && dRef.toLowerCase() === targetLower) return i;
+
+    // 2. Cleaned text taskDisplayRef
+    const rawText = String(t.text ?? t.title ?? "");
+    const cleanedText = rawText.replace(/^\s*-\s*\[[xX ]?\]\s*/, "").trim();
+    if (cleanedText !== rawText) {
+      const cleanedDRef = taskDisplayRef({...t, text: cleanedText}, i);
+      if (cleanedDRef && cleanedDRef.toLowerCase() === targetLower) return i;
+    }
+
+    // 3. Exact or normalized id/ref
+    const ids = [t.id, t.ref, t.taskRef, t.taskLabel, t.taskId].filter(Boolean).map(x => String(x).trim());
+    for (const candidate of ids) {
+      if (candidate.toLowerCase() === targetLower) return i;
+      if (candidate.toLowerCase().replace(/^t/, "") === targetNoT) return i;
+    }
+
+    // 4. Patterns in task text
+    const textToCheck = cleanedText || rawText;
+    const mOwned = /^T?(\d+(?:\.\d+)*(?:[a-z])?)\b/i.exec(textToCheck);
+    if (mOwned) {
+      const refOwned = mOwned[1].toLowerCase();
+      if (refOwned === targetNoT || `t${refOwned}` === targetLower) return i;
+    }
+    const mPlan = /^\*{0,2}(\d+\.\d+)\b/.exec(textToCheck);
+    if (mPlan) {
+      const refPlan = mPlan[1].toLowerCase();
+      if (refPlan === targetNoT || `t${refPlan}` === targetLower) return i;
+    }
+  }
+
+  // 5. Fallback: taskDisplayRef without leading 'T'
+  for (let i = 0; i < tasks.length; i++) {
+    const dRef = taskDisplayRef(tasks[i], i);
+    if (dRef && dRef.toLowerCase().replace(/^t/, "") === targetNoT) return i;
+  }
+
+  return -1;
+}
+
+// Rebuild task ownership for missions started before task ownership existed.
+// Scans completed earlier phases from persisted result.json runs files without
+// overwriting existing entries.
+export function rebuildTaskOwnership(state, options = {}) {
+  if (!state || typeof state !== "object") return 0;
+  const currentPhaseIndex = Number.isInteger(options.currentPhaseIndex)
+    ? options.currentPhaseIndex
+    : (Number.isInteger(options.phaseIndex) ? options.phaseIndex : (Number.isInteger(state.phaseIndex) ? state.phaseIndex : 0));
+  const currentPhaseNumber = currentPhaseIndex + 1;
+  const log = typeof options.log === "function" ? options.log : console.log;
+
+  // Check if completed earlier phases already have ownership entries in state
+  const existingOwnership = loadTaskOwnership(state);
+  const earlierEntriesExist = Object.values(existingOwnership).some((entry) => {
+    return Number.isInteger(entry.phaseIndex) && entry.phaseIndex < currentPhaseIndex;
+  });
+
+  if (earlierEntriesExist && !options.force) {
+    return 0; // Earlier phases already have ownership entries
+  }
+
+  if (state._taskOwnershipRebuilt && !options.force) {
+    return 0;
+  }
+  state._taskOwnershipRebuilt = true;
+
+  const runsDir = options.runsDir
+    || (options.repoRoot && (options.mission || state.mission)
+        ? path.join(options.repoRoot, ".autopilot", "missions", sanitizeKeySegment(options.mission || state.mission), "runs")
+        : null);
+
+  if (!runsDir || !fs.existsSync(runsDir)) {
+    log("no per-task file data exists for old phases; skipping task ownership rebuild");
+    return 0;
+  }
+
+  let dirEntries;
+  try {
+    dirEntries = fs.readdirSync(runsDir, { withFileTypes: true });
+  } catch {
+    log("no per-task file data exists for old phases; skipping task ownership rebuild");
+    return 0;
+  }
+
+  const phaseList = Array.isArray(options.phaseList)
+    ? options.phaseList
+    : (Array.isArray(state.phases) ? state.phases : []);
+
+  const framework = options.framework || state.framework || "standalone";
+  const mission = options.mission || state.mission || "";
+  const repoRoot = options.repoRoot || state.repoRoot || process.cwd();
+
+  const candidates = new Map(); // taskId -> candidate object
+  let skippedRunsCount = 0;
+
+  for (const entry of dirEntries) {
+    if (!entry.isDirectory()) continue;
+    const resultFile = path.join(runsDir, entry.name, "result.json");
+    if (!fs.existsSync(resultFile)) continue;
+    let data;
+    try {
+      data = JSON.parse(fs.readFileSync(resultFile, "utf8"));
+    } catch {
+      continue;
+    }
+
+    if (!data || typeof data !== "object") continue;
+    if (data.role !== "implementer" || data.status !== "completed") continue;
+    if (!Array.isArray(data.touchedFiles) || data.touchedFiles.length === 0) continue;
+
+    const phaseNum = Number(data.phase);
+    if (!Number.isInteger(phaseNum) || phaseNum < 1 || phaseNum >= currentPhaseNumber) continue;
+
+    const phaseIdx = phaseNum - 1;
+    const phase = phaseList[phaseIdx];
+    const tasks = Array.isArray(phase?.tasks) ? phase.tasks : [];
+
+    const matchedOrd = matchTask(tasks, data.taskRef);
+    if (matchedOrd === -1) {
+      skippedRunsCount++;
+      continue;
+    }
+
+    const task = tasks[matchedOrd];
+    const taskId = (typeof task?.id === "string" && /^[^:]+:P[0-9]+:T[0-9]+:[0-9a-f]+$/.test(task.id))
+      ? task.id
+      : stableTaskId(
+          {
+            framework,
+            mission: mission || data.mission || "",
+            phaseIndex: phaseIdx,
+            phaseNumber: phaseNum,
+            phaseName: phase?.name || "",
+            repoRoot,
+          },
+          { file: task.file, text: task.text },
+          matchedOrd
+        );
+
+    const cleanFiles = data.touchedFiles.map(comparablePath).filter(Boolean);
+    if (cleanFiles.length === 0) continue;
+
+    if (!candidates.has(taskId)) {
+      candidates.set(taskId, {
+        taskId,
+        phaseIndex: phaseIdx,
+        phaseNumber: phaseNum,
+        phaseName: phase?.name || "",
+        taskText: task.text || "",
+        files: cleanFiles,
+        summary: data.finalMessage || data.summary || "",
+      });
+    } else {
+      const existing = candidates.get(taskId);
+      existing.files = [...new Set([...existing.files, ...cleanFiles])];
+      if (!existing.summary && (data.finalMessage || data.summary)) {
+        existing.summary = data.finalMessage || data.summary;
+      }
+    }
+  }
+
+  if (candidates.size === 0) {
+    log("no per-task file data exists for old phases; skipping task ownership rebuild");
+    return 0;
+  }
+
+  let rebuiltCount = 0;
+  for (const [taskId, cand] of candidates) {
+    recordTaskOwnership(state, cand);
+    rebuiltCount++;
+  }
+
+  if (rebuiltCount > 0) {
+    log(`task ownership rebuilt for ${rebuiltCount} tasks from earlier phases (${skippedRunsCount} runs skipped: no task match)`);
+  } else {
+    log("no per-task file data exists for old phases; skipping task ownership rebuild");
+  }
+
+  return rebuiltCount;
 }
 
 // Find a unique task outside the current phase that owned the exact cited file.

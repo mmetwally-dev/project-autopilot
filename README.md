@@ -233,12 +233,19 @@ For each phase:
    its turn or token cap, the implementer writes a hand-off note
    (`handoff/<task>.md`: what is done, what is next) and a new session continues
    from it, up to `caps.implementer.extra_sessions` more sessions (default 5).
+   If a role's first turn alone is over its token cap (the brief is too big),
+   Autopilot stops with a clear message instead of starting new sessions that
+   would be cut off the same way.
 2. **Code review** — the read-only code reviewer checks the phase's changes. On
    DENIED, only the tasks named by the findings are re-run with the findings
    attached, and the reviewer then checks just its earlier findings plus the fix.
    A finding in a file that a task from an earlier phase wrote gets one targeted
    repair of that task, not a re-run of every task in the current phase.
    Manual-check notes (browser, network) are kept as notes, not findings.
+   A large diff is not pasted into the reviewer's or verifier's brief: the brief
+   lists the changed files with line counts and the full diff is saved to a file
+   the reviewer reads as needed. Missions started on an older version get their
+   earlier phases' task-to-file records rebuilt from the saved runs.
 3. **Gate** — Autopilot itself runs your test commands (`tests.gate_commands`,
    for example `npm test`). If tests fail, it re-runs them against the code as it
    was before the phase: tests that also failed before are not blamed on this

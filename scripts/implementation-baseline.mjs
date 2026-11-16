@@ -657,3 +657,111 @@ export function scopedDeltaChunks(repo, key, opts={}) {
 export function scopedDelta(repo, key, opts={}) {
   return scopedDeltaChunks(repo, key, opts).map(c => c.text).join("\n");
 }
+
+export function diffLineCounts(text) {
+  let added = 0;
+  let removed = 0;
+  for (const line of String(text || "").split("\n")) {
+    if (line.startsWith("+") && !line.startsWith("+++")) added++;
+    else if (line.startsWith("-") && !line.startsWith("---")) removed++;
+  }
+  return { added, removed };
+}
+
+// Default delta budget: based on 2 chars/token for diff text and ~40% of the default
+// code_reviewer wrap_up_at_tokens (225,000 tokens): 225,000 * 0.4 * 2 = 180,000 chars.
+// Evidence: a brief of ~596KB (~8,950 lines, almost all diff) measured 286,091 tokens
+// on claude-opus (~2.1 chars/token for diffs). 540K chars would be ~260K tokens, exceeding
+// the 225K/230K wrap-up limit.
+export const DEFAULT_DELTA_BUDGET_CHARS = 180_000;
+
+/**
+ * Bounds the inline scoped delta. Returns inline text when small (under budget),
+ * or when above budget: writes the full delta to a file in the role's sanctioned scratch/run
+ * directory and returns a sorted file list with +added/-removed line counts plus a line
+ * instructing the reviewer to read the delta file selectively.
+ */
+export function boundDeltaChunks(chunks, budgetOrOpts = {}, extraOpts = {}) {
+  const opts = typeof budgetOrOpts === "number" ? {budget: budgetOrOpts, ...extraOpts} : {...budgetOrOpts, ...extraOpts};
+  const allChunks = Array.isArray(chunks) ? chunks : [];
+  const fullDelta = allChunks.map(c => c.text).join("\n");
+  const maxChars = opts.budget ?? (opts.role === "verifier"
+    ? Math.floor(180000 * 0.4 * 2) // 144,000
+    : DEFAULT_DELTA_BUDGET_CHARS);
+
+  if (fullDelta.length <= maxChars) {
+    return fullDelta || (opts.emptyPlaceholder !== undefined ? opts.emptyPlaceholder : "");
+  }
+
+  const sortedChunks = [...allChunks].sort((a, b) => String(a.path || "").localeCompare(String(b.path || "")));
+  const fileLines = sortedChunks.map(c => {
+    const {added, removed} = diffLineCounts(c.text);
+    return `- ${c.path} (+${added}/-${removed})`;
+  });
+
+  const destDir = opts.dir || opts.scratchDir || opts.runDir
+    || (opts.repo
+        ? (opts.mission ? path.join(opts.repo, ".autopilot", "missions", sanitizeKeySegment(opts.mission), "scratch") : path.join(opts.repo, ".autopilot", "scratch"))
+        : path.resolve(".autopilot", "scratch"));
+  const roleName = opts.role ? String(opts.role).toLowerCase() : "review";
+  const kindName = opts.kind ? String(opts.kind).toLowerCase() : "delta";
+  const fileName = opts.fileName || `${roleName}-${kindName}.diff`;
+  const filePath = opts.filePath || path.join(destDir, fileName);
+
+  try {
+    fs.mkdirSync(path.dirname(filePath), {recursive: true});
+    fs.writeFileSync(filePath, fullDelta, "utf8");
+  } catch {
+    return fullDelta || (opts.emptyPlaceholder !== undefined ? opts.emptyPlaceholder : "");
+  }
+
+  const lines = [
+    `Delta exceeds inline brief budget (${fullDelta.length} chars, budget ${maxChars} chars). Full delta written to: ${filePath}`,
+    `Read ${filePath} selectively with file tools (using line ranges/offset-limit) for context; do not load the whole diff at once.`,
+    "",
+    `Changed files (${sortedChunks.length}):`,
+    ...fileLines,
+  ];
+
+  return lines.join("\n");
+}
+
+export function boundDeltaChunksDetail(chunks, budgetOrOpts = {}, extraOpts = {}) {
+  const opts = typeof budgetOrOpts === "number" ? {budget: budgetOrOpts, ...extraOpts} : {...budgetOrOpts, ...extraOpts};
+  const allChunks = Array.isArray(chunks) ? chunks : [];
+  const fullDelta = allChunks.map(c => c.text).join("\n");
+  const maxChars = opts.budget ?? (opts.role === "verifier"
+    ? Math.floor(180000 * 0.4 * 2) // 144,000
+    : DEFAULT_DELTA_BUDGET_CHARS);
+
+  if (fullDelta.length <= maxChars) {
+    return {
+      bounded: false,
+      text: fullDelta || (opts.emptyPlaceholder !== undefined ? opts.emptyPlaceholder : ""),
+      fullDelta,
+      filePath: null,
+      maxChars,
+    };
+  }
+
+  const text = boundDeltaChunks(chunks, opts);
+  const destDir = opts.dir || opts.scratchDir || opts.runDir
+    || (opts.repo
+        ? (opts.mission ? path.join(opts.repo, ".autopilot", "missions", sanitizeKeySegment(opts.mission), "scratch") : path.join(opts.repo, ".autopilot", "scratch"))
+        : path.resolve(".autopilot", "scratch"));
+  const roleName = opts.role ? String(opts.role).toLowerCase() : "review";
+  const kindName = opts.kind ? String(opts.kind).toLowerCase() : "delta";
+  const fileName = opts.fileName || `${roleName}-${kindName}.diff`;
+  const filePath = opts.filePath || path.join(destDir, fileName);
+
+  return {
+    bounded: true,
+    text,
+    fullDelta,
+    filePath,
+    maxChars,
+  };
+}
+
+export const boundReviewDelta = boundDeltaChunks;
+

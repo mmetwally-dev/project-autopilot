@@ -33,6 +33,7 @@ export {ownerPidPath, writeOwnerPid, readOwnerPid, verifyOwnerPid, removeOwnerPi
 // assert the stdin stream-json flags reach every agy child, not just the ones
 // spawned through a mode-driven buildInvocation.
 export {buildRelayArgs as buildRelayArgsForTests, gates as gatesForTests};
+export {stopIfBriefExceedsCap};
 // Exported for offline tests: backlog #1(a) warn-only preflight for OpenCode
 // models that vanished from the live list.
 export {openCodeSandboxModelWarnings as openCodeSandboxModelWarningsForTests};
@@ -93,7 +94,7 @@ import { recordCodeReviewRound, clearCodeReviewHistory, codeReviewerRoundLines, 
 import { normalizeEscalationModel, scheduleEscalation, pendingEscalationModel, consumeEscalationFor, formatEscalationLog, recordVerifierRound, clearVerifierHistory, verifierRoundLines, scheduleNoProgressEscalation, formatNoProgressEscalationLog, noProgressDecision, endNoProgressRound, budgetEscalationDecision, formatBudgetEscalationLog, budgetEscalationModel, implementerModelFor, clearBudgetEscalation } from "./escalation-model.mjs";
 import { recordPlanReviewRound, seedPlanReviewHistory, clearPlanReviewHistory, planReviewPassNeedsConfirmation, planReviewConfirmationPending, markPlanReviewConfirmationPending, clearPlanReviewConfirmation, planReviewRevisionCount, recordPlanReviewRevision, clearPlanReviewRevisions, planReviewerRoundLines, planReviewerConfirmationLines, plannerEarlierRoundsText, recordPlanReviewNotes, planReviewNotesText, recordPlanPassNotes, planPassNotesText, allPlanPassNotes, firstTaskPassNotes, firstGsdUnitPassNotes, planPassNoteEntries, applyPlanPassNoteMarks, phaseCodeReviewPassNotesText, finalReviewPassNotesText, formatPlanPassNotesLines, PLAN_REVIEW_FULL_LINE, PLAN_REVIEW_SEVERITY_LINE, demoteLowSeverityFindings, STANDALONE_SPEC_ANALYZE_LINE, isFullPlanReviewRound, REVIEW_CONTINUATION_LINE, formatReviewBriefForContinuation, hasReviewContinuationSignal, parseTaskBlocks, changedTaskIds, taskSizeConfirmationLine, demoteUnchangedTaskSizeFindings, recordPlanReviewTaskHashes, getPlanReviewTaskHashes } from "./plan-review-rounds.mjs";
 import { saveReviewFeedback, loadReviewFeedback, clearReviewFeedback, clearReviewFeedbackByPrefix, feedbackText } from "./review-feedback.mjs";
-import { taskLabel, recordFindingTasks, loadFindingTasks, carryDecision, findingsForTask, renderHandledFindings, fixPassBriefExcerpts, clearFindingTasks, clearFindingTasksByPrefix, FINDING_TASKS_STATE_KEY, recordTaskOwnership, loadTaskOwnership, clearTaskOwnership, TASK_OWNERSHIP_STATE_KEY, executePendingCrossPhaseRepairs } from "./finding-task-locality.mjs";
+import { taskLabel, recordFindingTasks, loadFindingTasks, carryDecision, findingsForTask, renderHandledFindings, fixPassBriefExcerpts, clearFindingTasks, clearFindingTasksByPrefix, FINDING_TASKS_STATE_KEY, recordTaskOwnership, loadTaskOwnership, clearTaskOwnership, TASK_OWNERSHIP_STATE_KEY, executePendingCrossPhaseRepairs, rebuildTaskOwnership } from "./finding-task-locality.mjs";
 import { runFinalReviewFixRounds, finalReviewNextStep, runCappedFixSessions, parseGateGreenFiles, isNoWorkPerformed, isReviewerFeedbackFixPass, buildNoWorkAnswerSection } from "./final-review-fix-rounds.mjs";
 import { classifyGateFailures, parseGateFailures, taskLinkedTestFiles, formatGateFailureEscalation } from "./gate-failure-locality.mjs";
 import { importsDeltaFile } from "./gate-locality-imports.mjs";
@@ -104,7 +105,7 @@ import {mapPathIntoEnvelope, SANDBOX_HOME} from "./execution-envelope.mjs";
 import {resolveAdapterTransport} from "./adapter-transport.mjs";
 import {findCodexRollout, codexUsageFromRollout, deleteCodexRollout, reconcileLiveCodexRolloutUsage, resolveCodexHomes} from "./codex-rollout.mjs";
 export { resolveCodexHomes };
-import {ensureBaseline, hasBaseline, removeBaseline, scopedDelta, scopedDeltaChunks, sanitizeKeySegment, scopedDeltaBeginMarker, SCOPED_DELTA_END_MARKER, listWorktreeEntries, rebaseBaselineOntoHead, headMovedSinceBaseline} from "./implementation-baseline.mjs";
+import {ensureBaseline, hasBaseline, removeBaseline, scopedDelta, scopedDeltaChunks, sanitizeKeySegment, scopedDeltaBeginMarker, SCOPED_DELTA_END_MARKER, listWorktreeEntries, rebaseBaselineOntoHead, headMovedSinceBaseline, boundDeltaChunks, boundDeltaChunksDetail, diffLineCounts, DEFAULT_DELTA_BUDGET_CHARS} from "./implementation-baseline.mjs";
 import {buildStandaloneHandoff, boundedDeltaBody, MISSION_FINAL_SECURITY_LINE, specFrCheckLine, formatOperatorPhaseEdits, parseIncompleteSignal, parsePlanningIncompleteSignal, parseFoundEntries, sanitizeSummary, truncationWarning, reviewTruncationResult, formatGateResult, resolveGateDurations} from "./standalone-handoff.mjs";
 import {applyRedGateOverride, persistRedGateOverride} from "./verifier-red-gate-override.mjs";
 import {handlePlanningContinuation, planningNoProgressTouchedFiles, clearPlanningContinuations, clearPlanningContinuationScope, hasSpentPlanningContinuations, PLANNING_CONTINUATION_SCOPES} from "./planning-continuation.mjs";
@@ -190,8 +191,16 @@ function anchoredTestsSection(chunks){
 
 // TASK-12: SpecKit prompts keep their own prose but take the delta through the
 // same bounded chunk fit Standalone's builder uses; trimming is always warned.
-function speckitBoundedDelta(repo,key,kind){
-  const {body,meta}=boundedDeltaBody(scopedDeltaChunks(repo,key),{kind,baselineKey:key});
+// Backlog #8: large deltas above role wrap-up threshold are written to a scratch file.
+function speckitBoundedDelta(repo,key,kind,opts={}){
+  const chunks=scopedDeltaChunks(repo,key);
+  const role=opts.role||(kind==="PHASE_VERIFY"?"verifier":"code_reviewer");
+  const mission=opts.mission||null;
+  const detail=boundDeltaChunksDetail(chunks,{repo,mission,kind,role,...opts});
+  if(detail.bounded){
+    return detail.text;
+  }
+  const {body,meta}=boundedDeltaBody(chunks,{kind,baselineKey:key});
   if(meta.truncated) console.warn(truncationWarning(meta));
   return body;
 }
@@ -5558,6 +5567,58 @@ function acceptCappedPlannerRevision({subject,result,touchedFiles,isRevision,can
   delete result.capped;
   return matchedFile;
 }
+function stopIfBriefExceedsCap({result, subject, role, contScope = null, s = null, c = null, checkpoint = null, taskId = null, mission = null, taskRef = null, step = null, wrapUpLimit = null, dieFn = die}) {
+  if (!result?.capped) return false;
+  const turns = Number.isInteger(result?.usage?.turns) ? result.usage.turns : (Number.isInteger(result?.turns) ? result.turns : 1);
+  if (turns > 1) return false;
+
+  let firstTurnContext = null;
+  if (result?.usage?.maxSingleTurnContext != null && Number.isFinite(Number(result.usage.maxSingleTurnContext))) {
+    firstTurnContext = Number(result.usage.maxSingleTurnContext);
+  } else if (result?.capped?.type === "tokens" && Number.isFinite(Number(result?.capped?.used))) {
+    firstTurnContext = Number(result.capped.used);
+  }
+  if (firstTurnContext == null) return false;
+
+  const roleLimits = (role && typeof resolvePerRoleLimits === "function") ? resolvePerRoleLimits(role, c?.policy) : null;
+  const isTokenCap = result?.capped?.type === "tokens" || result?.capped?.type === "backstop";
+  const limitHit = (isTokenCap && result?.capped?.limit != null && Number.isFinite(Number(result.capped.limit))) ? Number(result.capped.limit) : null;
+  const roleCap = Number(c?.policy?.caps?.[role]?.max_tokens ?? roleLimits?.perTaskMaxTokens ?? (isTokenCap ? limitHit : null));
+  const wrapLimit = Number(wrapUpLimit ?? c?.policy?.caps?.[role]?.wrap_up_at_tokens ?? roleLimits?.wrapUpTokenThreshold);
+
+  const exceedsLimitHit = limitHit != null && firstTurnContext >= limitHit;
+  const exceedsWrapLimit = Number.isFinite(wrapLimit) && wrapLimit > 0 && firstTurnContext >= wrapLimit;
+  const exceedsRoleCap = Number.isFinite(roleCap) && roleCap > 0 && firstTurnContext >= roleCap;
+
+  if (!exceedsLimitHit && !exceedsWrapLimit && !exceedsRoleCap) return false;
+
+  const N = Math.round(firstTurnContext / 1000);
+  const capTokens = Number.isFinite(roleCap) && roleCap > 0 ? roleCap : (limitHit ?? firstTurnContext);
+  const M = Math.round(capTokens / 1000);
+
+  const missionName = mission ?? s?.mission ?? null;
+  if (s) {
+    if (contScope) {
+      recordLastContinuation(s, {contScope, taskId, missionName, taskRef});
+    }
+    s.phase = "escalated";
+    s.step = step || (s.framework === "speckit" ? "speckit_task_not_converging" : (contScope?.includes("final") ? "final_review_not_converging" : "standalone_task_not_converging"));
+    s.phaseCheckpointError = {
+      code: "CONTINUATION_EXHAUSTED",
+      evidence: {role, subject, firstTurnContext, turns, capLimit: limitHit, wrapUpLimit: wrapLimit, roleCap},
+    };
+    if (checkpoint && typeof CHECKPOINT_STATE_KEY !== "undefined") {
+      s[CHECKPOINT_STATE_KEY] = checkpoint;
+    }
+    if (typeof saveState === "function") saveState(s);
+  }
+
+  const resumeHint = contScope ? `\nResume: ${"ap reset --scope"} ${contScope} then ap run` : "";
+  const roleStr = role || "role";
+  const msg = `${subject}: the brief alone is ${N}K tokens, above the ${roleStr} cap ${M}K — a new session cannot make progress. Shrink the brief or raise caps.${roleStr}.max_tokens. STOP — human intervention required.${resumeHint}`;
+  dieFn(msg);
+  return true;
+}
 function handleCappedPlanningResult({c,s,framework,role,result,subject,touchedFiles,step,stage,planRevision,runStartedAtMs}){
   const {taskRef,contScope}=planningScopeParts(framework,role);
   const mission=s.mission||null;
@@ -5599,6 +5660,7 @@ function handleCappedPlanningResult({c,s,framework,role,result,subject,touchedFi
     if(acceptedFile) return true;
   }
   maybeApplyPendingContinuationReset(s,contScope);
+  stopIfBriefExceedsCap({result, subject, role, contScope, s, c, mission, taskRef, step: `${framework}_planning_no_progress`});
   const cont=handlePlanningContinuation(s,role,result,contScope,c.policy,'capped');
   if(!cont.allowed){
     recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef});
@@ -6892,6 +6954,7 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
         });
         if (!acceptedFile) {
           maybeApplyPendingContinuationReset(s, contScope);
+          stopIfBriefExceedsCap({result: planner, subject: "Standalone spec planner", role: "planner", contScope, s, c, mission, taskRef: 'standalone-spec-planner', step: "standalone_planning_no_progress"});
           const cont = handlePlanningContinuation(s, 'planner', planner, 'task:standalone:spec:planner', c.policy, 'capped');
           if (!cont.allowed) {
             recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-planner' });
@@ -6975,6 +7038,7 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
         }
         clearBackstopFirings(s, contScope);
         maybeApplyPendingContinuationReset(s, contScope);
+        stopIfBriefExceedsCap({result: reviewResult, subject: "Standalone spec review", role: "plan_reviewer", contScope, s, c, mission, taskRef: 'standalone-spec-plan_reviewer'});
         const cont = handlePlanningContinuation(s, 'plan_reviewer', reviewResult, 'task:standalone:spec:plan_reviewer', c.policy, 'capped');
         if (!cont.allowed) {
           recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-plan_reviewer' });
@@ -7019,6 +7083,7 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
         }
         clearBackstopFirings(s, contScope);
         maybeApplyPendingContinuationReset(s, contScope);
+        stopIfBriefExceedsCap({result: reviewResult, subject: "Standalone spec review", role: "plan_reviewer", contScope, s, c, mission, taskRef: 'standalone-spec-plan_reviewer'});
         const cont = handlePlanningContinuation(s, 'plan_reviewer', reviewResult, 'task:standalone:spec:plan_reviewer', c.policy, 'capped');
         if (!cont.allowed) {
           recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-plan_reviewer' });
@@ -7316,6 +7381,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
         // Backlog #27: a queued `ap reset --scope <continuation>` applies at
         // this decision, before the next generation is consumed.
         maybeApplyPendingContinuationReset(s,contScope);
+        stopIfBriefExceedsCap({result: planner, subject: "Planner", role: "planner", contScope, s, c, mission, taskRef: 'standalone-planning-planner', step: "standalone_planning_no_progress"});
         const cont=handlePlanningContinuation(s,'planner',planner,'task:standalone:planning:planner',c.policy,'capped');
         if(!cont.allowed){
           recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:'standalone-planning-planner'});
@@ -7520,6 +7586,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       // Backlog #27: a queued `ap reset --scope <continuation>` applies at
       // this decision, before the next generation is consumed.
       maybeApplyPendingContinuationReset(s,contScope);
+      stopIfBriefExceedsCap({result: reviewResult, subject: "Plan reviewer", role: "plan_reviewer", contScope, s, c, mission, taskRef: 'standalone-planning-plan_reviewer'});
       const cont=handlePlanningContinuation(s,'plan_reviewer',reviewResult,'task:standalone:planning:plan_reviewer',c.policy,'capped');
       if(!cont.allowed){
         recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:'standalone-planning-plan_reviewer'});
@@ -7605,6 +7672,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       // Backlog #27: a queued `ap reset --scope <continuation>` applies at
       // this decision, before the next generation is consumed.
       maybeApplyPendingContinuationReset(s,contScope);
+      stopIfBriefExceedsCap({result: reviewResult, subject: "Plan reviewer", role: "plan_reviewer", contScope, s, c, mission, taskRef: 'standalone-planning-plan_reviewer'});
       const cont=handlePlanningContinuation(s,'plan_reviewer',reviewResult,'task:standalone:planning:plan_reviewer',c.policy,'capped');
       if(!cont.allowed){
         recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:'standalone-planning-plan_reviewer'});
@@ -9347,6 +9415,9 @@ async function runFinalReviewSessions(c,s,{site,mission,requirements,buildPrompt
     const incomplete=Boolean(rv.capped)||rv.review?.decision==="INCOMPLETE"||parseIncompleteSignal(rv.review ?? rv);
     let cont=null;
     if(incomplete){
+      if (rv.capped) {
+        stopIfBriefExceedsCap({result: rv, subject: `Final review (${site})`, role: "code_reviewer", contScope, s, c, mission, taskRef: ref, step: "final_review_not_converging"});
+      }
       maybeApplyPendingContinuationReset(s,contScope);
       cont=consumeContinuation(s,c.policy,contScope,resolvePerRoleLimits("code_reviewer",c.policy).continuationAllowance);
       recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:rv.capped?.type??"incomplete",used:rv.capped?.used??null,limit:rv.capped?.limit??null,tail:deadEndTail({summary:`Final review ${rv.capped?`capped (${rv.capped.type} ${rv.capped.used}/${rv.capped.limit})`:`incomplete (${rv.review?.decision ?? "INCOMPLETE"})`}; mission delta unchanged — continue the unchecked requirements.`,files:[]})});
@@ -9662,6 +9733,7 @@ async function runStandaloneImplementation(c,s){
   s.phase="implementing";saveState(s);
 
   for(;s.phaseIndex<phaseList.length;s.phaseIndex++){
+    rebuildTaskOwnership(s, { phaseIndex: s.phaseIndex, phaseList, runsDir: runsDirFor(s), framework: "standalone", mission, repoRoot: repo, log: console.log });
     if(s.operatorPhaseNote&&Number.isInteger(s.operatorPhaseNote.phaseIndex)&&s.operatorPhaseNote.phaseIndex!==s.phaseIndex){ delete s.operatorPhaseNote; saveState(s); }
     const phase=phaseList[s.phaseIndex];
     if(stopStage&&s.phaseIndex!==stopPhaseIndex){
@@ -10131,6 +10203,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             // Backlog #27: a queued `ap reset --scope <continuation>` applies at
             // this decision, before the next generation is consumed.
             maybeApplyPendingContinuationReset(s,contScope);
+            stopIfBriefExceedsCap({result: taskImpl, subject: `Standalone task ${taskId}`, role: "implementer", contScope, s, c, checkpoint, taskId, mission, taskRef: taskDisplayRef(phaseTasks[taskIndex],taskIndex), step: "standalone_task_not_converging"});
             const cont=consumeContinuation(s,c.policy,contScope);
             // Files-first dead-end tail: what this generation completed is
             // the resume point the next one needs; the killed run's output
@@ -10425,6 +10498,10 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         if(isRereview){
           const fixChunks=scopedDeltaChunks(repo,prevReviewKey,{mission,declaredPaths});
           const phaseFiles=scopedDeltaChunks(repo,phaseBaselineKey,{mission,declaredPaths}).map(c=>c.path);
+          const fixDetail=boundDeltaChunksDetail(fixChunks,{repo,mission,kind:"FIX",emptyPlaceholder:"The fix changed no files.",role:"code_reviewer"});
+          const effectiveFixChunks=fixDetail.bounded
+            ?[{path:fixDetail.filePath,text:fixDetail.text}]
+            :fixChunks;
           // Mission 078 task 1.3: an all-zero-file reviewer-feedback round
           // returns to the reviewer with the implementer's answer/rebuttal
           // threaded in. The section appears only when the round changed
@@ -10447,7 +10524,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           reviewHandoff=buildStandaloneHandoff({kind:"PHASE_REREVIEW",
             phaseName:phase.name,phaseIndex:s.phaseIndex,phaseTotal:phaseList.length,
             phaseTasks,attempt:s.attempt,
-            deltaChunks:fixChunks,changedFiles:phaseFiles,
+            deltaChunks:effectiveFixChunks,changedFiles:phaseFiles,
             baselineKey:reviewKey,declaredPaths,
             repoRoot:repo,
             gateHistory:s?.gateDurations,
@@ -10455,10 +10532,15 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             implementationSummary:`${checkpoint.implementer?.summary??""}${noWorkAnswerSection}`,
             operatorPhaseEdits:s.operatorPhaseEdits});
         }else{
+          const phaseChunks=scopedDeltaChunks(repo,phaseBaselineKey,{mission,declaredPaths});
+          const phaseDetail=boundDeltaChunksDetail(phaseChunks,{repo,mission,kind:"PHASE",emptyPlaceholder:"(empty — no repository changes in scope)",role:"code_reviewer"});
+          const effectivePhaseChunks=phaseDetail.bounded
+            ?[{path:phaseDetail.filePath,text:phaseDetail.text}]
+            :phaseChunks;
           reviewHandoff=buildStandaloneHandoff({kind:"PHASE_REVIEW",
             phaseName:phase.name,phaseIndex:s.phaseIndex,phaseTotal:phaseList.length,
             phaseTasks,attempt:s.attempt,
-            deltaChunks:scopedDeltaChunks(repo,phaseBaselineKey,{mission,declaredPaths}),
+            deltaChunks:effectivePhaseChunks,
             baselineKey:phaseBaselineKey,declaredPaths,
             repoRoot:repo,
             gateHistory:s?.gateDurations,
@@ -10534,6 +10616,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           // Backlog #27: a queued `ap reset --scope <continuation>` applies at
           // this decision, before the next generation is consumed.
           maybeApplyPendingContinuationReset(s,contScope);
+          stopIfBriefExceedsCap({result: rv, subject: "Standalone code review", role: "code_reviewer", contScope, s, c, checkpoint, mission, taskRef: reviewRef, step: "standalone_task_not_converging"});
           const cont=consumeContinuation(s,c.policy,contScope,resolvePerRoleLimits('code_reviewer',c.policy).continuationAllowance);
           recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:rv.capped.type,used:rv.capped.used,limit:rv.capped.limit,tail:deadEndTail({summary:`Code review capped (${rv.capped.type} ${rv.capped.used}/${rv.capped.limit}); phase diff unchanged — re-review the same phase diff.`,files:[]})});
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
@@ -10707,10 +10790,15 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           saveState(s);
           die(`Standalone phase delta could not be recomputed after gates: ${e?.message||e}. STOP — human intervention required.`);
         }
+        const verifyChunks=scopedDeltaChunks(repo,phaseBaselineKey,{mission,declaredPaths});
+        const verifyDetail=boundDeltaChunksDetail(verifyChunks,{repo,mission,kind:"PHASE",emptyPlaceholder:"(empty — no repository changes in scope)",role:"verifier"});
+        const effectiveVerifyChunks=verifyDetail.bounded
+          ?[{path:verifyDetail.filePath,text:verifyDetail.text}]
+          :verifyChunks;
         const verifyHandoff=buildStandaloneHandoff({kind:"PHASE_VERIFY",
           phaseName:phase.name,phaseIndex:s.phaseIndex,phaseTotal:phaseList.length,
           phaseTasks,attempt:s.attempt,
-          deltaChunks:scopedDeltaChunks(repo,phaseBaselineKey,{mission,declaredPaths}),
+          deltaChunks:effectiveVerifyChunks,
           baselineKey:phaseBaselineKey,declaredPaths,
           implementationSummary:checkpoint.implementer?.summary??"",
           gateResult:g,gateHistory:s?.gateDurations,
@@ -10781,6 +10869,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           // Backlog #27: a queued `ap reset --scope <continuation>` applies at
           // this decision, before the next generation is consumed.
           maybeApplyPendingContinuationReset(s,contScope);
+          stopIfBriefExceedsCap({result: vv, subject: "Standalone verification", role: "verifier", contScope, s, c, checkpoint, mission, taskRef: verifyRef, step: "standalone_task_not_converging"});
           const cont=consumeContinuation(s,c.policy,contScope,resolvePerRoleLimits('verifier',c.policy).continuationAllowance);
           recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:vv.capped.type,used:vv.capped.used,limit:vv.capped.limit,tail:deadEndTail({summary:`Verification capped (${vv.capped.type} ${vv.capped.used}/${vv.capped.limit}); phase diff unchanged — re-verify the same phase diff.`,files:[]})});
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
@@ -11560,6 +11649,7 @@ async function runImplementation(c){
   ensureBaseline(repo,missionBaselineKey);
 
   for(;s.phaseIndex<phaseList.length;s.phaseIndex++){
+    rebuildTaskOwnership(s, { phaseIndex: s.phaseIndex, phaseList, runsDir: runsDirFor(s), framework: "speckit", mission: missionIdentity, repoRoot: repo, log: console.log });
     if(s.operatorPhaseNote&&Number.isInteger(s.operatorPhaseNote.phaseIndex)&&s.operatorPhaseNote.phaseIndex!==s.phaseIndex){ delete s.operatorPhaseNote; saveState(s); }
     const phase=phaseList[s.phaseIndex];
     let phaseTasks=phase.tasks.filter(t=>!t.done);
@@ -12003,6 +12093,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             // Backlog #27: a queued `ap reset --scope <continuation>` applies at
             // this decision, before the next generation is consumed.
             maybeApplyPendingContinuationReset(s,contScope);
+            stopIfBriefExceedsCap({result: taskImpl, subject: `SpecKit task ${taskId}`, role: "implementer", contScope, s, c, checkpoint, taskId, mission: missionIdentity, taskRef: taskDisplayRef(phaseTasks[taskIndex],taskIndex), step: "speckit_task_not_converging"});
             const cont=consumeContinuation(s,c.policy,contScope);
             let capFiles=[];
             try{
@@ -12284,10 +12375,10 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         if(fixChunks){
           const phaseFiles=scopedDeltaChunks(repo,phaseBaselineKey).map(c=>c.path);
           const sortedPhaseFiles=[...new Set(phaseFiles.filter(Boolean))].sort();
-          const fixBody=fixChunks.map(c=>c.text).join("\n")||"The fix changed no files.";
+          const fixBody=boundDeltaChunks(fixChunks,{repo,mission:missionIdentity,kind:"FIX",emptyPlaceholder:"The fix changed no files.",role:"code_reviewer"});
           reviewPrompt=`Re-review after a fix. Your previous findings are listed under FEEDBACK TO ADDRESS. For each one, confirm it is fixed or still stands. Then review ONLY the changes below — they are everything that changed since your last review — for new problems or regressions. Code outside these changes was already reviewed; do not re-review it, but you may read any file for context.\nPhase: ${phase.name}\n\nTasks:\n${scope}\n\nChanged files in this phase so far: ${sortedPhaseFiles.length?sortedPhaseFiles.join(", "):"none"}\n\nChanges since your last review (everything the fix changed — review ONLY this diff for new problems or regressions):\n${scopedDeltaBeginMarker("FIX")}\n${fixBody}\n${SCOPED_DELTA_END_MARKER}`;
         }else{
-          reviewPrompt=`Review the whole phase (all tasks together) — not task by task.\nPhase: ${phase.name}\n\nTasks:\n${scope}\n\nScoped implementation delta for THIS PHASE only (pre-existing repository changes made before this mission started, and changes from earlier phases, are excluded — do not evaluate or flag anything outside this delta; an empty delta means this phase made no repository changes):\n${scopedDeltaBeginMarker("PHASE")}\n${speckitBoundedDelta(repo,phaseBaselineKey,"PHASE_REVIEW")}\n${SCOPED_DELTA_END_MARKER}`;
+          reviewPrompt=`Review the whole phase (all tasks together) — not task by task.\nPhase: ${phase.name}\n\nTasks:\n${scope}\n\nScoped implementation delta for THIS PHASE only (pre-existing repository changes made before this mission started, and changes from earlier phases, are excluded — do not evaluate or flag anything outside this delta; an empty delta means this phase made no repository changes):\n${scopedDeltaBeginMarker("PHASE")}\n${speckitBoundedDelta(repo,phaseBaselineKey,"PHASE_REVIEW",{mission:missionIdentity,role:"code_reviewer"})}\n${SCOPED_DELTA_END_MARKER}`;
         }
         // Mission 066 task 1.3, SpecKit twin: security checklist rides the
         // phase code-review prompt for both fresh reviews and re-reviews
@@ -12370,6 +12461,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           // Backlog #27: a queued `ap reset --scope <continuation>` applies at
           // this decision, before the next generation is consumed.
           maybeApplyPendingContinuationReset(s,contScope);
+          stopIfBriefExceedsCap({result: rv, subject: "SpecKit code review", role: "code_reviewer", contScope, s, c, checkpoint, mission: missionIdentity, taskRef: reviewRef, step: "speckit_task_not_converging"});
           const cont=consumeContinuation(s,c.policy,contScope,resolvePerRoleLimits('code_reviewer',c.policy).continuationAllowance);
           recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:rv.capped.type,used:rv.capped.used,limit:rv.capped.limit,tail:deadEndTail({summary:`Code review capped (${rv.capped.type} ${rv.capped.used}/${rv.capped.limit}); phase diff unchanged — re-review the same phase diff.`,files:[]})});
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
@@ -12564,7 +12656,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         const verifyDeadEndsText=verifyDeadEnds.length?`Prior dead ends (continuation context — do not retry blindly):\n${verifyDeadEnds.map((d)=>`- Generation ${d.generation} (${d.reason} ${d.used}/${d.limit}): ${d.tail}`).join("\n")}`:"";
         const verifyHandoffNoteText=readOnlyContinuationNote(verifyHandoffNote,repo,missionIdentity,verifyRef,"verifier");
         const vv=await relayAsync("verifier",
-          `${`Verify this phase after implementation and code review.${gateSection?" The full test suite already ran as the phase gate; review the recorded gate result below — do not re-run it.":""}\nPhase: ${phase.name}\n\nTasks:\n${scope}\n\nScoped implementation delta for THIS PHASE only (pre-existing repository changes made before this mission started, and changes from earlier phases, are excluded — do not evaluate or flag anything outside this delta; an empty delta means this phase made no repository changes):\n${scopedDeltaBeginMarker("PHASE")}\n${speckitBoundedDelta(repo,phaseBaselineKey,"PHASE_REVIEW")}\n${SCOPED_DELTA_END_MARKER}`}${gateSection?`\n\n${gateSection}`:""}${verifyDurations?`\n\n${verifyDurations}`:""}${heavyNoParallelVerify?`
+          `${`Verify this phase after implementation and code review.${gateSection?" The full test suite already ran as the phase gate; review the recorded gate result below — do not re-run it.":""}\nPhase: ${phase.name}\n\nTasks:\n${scope}\n\nScoped implementation delta for THIS PHASE only (pre-existing repository changes made before this mission started, and changes from earlier phases, are excluded — do not evaluate or flag anything outside this delta; an empty delta means this phase made no repository changes):\n${scopedDeltaBeginMarker("PHASE")}\n${speckitBoundedDelta(repo,phaseBaselineKey,"PHASE_REVIEW",{mission:missionIdentity,role:"verifier"})}\n${SCOPED_DELTA_END_MARKER}`}${gateSection?`\n\n${gateSection}`:""}${verifyDurations?`\n\n${verifyDurations}`:""}${heavyNoParallelVerify?`
 \n\n${heavyNoParallelVerify}`:""}\n\n${verifyDeadEndsText}\n\n${verifyHandoffNoteText}\n\n${verifyBudget.note}${browserVerifierNote(phaseTaskFacts)?`\n${browserVerifierNote(phaseTaskFacts)}`:""}\n${verifierRoundLines(s,codeReviewScopeKey("speckit-phase",s.phaseIndex)).join("\n")}\n${readOnlyHandoffNoteReminder({mission: missionIdentity, ref: verifyRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
           cVerify,s,{readOnly:true,review:true,requirements:phaseRequirements,taskFacts:phaseTaskFacts,taskRef:verifyRef,timeoutMs:verifyBudget.timeoutMs,capEnabled:true});
         noteRoleDeadlineOutcome(s,"verifier",vv,verifyBudget.derived);
@@ -12618,6 +12710,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           // Backlog #27: a queued `ap reset --scope <continuation>` applies at
           // this decision, before the next generation is consumed.
           maybeApplyPendingContinuationReset(s,contScope);
+          stopIfBriefExceedsCap({result: vv, subject: "SpecKit verification", role: "verifier", contScope, s, c, checkpoint, mission: missionIdentity, taskRef: verifyRef, step: "speckit_task_not_converging"});
           const cont=consumeContinuation(s,c.policy,contScope,resolvePerRoleLimits('verifier',c.policy).continuationAllowance);
           recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:vv.capped.type,used:vv.capped.used,limit:vv.capped.limit,tail:deadEndTail({summary:`Verification capped (${vv.capped.type} ${vv.capped.used}/${vv.capped.limit}); phase diff unchanged — re-verify the same phase diff.`,files:[]})});
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
