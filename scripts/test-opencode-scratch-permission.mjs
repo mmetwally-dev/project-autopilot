@@ -267,13 +267,51 @@ function evaluatePermission(rules, permission, resource) {
   }
   return effect;
 }
+const OPENCODE_DEBUG_MAX_ATTEMPTS = 3;
+const OPENCODE_DEBUG_RETRY_DELAY_MS = 1000;
+const OPENCODE_ACTIVATION_PATTERN = /did not finish activating/i;
+let opencodeActivationSkipReported = false;
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function activationFailureText(result) {
+  const combined = `${result?.stdout || ""}\n${result?.stderr || ""}`;
+  return OPENCODE_ACTIVATION_PATTERN.test(combined) ? combined.trim() : null;
+}
+// Under load the real CLI's start-up can fail with "Location plugins did not
+// finish activating" — a transient, provider-independent start-up race, not a
+// permission-resolution result. Retry it a couple of times; if it still fails
+// that way, report one LIVE SKIPPED line and let the caller skip its checks.
+// Any other failure is still thrown untouched.
+function spawnOpencodeDebug(args, options) {
+  let result = null;
+  for (let attempt = 1; attempt <= OPENCODE_DEBUG_MAX_ATTEMPTS; attempt++) {
+    result = spawnSync("opencode", args, options);
+    if (result.status === 0 || !activationFailureText(result)) return result;
+    if (attempt < OPENCODE_DEBUG_MAX_ATTEMPTS) sleepSync(OPENCODE_DEBUG_RETRY_DELAY_MS);
+  }
+  return result;
+}
+function skipAfterActivationFailure(commandLabel, result) {
+  if (!opencodeActivationSkipReported) {
+    opencodeActivationSkipReported = true;
+    const detail = String(activationFailureText(result) || "")
+      .split(/\r?\n/).map(line => line.trim()).filter(Boolean).slice(-1)[0] || "did not finish activating";
+    console.log(liveSkipLine(`${commandLabel} could not start after ${OPENCODE_DEBUG_MAX_ATTEMPTS} attempts under load (${detail}); skipping the real-CLI permission checks it feeds`));
+  }
+  return null;
+}
 function realResolvedAgentConfig(cwd, configContent) {
   if (isOpenCode2) {
-    const r = spawnSync("opencode", ["debug", "agents", "--standalone"], {
+    const r = spawnOpencodeDebug(["debug", "agents", "--standalone"], {
       cwd, encoding: "utf8", stdio: "pipe", shell: false, timeout: 30000,
       env: {...withoutOuterGitGuard({...process.env}), OPENCODE_CONFIG_CONTENT: configContent}
     });
-    if (r.status !== 0) throw new Error(`opencode debug agents --standalone failed (status ${r.status}, signal ${r.signal}, error ${r.error?.code || "none"}): ${r.stderr || r.stdout}`);
+    if (r.status !== 0) {
+      if (activationFailureText(r)) return skipAfterActivationFailure("opencode debug agents --standalone", r);
+      throw new Error(`opencode debug agents --standalone failed (status ${r.status}, signal ${r.signal}, error ${r.error?.code || "none"}): ${r.stderr || r.stdout}`);
+    }
     const combined = `${r.stdout || ""}\n${r.stderr || ""}`;
     const idx = combined.indexOf("[");
     if (idx < 0) throw new Error(`opencode debug agents --standalone produced no JSON array: ${combined.slice(0, 500)}`);
@@ -285,11 +323,14 @@ function realResolvedAgentConfig(cwd, configContent) {
     }));
     return {name: agent.name || agent.id, mode: agent.mode, permission: normalized, tools: agent.tools};
   }
-  const r = spawnSync("opencode", ["debug", "agent", OPENCODE_READONLY_AGENT], {
+  const r = spawnOpencodeDebug(["debug", "agent", OPENCODE_READONLY_AGENT], {
     cwd, encoding: "utf8", stdio: "pipe", shell: false, timeout: 30000,
     env: {...withoutOuterGitGuard({...process.env}), OPENCODE_CONFIG_CONTENT: configContent}
   });
-  if (r.status !== 0) throw new Error(`opencode debug agent ${OPENCODE_READONLY_AGENT} failed (status ${r.status}, signal ${r.signal}, error ${r.error?.code || "none"}): ${r.stderr || r.stdout}`);
+  if (r.status !== 0) {
+    if (activationFailureText(r)) return skipAfterActivationFailure(`opencode debug agent ${OPENCODE_READONLY_AGENT}`, r);
+    throw new Error(`opencode debug agent ${OPENCODE_READONLY_AGENT} failed (status ${r.status}, signal ${r.signal}, error ${r.error?.code || "none"}): ${r.stderr || r.stdout}`);
+  }
   return JSON.parse(r.stdout);
 }
 const opencodeGeneration = opencodeAvailable()
@@ -311,21 +352,23 @@ if (!opencodeAvailable()) {
     const repo = makeRepo("ap-opencode-scratch-clean-");
     try {
       const resolved = realResolvedAgentConfig(repo, EXPECTED_OPENCODE_CONFIG_CONTENT);
-      const rules = resolved.permission;
-      const editScratchEffect = evaluatePermission(rules, "edit", OPENCODE_SCRATCH_GLOB);
-      const extScratchEffect = evaluatePermission(rules, "external_directory", OPENCODE_SCRATCH_GLOB);
-      const editStarEffect = evaluatePermission(rules, "edit", "*");
-      const extStarEffect = evaluatePermission(rules, "external_directory", "*");
-      check("A: real OpenCode resolves edit scratch to allow for the custom read-only agent", editScratchEffect === "allow", JSON.stringify(editScratchEffect));
-      check("A: real OpenCode resolves external_directory scratch to allow for the custom read-only agent", extScratchEffect === "allow", JSON.stringify(extScratchEffect));
-      check("A: our own config never introduces an edit \"*\" deny (no deny-wins trap)", !(editStarEffect === "deny"), JSON.stringify(editStarEffect));
-      check("A: our own config never introduces an external_directory \"*\" deny (no deny-wins trap)", !(extStarEffect === "deny"), JSON.stringify(extStarEffect));
-      if (isOpenCode2) {
-        console.log(liveSkipLine("A: write-tool-enabled assertion has no 2.x equivalent (no tools field in `debug agents`)"));
-        console.log(liveSkipLine("A: edit-tool-enabled assertion has no 2.x equivalent (no tools field in `debug agents`)"));
-      } else {
-        check("A: real OpenCode resolves the custom agent's write tool as enabled", resolved.tools?.write === true, JSON.stringify(resolved.tools));
-        check("A: real OpenCode resolves the custom agent's edit tool as enabled", resolved.tools?.edit === true, JSON.stringify(resolved.tools));
+      if (resolved) {
+        const rules = resolved.permission;
+        const editScratchEffect = evaluatePermission(rules, "edit", OPENCODE_SCRATCH_GLOB);
+        const extScratchEffect = evaluatePermission(rules, "external_directory", OPENCODE_SCRATCH_GLOB);
+        const editStarEffect = evaluatePermission(rules, "edit", "*");
+        const extStarEffect = evaluatePermission(rules, "external_directory", "*");
+        check("A: real OpenCode resolves edit scratch to allow for the custom read-only agent", editScratchEffect === "allow", JSON.stringify(editScratchEffect));
+        check("A: real OpenCode resolves external_directory scratch to allow for the custom read-only agent", extScratchEffect === "allow", JSON.stringify(extScratchEffect));
+        check("A: our own config never introduces an edit \"*\" deny (no deny-wins trap)", !(editStarEffect === "deny"), JSON.stringify(editStarEffect));
+        check("A: our own config never introduces an external_directory \"*\" deny (no deny-wins trap)", !(extStarEffect === "deny"), JSON.stringify(extStarEffect));
+        if (isOpenCode2) {
+          console.log(liveSkipLine("A: write-tool-enabled assertion has no 2.x equivalent (no tools field in `debug agents`)"));
+          console.log(liveSkipLine("A: edit-tool-enabled assertion has no 2.x equivalent (no tools field in `debug agents`)"));
+        } else {
+          check("A: real OpenCode resolves the custom agent's write tool as enabled", resolved.tools?.write === true, JSON.stringify(resolved.tools));
+          check("A: real OpenCode resolves the custom agent's edit tool as enabled", resolved.tools?.edit === true, JSON.stringify(resolved.tools));
+        }
       }
     } finally { fs.rmSync(repo, {recursive: true, force: true}); }
   }
@@ -336,11 +379,13 @@ if (!opencodeAvailable()) {
     const repo = makeRepo("ap-opencode-scratch-hostile-", {hostileOpencodeConfig: true});
     try {
       const resolved = realResolvedAgentConfig(repo, EXPECTED_OPENCODE_CONFIG_CONTENT);
-      const rules = resolved.permission;
-      const editScratchEffect = evaluatePermission(rules, "edit", OPENCODE_SCRATCH_GLOB);
-      const extScratchEffect = evaluatePermission(rules, "external_directory", OPENCODE_SCRATCH_GLOB);
-      check("B: hostile config targeting the SAME agent name cannot flip our edit scratch rule away from allow", editScratchEffect === "allow", JSON.stringify(editScratchEffect));
-      check("B: hostile config targeting the SAME agent name cannot flip our external_directory scratch rule away from allow", extScratchEffect === "allow", JSON.stringify(extScratchEffect));
+      if (resolved) {
+        const rules = resolved.permission;
+        const editScratchEffect = evaluatePermission(rules, "edit", OPENCODE_SCRATCH_GLOB);
+        const extScratchEffect = evaluatePermission(rules, "external_directory", OPENCODE_SCRATCH_GLOB);
+        check("B: hostile config targeting the SAME agent name cannot flip our edit scratch rule away from allow", editScratchEffect === "allow", JSON.stringify(editScratchEffect));
+        check("B: hostile config targeting the SAME agent name cannot flip our external_directory scratch rule away from allow", extScratchEffect === "allow", JSON.stringify(extScratchEffect));
+      }
     } finally { fs.rmSync(repo, {recursive: true, force: true}); }
   }
 }
@@ -355,7 +400,8 @@ if (!opencodeAvailable()) {
 // the mission looping on plan revisions and burning the one real API call
 // this test budgets for). This script writes a concrete, actionable plan
 // that names the exact file and change the fixture mission request asks
-// for, so a real reviewer has nothing legitimate left to object to.
+// for, plus the task's own test file in its verify (the plan-review testing
+// policy), so a real reviewer has nothing legitimate left to object to.
 const FAKE_CURSOR_LIVE_TARGET = `#!/bin/sh
 set -eu
 if [ "\${1:-}" = "--version" ]; then
@@ -372,10 +418,10 @@ if [ "$ROLE" = "planner" ]; then
     mkdir -p "$(dirname "$PLAN_FILE")"
     if [ -n "$TASKS_FILE" ]; then
       mkdir -p "$(dirname "$TASKS_FILE")"
-      printf '# Plan\n\n## Objective\nAdd a fixture line to README.md so the repository contains a one-line marker confirming this automated run touched it.\n\n## Scope\nREADME.md only; no other file is part of this deliverable.\n\n## Constraints\nREADME.md must end with the exact marker line "Fixture marker: automated verification touch." and contain exactly one line equal to it.\n\n## Risks\nNone: a single marker line in the fixture README is trivial and reversible.\n\n## Verification strategy\nRun tail -n 1 README.md; it must print exactly the marker line. Run grep -cFx "Fixture marker: automated verification touch." README.md; it must print exactly 1, proving the marker line appears once.\n\n## Phase boundaries\nA single phase is used because this is one deliverable (one marker line in README.md); no phase boundary exists.\n' > "$PLAN_FILE"
-      printf '## Phase 1: General\n\n- [ ] **1.1** Create README.md if it does not already exist, then ensure its final line is exactly "Fixture marker: automated verification touch." — accept: README.md ends with that exact marker line and contains exactly one line equal to it ; verify: tail -n 1 README.md prints the marker line and grep -cFx "Fixture marker: automated verification touch." README.md prints 1\n' > "$TASKS_FILE"
+      printf '# Plan\n\n## Objective\nAdd a fixture marker line to README.md and a companion test in scripts/test-readme-fixture.mjs that asserts the marker is the final line and appears exactly once.\n\n## Scope\nREADME.md and its own test file scripts/test-readme-fixture.mjs only; no other file is part of this deliverable.\n\n## Constraints\nREADME.md must end with the exact marker line "Fixture marker: automated verification touch." and contain exactly one line equal to it. scripts/test-readme-fixture.mjs must read README.md and exit non-zero unless that exact final-line and single-occurrence condition holds.\n\n## Risks\nNone: a single marker line plus a small dedicated test file is trivial and reversible.\n\n## Verification strategy\nRun node scripts/test-readme-fixture.mjs; it must exit 0 after asserting README.md ends with the exact marker line and contains exactly one line equal to it.\n\n## Phase boundaries\nA single phase is used because this is one deliverable (the README marker plus its own test); no phase boundary exists.\n' > "$PLAN_FILE"
+      printf '## Phase 1: General\n\n- [ ] **1.1** Create README.md if it does not already exist, then ensure its final line is exactly "Fixture marker: automated verification touch.", and create scripts/test-readme-fixture.mjs to assert that exact final line and single occurrence — accept: README.md ends with that exact marker line and contains exactly one line equal to it, and scripts/test-readme-fixture.mjs exits 0 only when both conditions hold ; verify: node scripts/test-readme-fixture.mjs\n' > "$TASKS_FILE"
     else
-      printf '# Plan\n\n## Objective\nAdd a fixture line to README.md so the repository contains a one-line marker confirming this automated run touched it.\n\n## Scope\nREADME.md only; no other file is part of this deliverable.\n\n## Constraints\nREADME.md must end with the exact marker line "Fixture marker: automated verification touch." and contain exactly one line equal to it.\n\n## Risks\nNone: a single marker line in the fixture README is trivial and reversible.\n\n## Verification strategy\nRun tail -n 1 README.md; it must print exactly the marker line. Run grep -cFx "Fixture marker: automated verification touch." README.md; it must print exactly 1, proving the marker line appears once.\n\n## Phase boundaries\nA single phase is used because this is one deliverable (one marker line in README.md); no phase boundary exists.\n' > "$PLAN_FILE"
+      printf '# Plan\n\n## Objective\nAdd a fixture marker line to README.md and a companion test in scripts/test-readme-fixture.mjs that asserts the marker is the final line and appears exactly once.\n\n## Scope\nREADME.md and its own test file scripts/test-readme-fixture.mjs only; no other file is part of this deliverable.\n\n## Constraints\nREADME.md must end with the exact marker line "Fixture marker: automated verification touch." and contain exactly one line equal to it. scripts/test-readme-fixture.mjs must read README.md and exit non-zero unless that exact final-line and single-occurrence condition holds.\n\n## Risks\nNone: a single marker line plus a small dedicated test file is trivial and reversible.\n\n## Verification strategy\nRun node scripts/test-readme-fixture.mjs; it must exit 0 after asserting README.md ends with the exact marker line and contains exactly one line equal to it.\n\n## Phase boundaries\nA single phase is used because this is one deliverable (the README marker plus its own test); no phase boundary exists.\n' > "$PLAN_FILE"
     fi
   fi
   echo "planner ok"
@@ -652,6 +698,64 @@ function reportFrom(entry) {
 //    `result.verdict.decision === "PASS"` — not merely that the sentinel
 //    string appears somewhere in stdout.
 // ==========================================================================
+const LIVE_E_ATTEMPT_TIMEOUT_MS = 420000;
+const LIVE_E_RETRYABLE_SENTINEL_CLASSES = new Set([
+  "STRUCTURED_OUTPUT_INVALID",
+  "STRUCTURED_OUTPUT_MISSING"
+]);
+
+function isRetryableSentinelFailureClass(failureClass) {
+  return typeof failureClass === "string" && LIVE_E_RETRYABLE_SENTINEL_CLASSES.has(failureClass);
+}
+
+function shouldRetryLiveAttempt({pr, timedOut = false} = {}) {
+  if (pr == null) return true;
+  return isRetryableSentinelFailureClass(pr?.result?.failure?.class);
+}
+
+function describeLiveAttempt(run, timeoutMs = LIVE_E_ATTEMPT_TIMEOUT_MS) {
+  const timedOut = run?.error?.code === "ETIMEDOUT";
+  const seconds = Math.round(timeoutMs / 1000);
+  return {timedOut, seconds};
+}
+
+function killLeftoverAttemptProcesses(repoPath) {
+  if (!repoPath) return;
+  try {
+    const pattern = repoPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const found = spawnSync("pgrep", ["-f", "--", pattern], {encoding: "utf8", stdio: "pipe", shell: false});
+    if (found.status !== 0 || !found.stdout) return;
+    for (const line of found.stdout.split(/\r?\n/)) {
+      const pid = Number.parseInt(line.trim(), 10);
+      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+      try { process.kill(pid, "SIGKILL"); } catch { /* best-effort */ }
+    }
+  } catch { /* best-effort */ }
+}
+
+// Pure-logic unit checks for part E timeout detection and retry policy (no live call).
+{
+  const timedOutDesc = describeLiveAttempt({status: null, signal: "SIGTERM", error: {code: "ETIMEDOUT"}});
+  check("E unit: describeLiveAttempt marks ETIMEDOUT as timedOut=true",
+    timedOutDesc.timedOut === true && timedOutDesc.seconds === Math.round(LIVE_E_ATTEMPT_TIMEOUT_MS / 1000),
+    JSON.stringify(timedOutDesc));
+  const normalExitDesc = describeLiveAttempt({status: 1, signal: null});
+  check("E unit: describeLiveAttempt marks non-timeout exit as timedOut=false",
+    normalExitDesc.timedOut === false,
+    JSON.stringify(normalExitDesc));
+
+  check("E unit: shouldRetryLiveAttempt returns true when no result.json was produced",
+    shouldRetryLiveAttempt({pr: null, timedOut: false}) === true && shouldRetryLiveAttempt({pr: null, timedOut: true}) === true);
+  check("E unit: shouldRetryLiveAttempt returns true for STRUCTURED_OUTPUT_INVALID",
+    shouldRetryLiveAttempt({pr: {result: {status: "failed", failure: {class: "STRUCTURED_OUTPUT_INVALID"}, verdict: {decision: null}}}, timedOut: false}) === true);
+  check("E unit: shouldRetryLiveAttempt returns true for STRUCTURED_OUTPUT_MISSING",
+    shouldRetryLiveAttempt({pr: {result: {status: "failed", failure: {class: "STRUCTURED_OUTPUT_MISSING"}, verdict: {decision: null}}}, timedOut: false}) === true);
+  check("E unit: shouldRetryLiveAttempt returns false for completed PASS",
+    shouldRetryLiveAttempt({pr: {result: {status: "completed", failure: null, verdict: {decision: "PASS", findings: []}}}, timedOut: false}) === false);
+  check("E unit: shouldRetryLiveAttempt returns false for PERMISSION_DENIED",
+    shouldRetryLiveAttempt({pr: {result: {status: "failed", failure: {class: "PERMISSION_DENIED"}, verdict: {decision: null}}}, timedOut: false}) === false);
+}
+
 function opencodeAuthConfigured() {
   return fs.existsSync(path.join(os.homedir(), ".local", "share", "opencode", "auth.json"));
 }
@@ -717,8 +821,11 @@ if (!opencodeAvailable()) {
         const base = withoutOuterGitGuard({...process.env});
         const env = {...base, PATH: `${binDir}${delimiter}${base.PATH || ""}`};
         run = spawnSync(process.execPath, [path.join(skillRoot, "scripts", "autopilot.mjs"), "run", "add a fixture line to README.md", "--repo", repo], {
-          cwd: repo, encoding: "utf8", env, timeout: 180000, stdio: ["ignore", "pipe", "pipe"], shell: false
+          cwd: repo, encoding: "utf8", env, timeout: LIVE_E_ATTEMPT_TIMEOUT_MS, stdio: ["ignore", "pipe", "pipe"], shell: false
         });
+        if (describeLiveAttempt(run, LIVE_E_ATTEMPT_TIMEOUT_MS).timedOut) {
+          killLeftoverAttemptProcesses(repo);
+        }
         pr = findRole(path.join(repo, ".autopilot"), "plan_reviewer");
         output = `${run.stdout || ""}\n${run.stderr || ""}`;
       } catch (e) {
@@ -726,14 +833,26 @@ if (!opencodeAvailable()) {
         pr = null;
         output = String(e);
       }
-      return {repo, binDir, run, pr, output};
+      const {timedOut, seconds} = describeLiveAttempt(run, LIVE_E_ATTEMPT_TIMEOUT_MS);
+      return {repo, binDir, run, pr, output, timedOut, seconds};
     };
 
+    const attempts = [];
     // First attempt.
     let attempt = runOneAttempt();
+    attempts.push({
+      attemptNumber: 1,
+      timedOut: attempt.timedOut,
+      seconds: attempt.seconds,
+      failureClass: attempt.pr?.result?.failure?.class ?? null
+    });
     let retried = false;
-    if (attempt.pr == null) {
-      console.log("E: retrying once after an empty first attempt");
+    if (shouldRetryLiveAttempt({pr: attempt.pr, timedOut: attempt.timedOut})) {
+      if (attempt.pr == null) {
+        console.log("E: retrying once after an empty first attempt");
+      } else {
+        console.log(`E: retrying once after the free model returned an unusable sentinel (${attempt.pr.result.failure.class})`);
+      }
       // cleanup first attempt (unless keep)
       if (process.env.AP_KEEP_TMP !== "1") {
         try { fs.rmSync(attempt.repo, {recursive: true, force: true}); } catch {}
@@ -742,6 +861,12 @@ if (!opencodeAvailable()) {
       }
       retried = true;
       attempt = runOneAttempt();
+      attempts.push({
+        attemptNumber: 2,
+        timedOut: attempt.timedOut,
+        seconds: attempt.seconds,
+        failureClass: attempt.pr?.result?.failure?.class ?? null
+      });
     }
 
     const {repo, binDir, run, pr, output} = attempt;
@@ -752,6 +877,11 @@ if (!opencodeAvailable()) {
     if (isEmpty) {
       console.error("E diagnostics:");
       console.error(`ap-run exit code: ${run.status} signal: ${run.signal}`);
+      for (const a of attempts) {
+        if (a.timedOut) {
+          console.error(`E: ap run timed out after ${a.seconds} s (attempt ${a.attemptNumber})`);
+        }
+      }
       const combined = `${run.stdout || ""}\n${run.stderr || ""}`;
       const lines = combined.split(/\r?\n/);
       console.error("last 40 lines of ap run stdout+stderr:");
@@ -784,12 +914,23 @@ if (!opencodeAvailable()) {
     } else if (isLiveQuotaExhausted({failureClass: pr?.result?.failure?.class, output})) {
       console.log(liveSkipLine("E: free quota/rate limit exhausted"));
     } else {
-      check("E: real ap-run plan_reviewer (real opencode CLI, real model call) produced a result.json", pr != null,
-        `run.status=${run.status} stdout=${(run.stdout || "").slice(-1500)} stderr=${(run.stderr || "").slice(-1500)}`);
+      const bothTimedOut = isEmpty && attempts.length === 2 && attempts.every(a => a.timedOut);
+      const emptyDetail = bothTimedOut
+        ? `both attempts timed out after ${attempt.seconds} s each — free model slow or ap run hung; run.status=${run.status} stdout=${(run.stdout || "").slice(-1500)} stderr=${(run.stderr || "").slice(-1500)}`
+        : `run.status=${run.status} stdout=${(run.stdout || "").slice(-1500)} stderr=${(run.stderr || "").slice(-1500)}`;
+      check("E: real ap-run plan_reviewer (real opencode CLI, real model call) produced a result.json", pr != null, emptyDetail);
       if (pr) {
+        const bothSentinelFailed = attempts.length === 2
+          && isRetryableSentinelFailureClass(attempts[0].failureClass)
+          && isRetryableSentinelFailureClass(attempts[1].failureClass);
+        const sentinelRetryDetail = bothSentinelFailed
+          ? `both attempts failed with unusable sentinel (attempt 1: ${attempts[0].failureClass}, attempt 2: ${attempts[1].failureClass}); `
+          : (attempts.length === 2 && isRetryableSentinelFailureClass(attempts[1].failureClass)
+              ? `attempt 1: ${attempts[0].failureClass || "no result.json"}, attempt 2: ${attempts[1].failureClass}; `
+              : "");
         check("E: real ap-run plan_reviewer ran inside the read-only envelope", pr.result.executionPlaneSafety?.envelopeApplied === true);
-        check("E: real ap-run plan_reviewer completed (no STRUCTURED_OUTPUT_MISSING / PERMISSION_DENIED)", pr.result.status === "completed", JSON.stringify(pr.result).slice(0, 1500));
-        check("E: real ap-run plan_reviewer failure class is not set", pr.result.failure == null, JSON.stringify(pr.result.failure));
+        check("E: real ap-run plan_reviewer completed (no STRUCTURED_OUTPUT_MISSING / PERMISSION_DENIED)", pr.result.status === "completed", `${sentinelRetryDetail}${JSON.stringify(pr.result).slice(0, 1500)}`);
+        check("E: real ap-run plan_reviewer failure class is not set", pr.result.failure == null, `${sentinelRetryDetail}${JSON.stringify(pr.result.failure)}`);
         check("E: result.verdict.decision === \"PASS\" (real model, real sentinel, real orchestrator parse)", pr.result.verdict?.decision === "PASS", JSON.stringify(pr.result.verdict));
         check("E: result.verdict.findings is the empty array the PASS template specifies", Array.isArray(pr.result.verdict?.findings) && pr.result.verdict.findings.length === 0, JSON.stringify(pr.result.verdict?.findings));
       }

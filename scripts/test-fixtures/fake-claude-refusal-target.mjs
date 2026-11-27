@@ -48,6 +48,17 @@ process.stdin.on("end", () => {
   if (shouldRefuse) {
     process.stdout.write(JSON.stringify({type: "item.completed", item: {type: "command_execution", command: LINKED_COMMAND, status: "completed", exit_code: 1}}) + "\n");
   }
-  process.stdout.write(JSON.stringify({type: "agent_message", text: "AUTOPILOT_REVIEW=" + JSON.stringify({decision: "PASS", findings: []})}) + "\n");
+  let previous;
+  if (role === "code_reviewer") {
+    const m = stdin.match(/(?:FEEDBACK TO ADDRESS|Unconfirmed earlier findings):\r?\n([\s\S]*?)(?:\r?\n\r?\n|$)/);
+    if (m) {
+      const items = m[1].split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+        .map(l => l.replace(/^\d+\.\s*/, ""))
+        .map(f => ({finding: f, status: "fixed"}));
+      if (items.length) previous = items;
+    }
+  }
+  const payload = previous ? {decision: "PASS", findings: [], previous} : {decision: "PASS", findings: []};
+  process.stdout.write(JSON.stringify({type: "agent_message", text: "AUTOPILOT_REVIEW=" + JSON.stringify(payload)}) + "\n");
   process.exit(0);
 });

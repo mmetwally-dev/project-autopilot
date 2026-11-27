@@ -154,7 +154,7 @@ its output to the mission's `orchestrator.log`.
 
 ### Other ways to install
 
-- **Update:** run the same `npm install -g …` command again.
+- **Update:** run the same `npm install -g …` command again. `ap` checks npm for a newer version at most once a day in the background and prints a one-line notice; set `AP_NO_UPDATE_CHECK=1` to turn it off (also off in CI and when output is not a terminal).
 - **Remove the CLI:** `npm uninstall -g project-autopilot`. To remove Autopilot from
   one project instead, run `ap uninstall` there (see [Commands](#commands)).
 - **Latest code from GitHub:** `npm install -g github:mmetwally-dev/project-autopilot`.
@@ -212,7 +212,11 @@ verify it, for example:
 
 The read-only plan reviewer then reads the plan against the request and the
 code. If it finds problems (verdict **DENIED**), the planner revises and the
-reviewer looks again, up to `retries.plan_revisions` rounds (default 8). A
+reviewer looks again, up to `retries.plan_revisions` rounds (default 8). With
+convergence on (`workflow.plan_review_rounds_converge`, default true), a PASS
+that only re-checked the fixes gets one fresh full confirmation review; if that
+confirmation fails, every later round is a full review that also re-checks the
+previous findings, so its PASS is accepted without another confirmation. A
 revision cut off by its cap goes back to the reviewer only when its own hand-off
 note says every finding is done; otherwise a new planner session continues it.
 Untracked git-ignored files that tools write during planning (for example
@@ -225,14 +229,26 @@ duplicates, conflicts with the request). An
 **APPROVED** plan moves on to coding. With `ap run --stage planning` the mission
 stops here so you can read the plan first.
 
+The plan reviewer also checks that every external tool a task needs (`docker`,
+`supabase`, `psql`, `pg_dump`, ...) is available inside the agent sandbox; a
+missing tool is a blocking finding unless the task is marked `[manual]`.
+`[manual]` tasks are skipped by the mission and listed in `REPORT.md` and the
+WATCH-REPORT for you to do by hand (`safety.allow_docker` makes docker
+available, see [Configuration](docs/configuration.md)). `ap setup` and
+`ap config` offer the project's type-check and lint scripts as gate commands,
+and the plan review flags a plan that claims a lint/type-check gate the config
+does not run.
+
 ### 2. Implementation, phase by phase
 
 For each phase:
 
 1. **Implementer** — each task runs in its own fresh session. If a task hits
-   its turn or token cap, the implementer writes a hand-off note
-   (`handoff/<task>.md`: what is done, what is next) and a new session continues
-   from it, up to `caps.implementer.extra_sessions` more sessions (default 5).
+   its turn or token cap, the same CLI session is resumed for one short turn that
+   only writes a hand-off note (`handoff/<task>.md`: what is done, what is next);
+   the turn is skipped if the note is fresh, and if the session cannot be
+   resumed or the turn fails, Autopilot writes a fallback note itself. A new
+   session then continues from the note, up to `caps.implementer.extra_sessions` more sessions (default 5).
    If a role's first turn alone is over its token cap (the brief is too big),
    Autopilot stops with a clear message instead of starting new sessions that
    would be cut off the same way.
@@ -240,7 +256,9 @@ For each phase:
    DENIED, only the tasks named by the findings are re-run with the findings
    attached, and the reviewer then checks just its earlier findings plus the fix.
    A finding in a file that a task from an earlier phase wrote gets one targeted
-   repair of that task, not a re-run of every task in the current phase.
+   repair of that task, not a re-run of every task in the current phase (also
+   when several earlier tasks wrote that file). Reviewers list every place the
+   same defect occurs, and the implementer fixes the pattern everywhere.
    Manual-check notes (browser, network) are kept as notes, not findings.
    A large diff is not pasted into the reviewer's or verifier's brief: the brief
    lists the changed files with line counts and the full diff is saved to a file
@@ -250,9 +268,39 @@ For each phase:
    for example `npm test`). If tests fail, it re-runs them against the code as it
    was before the phase: tests that also failed before are not blamed on this
    phase; new failures go back to the implementer as a fix round.
+   If your tests need a running app, set `tests.app_server` (`ap setup` / `ap config`
+   suggest a start command from your `package.json` `dev` / `start` script): the gate
+   starts it on a free port, waits until it answers, opens the warm-up pages once,
+   runs the test commands with `APP_BASE_URL` and `PORT` set, and always stops it
+   afterwards (also on `ap stop`). Values from its `env_file` go to the server only,
+   never to briefs, logs or reports. The server starts inside its own closed network
+   namespace (loopback only); the gate commands join that same namespace, so they
+   reach `APP_BASE_URL` while the network stays closed to everything else. After a
+   passing gate the server stays up for the verifier run of the same phase (the brief
+   gets `APP_BASE_URL` and a line that the server is running) and is stopped when
+   the verifier ends, however it ends. Optional `tests.app_server.allow_hosts`
+   (for example your Supabase and PowerSync domains) runs the server on the host network instead,
+   with the gate commands and browser still closed in the namespace behind a socket bridge
+   (and an allowlisting HTTP CONNECT proxy that opens only `allow_hosts` on port 443 to the verifier's browser; email-inbox flows stay manual checks).
 4. **Verifier** — the read-only verifier checks every task of the phase against
    its acceptance line, using the gate's results as evidence, and only then
-   ticks the tasks done in `TASKS.md`. Browser tasks can be checked with Playwright.
+   ticks the tasks done in `TASKS.md`. When `tests.app_server` is up and
+   Playwright + Chromium are installed (checked by `ap setup` / `ap config`, no
+   download during missions), the verifier runs its Playwright check script
+   through the approved `ap-browser-check <script.mjs>` wrapper inside the
+   read-only sandbox and the server's isolated network namespace (`--no-sandbox`,
+   headless). Test credential variable names from `tests.app_server.env_file` are
+   listed in the brief while their values exist only in the wrapper's environment
+   (never echoed). The wrapper records the exit code and output and saves the
+   script, one screenshot per checked page (`.png`), a Playwright trace
+   (`trace.zip`) and a video (`.webm`) into `<runDir>/browser-check/`. A browser
+   PASS is accepted only when `ap-browser-check` actually ran and left the saved
+   script and at least one screenshot; without that proof, the browser check
+   counts as not done and is recorded in `MANUAL-CHECKS.md`. Watch the run
+   afterwards with `npx playwright show-trace <runDir>/browser-check/trace.zip`,
+   the saved `.webm` video or the `.png` screenshots. Screenshots are always
+   kept; videos and traces are kept for the last verifier run of each phase and
+   for failed runs, and are deleted automatically 3 days after recording.
 
 A failed review or verification sends the work back to the implementer. Each
 kind of failure has its own budget (`retries.implementation`,
@@ -265,7 +313,7 @@ When every phase has passed, the code reviewer reads the whole mission's
 change once more. With a spec (standalone `SPEC.md` or SpecKit `spec.md`) it
 also checks every FR against the code and says where it is implemented; a
 missing or half-built FR is a finding. Findings get up to `retries.final_review_fix_rounds` fix
-rounds (default 2). If the final reviewer runs out of turns or context before
+rounds (default 3). If the final reviewer runs out of turns or context before
 it decides, it continues in a new session from its hand-off note, like a phase
 review, instead of failing; only items it really found wrong go to the fix
 rounds, and each fix-round session has the same limits as a phase task. If you
@@ -304,7 +352,7 @@ The messages name the exact command when one is needed, for example
 
 - **Escalation model.** The planner and implementer can have a stronger
   `escalation_model`. If a reviewer reports the same finding as *not fixed*
-  `retries.escalate_after_not_fixed` times in a row (default 2), the next fix
+  `retries.escalate_after_not_fixed` times in a row (default 3), the next fix
   round runs on the escalation model, once per scope, then the role returns to
   its normal model.
 - **Last attempts on the escalation model.** When a phase has 2 attempts left
@@ -312,7 +360,12 @@ The messages name the exact command when one is needed, for example
   `retries.verification`, default 5), the implementer switches to its
   `escalation_model` and stays on it until the phase passes or the budget runs
   out. The counter is not reset. This catches fixes that keep closing one
-  finding and opening another, which never trip the "not fixed twice" rule.
+  finding and opening another, which never trip the "not fixed 3 times" rule.
+- **Escalation model unavailable.** If the escalation model's adapter fails on
+  infrastructure or adapter errors (e.g. CLI down or service outage), the
+  mission does not stop; that fix round falls back to the role's normal model
+  (or its active fallbacks) with a logged switch (`escalation model unavailable → back to <model>`)
+  displayed in the WATCH-REPORT NOTE column.
 - **No-progress stop.** A continuation session that changes no project file is
   "no progress". After `retries.no_progress_sessions` of them in a row
   (default 2) the task stops early instead of using up all its sessions. If the
@@ -329,6 +382,17 @@ The messages name the exact command when one is needed, for example
   not fail it for needing the network; the command to run it goes to
   `MANUAL-CHECKS.md` for you. Network use the task did not ask for is still a
   finding.
+- **Network outage.** A run that fails because the provider cannot be reached
+  (DNS failure, connection refused/reset, "Can't reach the API server", ...)
+  uses no retry budget and does not switch models: the same role re-runs after
+  a 30 s / 60 s / 2 min / 5 min backoff, up to `advanced.network_wait_minutes`
+  (default 60), then escalates with "network unavailable for <n> min".
+- **Rate-limit reset.** A `RATE_LIMITED` run whose provider reports a reset time
+  within `advanced.rate_limit_wait_max_minutes` (default 60) waits for the reset
+  and re-runs the same session instead of escalating.
+- **Logged-out CLI.** A CLI that is logged out (claude, opencode, agy, codex)
+  stops the mission as `AUTH_REQUIRED` with the fix in the message, for example
+  "agy is logged out — run `agy` and log in" or "run `codex login`".
 - **Hung sessions.** A session that prints nothing, runs nothing and writes
   nothing for `time_limits.silent_run_minutes` (default 10) is stopped as
   `IDLE_HANG`; a provider rate-limit storm is caught as `RATE_LIMITED`. Both count
@@ -385,6 +449,7 @@ Every command takes `--repo <path>`; the default is the current folder.
 | `ap cancel ["<reason>"] [--yes] [--dry-run]` | End the mission for good (stops a live run first) |
 | `ap reset [--scope <key>]` | Give spent retry counters a fresh start |
 | `ap rebase [--note "<why>"] [--yes]` | Accept your own edits made while a mission was paused |
+| `ap note "<decision>" [--yes]` / `ap note --clear` | Give the mission a binding decision (planner and reviewers included); works while it runs |
 | `ap finding list` / `ap finding drop <n> [--note "<why>"] [--yes]` | List the current review findings / drop one you disagree with |
 | `ap config [--role <role>]` | Change roles, models, the test command and other options interactively |
 | `ap config show [--path <key.path>] [--explain]` | Print the effective settings, each marked `[default]` or `[from config.json]`; `--explain` adds a one-line explanation under each setting |
@@ -498,9 +563,9 @@ failures exit 1.
 findings and the `--cmd` evidence), plus `cmd-evidence.txt` when `--cmd` was used.
 The agent run's own files are in a `NN-<role>-<id8>/` subfolder named in the summary.
 
-## Mission control: stop, cancel, reset, rebase, finding
+## Mission control: stop, cancel, reset, rebase, note, finding
 
-Five operator-only commands act on the **active** mission. Every one records
+Six operator-only commands act on the **active** mission. Every one records
 what it did in `state.json` and in the WATCH-REPORT, so the history stays readable.
 
 | You want to… | Use |
@@ -509,6 +574,7 @@ what it did in `state.json` and in the WATCH-REPORT, so the history stays readab
 | give up on this mission | `ap cancel` |
 | retry after a budget ran out | `ap reset`, then `ap run` |
 | keep your own edits made during a pause | `ap rebase --note "<why>"`, then `ap run` |
+| settle a design question for the planner and reviewers | `ap note "<decision>"` |
 | reject a review finding you disagree with | `ap finding list`, `ap finding drop <n>` |
 
 ```bash
@@ -563,6 +629,7 @@ more chance without starting over:
     hand-off note, which is the useful context for the next session. After a
     "did not converge" stop, a bare `ap reset` targets that task automatically;
   - `standalone-plan-revision`, the plan review round counter;
+  - `speckit-stage:<stage>`, one SpecKit gate's revision counter (spec, plan or tasks);
   - `fallback:<role>`, to drop a role's sticky fallback model and go back to its primary.
 
 While a mission is **stopped**, the reset applies at once. While a mission is
@@ -584,6 +651,17 @@ is shown to the next implementer and reviewer as
 `Operator note: … (from ap rebase)`. The stage position does not change. It
 refuses while a run is live; with no drift it still re-bases the baseline, or
 prints `nothing to rebase`.
+
+### `ap note "<decision>"` — decide for the planner and reviewers
+
+Use it when a spec or plan review keeps circling on a design you have already
+decided against. The decision is added to every later planner, reviewer,
+implementer and verifier brief as `Operator decisions (binding — …)`, with the
+date, and is listed in the WATCH-REPORT. Reviewers judge the work against it,
+never against the alternatives it rules out. It works while a run is live (it is
+queued and applied at the run's next brief). `ap note --clear` removes all
+decisions; `ap cancel` or a new mission drops them too. Confirms `y/N` unless
+`--yes`.
 
 ### `ap finding list` / `ap finding drop <n>` — reject a finding
 
@@ -626,7 +704,8 @@ GATE (orchestrator)        -                         T1.1 > T1.7  PASS       00:
   **CONTEXT** — the largest context the session reached. **TURNS** — model turns.
   `-` means the CLI reports no usage.
 - **NOTE** — the session number, the number of findings, and warnings such as
-  `⚠ high usage` (over the role's cap).
+  `⚠ high usage` (over the role's cap). A run on the escalation model says why,
+  e.g. `escalated: <model> → sonnet (verification budget 2/4, last 2 fix rounds)`.
 
 The same folder has `orchestrator.log` (the full log), `gates/` (each gate's
 output), `handoff/` (hand-off notes), `phase-briefs/` and `runs/` (each agent
@@ -692,9 +771,12 @@ Every limit is a setting; see the [Configuration reference](docs/configuration.m
 for all of them with their defaults.
 
 - **Caps (per session):** `caps.<role>.max_turns`, `max_tokens` and
-  `wrap_up_at_tokens`. Near the token cap the role is told to wrap up and write
-  its hand-off; at the cap the session ends and `extra_sessions` decides whether
-  a fresh session continues. `caps.mission_token_backstop` (default 6M tokens)
+  `wrap_up_at_tokens`. When a role hits its turn cap or `wrap_up_at_tokens`, the
+  session is stopped and the same CLI session is resumed for one short turn
+  that only writes the hand-off note (skipped if the note is already fresh; if
+  the session cannot be resumed or the turn fails, Autopilot writes a fallback
+  note itself). `extra_sessions` then decides whether a fresh session
+  continues from that note. `caps.mission_token_backstop` (default 6M tokens)
   stops a runaway mission. `caps.task_size_target_turns` (default 30) tells the
   planner how big one task may be.
 - **Retries:** plan revisions (8), spec revisions (3), implementation failures (5), verification
@@ -705,7 +787,10 @@ for all of them with their defaults.
   (200, a hard stop for one call; the old name `mission_timeout_minutes` is still
   read and renamed by `ap config fill`), `silent_run_minutes` (10),
   `no_first_output_minutes` (3), `read_only_max_silence_minutes` (15) and
-  `retry_wait_seconds` (60).
+  `retry_wait_seconds` (60). Per-phase review and verifier sessions are sized
+  from earlier measured runs, but the final (whole-mission) review always gets
+  `call_backstop_minutes` (not measured from per-phase reviews) unless a
+  `code_reviewer` entry is set in `role_timeout_minutes`.
 
 ## Safety model
 
@@ -750,6 +835,14 @@ steps (`review-spec`, `review-plan`) to the plan reviewer, and implementation
 is run by Autopilot's own engine, with the same code review, gate and
 verification as standalone. Task files are found with
 `frameworks.speckit.task_files` (default `specs/*/tasks.md` and friends).
+
+When the spec or plan gate spends its revision budget with at most 2 open
+findings and the finding count going down, the gate passes and carries those
+findings to the next stage: its planner may fix them in the earlier files and
+its reviewer fails while any carried finding is still there. The tasks gate
+never carries. Otherwise the gate escalates with the open count and
+`Resume: ap reset --scope speckit-stage:<stage> then ap run`. A gate review
+with no usable verdict gets one verdict-only retry before the gate stops.
 
 **Entering a project that is already planned.** `ap run` first looks at the
 existing SpecKit, GSD or Autopilot state and decides where to start:
@@ -816,6 +909,7 @@ Most-changed settings:
 | --- | --- |
 | `roles.<role>.cli` / `.model` / `.reasoning` | Which agent and model does each job |
 | `tests.gate_commands` | The test commands the gate runs, e.g. `["npm test"]` |
+| `tests.app_server` | An app/dev server the gate starts before the tests and stops afterwards (`start_command`, `ready_url`, `warmup_urls`, `env_file`, `allow_hosts`, ...); off by default |
 | `workflow.plan_review`, `workflow.code_review_per_phase`, `workflow.final_review` | Turn a review stage off (all on by default) |
 | `retries.*` | More or fewer attempts before a mission escalates |
 | `time_limits.role_timeout_minutes` | Longer sessions for a slow test suite |

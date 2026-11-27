@@ -8,7 +8,7 @@
 // rounds of one scope, the NEXT fix round of that role runs on the escalation
 // model and the role then returns to its normal (or active fallback) model.
 // How many consecutive not_fixed reports are required is
-// retries.escalate_after_not_fixed (default 2: the free model gets a second
+// retries.escalate_after_not_fixed (default 3: the free model gets another
 // fix attempt; 1 is the original behaviour). At most
 // one escalation per scope (planner: planning stage; implementer: phase), recorded
 // in s.escalationSwitches[scopeKey] so a restart never repeats it. New
@@ -114,8 +114,8 @@ export function consecutiveNotFixedReports(previous, history, finding) {
 // escalationPending) and returns {role, scopeKey, source, finding, to} or null.
 // `effectiveFrom` is only carried into the result for logging.
 // `minConsecutiveNotFixed` is `retries.escalate_after_not_fixed`: 1 keeps the
-// original behaviour (first not_fixed report escalates); 2 (the default) waits
-// for the same finding to be reported not fixed in two consecutive reviews.
+// original behaviour (first not_fixed report escalates); 3 (the default) waits
+// for the same finding to be reported not fixed in three consecutive reviews.
 export function scheduleEscalation(state, config, { role, scopeKey, source, previous, history = [], round = 2, effectiveFrom = null, minConsecutiveNotFixed = 1 } = {}) {
   // Round 1 has no earlier round to be stuck on.
   if (!(Number(round) >= 2)) return null;
@@ -135,7 +135,7 @@ export function scheduleEscalation(state, config, { role, scopeKey, source, prev
 // The escalation model the role's next run must use, or null.
 export function pendingEscalationModel(state, config, role) {
   const p = state?.escalationPending?.[role];
-  if (!isRecord(p)) return null;
+  if (!isRecord(p) || p.unavailable) return null;
   // Removed from config mid-mission -> no escalation.
   return normalizeEscalationModel(config?.roles?.[role]?.escalation_model);
 }
@@ -171,13 +171,39 @@ export function scheduleNoProgressEscalation(state, config, { role, scopeKey, ta
   const to = normalizeEscalationModel(config?.roles?.[role]?.escalation_model);
   if (!to) return null;
   if (isRecord(state.noProgressEscalations) && state.noProgressEscalations[scopeKey]) return null;
-  state.noProgressEscalations = { ...(isRecord(state.noProgressEscalations) ? state.noProgressEscalations : {}), [scopeKey]: { role, taskId, at: new Date().toISOString() } };
+  state.noProgressEscalations = {
+    ...(isRecord(state.noProgressEscalations) ? state.noProgressEscalations : {}),
+    [scopeKey]: {
+      role,
+      taskId,
+      at: new Date().toISOString(),
+      consecutive,
+      from: displayModel(from),
+      to: displayModel(to)
+    }
+  };
   state.escalationPending = { ...(isRecord(state.escalationPending) ? state.escalationPending : {}), [role]: { scopeKey, to, from: from ?? null, reason: "no_progress" } };
   return { role, to, from: from ?? null, taskId, consecutive };
 }
 
-function displayModel(e) {
+export function displayModel(e) {
+  if (typeof e === "string" && e.trim()) return e.trim();
   return isRecord(e) && e.model ? (String(e.model).startsWith(`${e.adapter}/`) ? e.model : `${e.adapter}/${e.model}`) : "configured model";
+}
+
+export function formatNoProgressStopMessage({ subject, consecutive, limit, contScope, escalation = null } = {}) {
+  const hasEscalationDetail =
+    isRecord(escalation) &&
+    Number.isFinite(escalation.consecutive) &&
+    typeof escalation.from === "string" &&
+    escalation.from.length > 0 &&
+    typeof escalation.to === "string" &&
+    escalation.to.length > 0;
+  if (hasEscalationDetail) {
+    const total = escalation.consecutive + Number(consecutive);
+    return `${subject} changed no file in ${total} sessions (${escalation.consecutive} on ${escalation.from}, ${consecutive} on escalation model ${escalation.to}; policy.no_progress_generations=${limit} plus one escalation session). STOP — human intervention required: read the task hand-off note, then\nResume: ap reset --scope ${contScope} then ap run`;
+  }
+  return `${subject} changed no file in ${consecutive} consecutive sessions (policy.no_progress_generations=${limit}). STOP — human intervention required: read the task hand-off note, then\nResume: ap reset --scope ${contScope} then ap run`;
 }
 
 export function formatEscalationLog({ role, from, to, finding, source } = {}) {
@@ -237,8 +263,43 @@ export function budgetEscalationModel(state, config, scopeKey = null) {
       return null;
     }
   }
-  if (!key || !isRecord(state.budgetEscalations[key])) return null;
+  if (!key || !isRecord(state.budgetEscalations[key]) || state.budgetEscalations[key].unavailable) return null;
   return normalizeEscalationModel(config?.roles?.implementer?.escalation_model);
+}
+
+// Backlog #11: when the escalation model fails on infrastructure/adapter errors,
+// mark it unavailable for this scope so the next try of the fix round goes back
+// to the role's normal model (or fallbacks).
+export function markEscalationUnavailable(state, role = "implementer", scope = null) {
+  if (!state || typeof state !== "object") return;
+  if (state.escalationPending && isRecord(state.escalationPending[role])) {
+    const rest = { ...state.escalationPending };
+    delete rest[role];
+    if (Object.keys(rest).length) state.escalationPending = rest;
+    else delete state.escalationPending;
+  }
+  if (state.budgetEscalations && typeof state.budgetEscalations === "object") {
+    let key = scope;
+    if (key) {
+      if (!state.budgetEscalations[key]) {
+        if (state.budgetEscalations[`task:${key}`]) key = `task:${key}`;
+        else if (key.startsWith("task:") && state.budgetEscalations[key.slice(5)]) key = key.slice(5);
+      }
+      if (key && state.budgetEscalations[key]) {
+        state.budgetEscalations[key].unavailable = true;
+      }
+    } else {
+      for (const k of Object.keys(state.budgetEscalations)) {
+        if (state.budgetEscalations[k]?.role === role) {
+          state.budgetEscalations[k].unavailable = true;
+        }
+      }
+    }
+  }
+}
+
+export function formatEscalationUnavailableLog(to) {
+  return `escalation model unavailable → back to ${displayModel(to)}`;
 }
 
 export function implementerModelFor(state, config, scope = null) {
@@ -266,6 +327,11 @@ export function clearBudgetEscalation(state, scope) {
   }
   if (!Object.keys(state.budgetEscalations).length) {
     delete state.budgetEscalations;
+  }
+  if (state.escalationUnavailable && typeof state.escalationUnavailable === "object") {
+    if (scope in state.escalationUnavailable) delete state.escalationUnavailable[scope];
+    if (taskScope in state.escalationUnavailable) delete state.escalationUnavailable[taskScope];
+    if (!Object.keys(state.escalationUnavailable).length) delete state.escalationUnavailable;
   }
   return cleared;
 }

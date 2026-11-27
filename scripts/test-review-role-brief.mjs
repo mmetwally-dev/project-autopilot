@@ -17,6 +17,9 @@ import path from "node:path";
 import {fileURLToPath} from "node:url";
 import {formatLinkedTestDurations, formatHeavySuiteNoParallelNote, HEAVY_E2E_SUITES, LINKED_TEST_UNMEASURED_FALLBACK} from "./verifier-brief.mjs";
 import {buildStandaloneHandoff} from "./standalone-handoff.mjs";
+import {DEFECT_PATTERN_REVIEW_INSTRUCTION, DEFECT_PATTERN_FIX_INSTRUCTION, saveReviewFeedback, loadReviewFeedback, feedbackText} from "./review-feedback.mjs";
+import {buildCrossPhaseRepairPrompt} from "./finding-task-locality.mjs";
+import {assembleReviewBriefForTests, IMPLEMENTER_RETRY_FEEDBACK_HEADING} from "./autopilot.mjs";
 
 let ok = 0;
 let failed = 0;
@@ -30,7 +33,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const source = fs.readFileSync(path.join(here, "autopilot.mjs"), "utf8");
 
 // ── The contract lives in the `review`-flagged branch of the prompt ──
-const branch = source.match(/review \? '([\s\S]*?)' : ""/);
+const branch = source.match(/review \? [`']([\s\S]*?)[`'] : ""/);
 check("the review-flagged prompt branch exists", branch !== null);
 const branchText = branch ? branch[1] : "";
 for (const phrase of ["SINGLE-SHOT", "no later turn", "waiting for a background task"]) {
@@ -45,13 +48,77 @@ check("the contract names the consequence (no verdict / mission halts)",
   /no verdict/i.test(branchText) && /halts/i.test(branchText));
 
 // ── All three review roles route through that branch ──
-// A role's call body runs from its own relayX("role", … to the next relay call
-// in the file, so a `review:true` belonging to a LATER call can never satisfy
-// this check.
-const callStarts = [...source.matchAll(/(?:relayAsync|relay)\(/g)].map(match => match.index);
+// A role's call body is its own argument list (from its opening "(" to the
+// matching ")"), skipping string/template literals and comments so a
+// `review:true` belonging to a later call or helper can never match.
 function callBodyAt(index) {
-  const next = callStarts.find(start => start > index);
-  return source.slice(index, next ?? source.length);
+  const open = source.indexOf("(", index);
+  if (open < 0) return "";
+  let parenDepth = 1;
+  let inTemplate = false;
+  const templateBraceDepths = [];
+  for (let i = open + 1; i < source.length; i++) {
+    const ch = source[i];
+    if (inTemplate) {
+      if (ch === "\\") { i++; continue; }
+      if (ch === "`") { inTemplate = false; continue; }
+      if (ch === "$" && source[i + 1] === "{") {
+        templateBraceDepths.push(0);
+        inTemplate = false;
+        i++;
+        continue;
+      }
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "/") {
+      const nl = source.indexOf("\n", i + 2);
+      if (nl < 0) break;
+      i = nl;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "*") {
+      const end = source.indexOf("*/", i + 2);
+      if (end < 0) break;
+      i = end + 1;
+      continue;
+    }
+    if (ch === "'" || ch === "\"") {
+      const quote = ch;
+      i++;
+      while (i < source.length) {
+        if (source[i] === "\\") { i += 2; continue; }
+        if (source[i] === quote) break;
+        i++;
+      }
+      continue;
+    }
+    if (ch === "`") {
+      inTemplate = true;
+      continue;
+    }
+    if (ch === "{" && templateBraceDepths.length > 0) {
+      templateBraceDepths[templateBraceDepths.length - 1]++;
+      continue;
+    }
+    if (ch === "}" && templateBraceDepths.length > 0) {
+      if (templateBraceDepths[templateBraceDepths.length - 1] === 0) {
+        templateBraceDepths.pop();
+        inTemplate = true;
+      } else {
+        templateBraceDepths[templateBraceDepths.length - 1]--;
+      }
+      continue;
+    }
+    if (ch === "(") {
+      parenDepth++;
+    } else if (ch === ")") {
+      parenDepth--;
+      if (parenDepth === 0 && templateBraceDepths.length === 0) {
+        return source.slice(index, i + 1);
+      }
+    }
+  }
+  return source.slice(index);
 }
 for (const role of ["plan_reviewer", "code_reviewer", "verifier"]) {
   const bodies = [...source.matchAll(new RegExp(`(?:relayAsync|relay)\\(\\s*"${role}"`, "g"))].map(match => callBodyAt(match.index));
@@ -171,6 +238,59 @@ check("SpecKit verifier prompt appends per-linked-test durations from the just-r
 check("SpecKit final review carries the heavy-suite no-parallel note",
   source.includes("const speckitFinalNoParallel=formatHeavySuiteNoParallelNote()"),
   "missing SpecKit final speckitFinalNoParallel wiring");
+
+// ── Backlog #9 / #8: defect pattern search and fix prompt contracts ──
+check("review prompt carries defect pattern instruction",
+  branchText.includes("${DEFECT_PATTERN_REVIEW_INSTRUCTION}") || branchText.replace(/\\'/g, "'").includes(DEFECT_PATTERN_REVIEW_INSTRUCTION),
+  branchText.slice(0, 300));
+check("assembleReviewBriefForTests includes defect pattern instruction for code_reviewer",
+  assembleReviewBriefForTests({roleName: "code_reviewer", adapter: "codex"}).includes(DEFECT_PATTERN_REVIEW_INSTRUCTION));
+check("assembleReviewBriefForTests includes defect pattern instruction for verifier",
+  assembleReviewBriefForTests({roleName: "verifier", adapter: "codex"}).includes(DEFECT_PATTERN_REVIEW_INSTRUCTION));
+// Backlog #4 moved the standalone/SpecKit verifier relay behind
+// relayVerifierWithApp(); the wrapper's options still carry review:true to
+// the inner relayAsync call, so both call sites must keep it.
+check("both standalone and SpecKit verifier relay calls pass review:true",
+  [...source.matchAll(/await relayVerifierWithApp\(/g)].length >= 2 &&
+  [...source.matchAll(/await relayVerifierWithApp\(/g)].every(m =>
+    /review:\s*true/.test(callBodyAt(source.indexOf("relayVerifierWithApp(", m.index))))
+  && [...source.matchAll(/relayAsync\(\s*"verifier"/g)].every(m => /review:\s*true/.test(callBodyAt(m.index))));
+check("implementer retry heading carries defect pattern fix instruction",
+  IMPLEMENTER_RETRY_FEEDBACK_HEADING.includes(DEFECT_PATTERN_FIX_INSTRUCTION));
+check("standalone and SpecKit implementer retry loops use IMPLEMENTER_RETRY_FEEDBACK_HEADING",
+  [...source.matchAll(/\$\{IMPLEMENTER_RETRY_FEEDBACK_HEADING\}/g)].length >= 6);
+{
+  // Trace verifier FAIL -> saveReviewFeedback -> loadReviewFeedback -> implementer retry brief
+  const state = {};
+  const verifierFindings = [
+    {location: "test/pem.mjs:12", problem: "PEM detector ignores bodies >8192 chars", correction: "Remove arbitrary length cap and validate PEM structure directly"},
+  ];
+  const saved = saveReviewFeedback(state, "phase:0", verifierFindings);
+  const loaded = loadReviewFeedback(state, "phase:0");
+  const retryBrief = `${IMPLEMENTER_RETRY_FEEDBACK_HEADING}\n${feedbackText(loaded)}`;
+  check("implementer brief after verifier FAIL contains DEFECT_PATTERN_FIX_INSTRUCTION",
+    saved.length === 1 && loaded.length === 1 && retryBrief.includes(DEFECT_PATTERN_FIX_INSTRUCTION),
+    retryBrief.slice(0, 300));
+  const crossPhasePrompt = buildCrossPhaseRepairPrompt({
+    owner: {taskId: "T1"},
+    file: "test/pem.mjs",
+    findingText: feedbackText(loaded),
+  });
+  check("cross-phase repair prompt contains DEFECT_PATTERN_FIX_INSTRUCTION",
+    crossPhasePrompt.includes(DEFECT_PATTERN_FIX_INSTRUCTION),
+    crossPhasePrompt.slice(0, 300));
+}
+check("defect pattern fix instruction wording is exact and strengthened",
+  DEFECT_PATTERN_FIX_INSTRUCTION === "fix this pattern everywhere it occurs in the phase's files, not only at the cited line, and fix the underlying rule rather than adding another limit that only covers the named case" &&
+  /underlying rule/i.test(DEFECT_PATTERN_FIX_INSTRUCTION) &&
+  /adding another limit/i.test(DEFECT_PATTERN_FIX_INSTRUCTION));
+check("defect pattern review instruction wording is exact and strengthened",
+  DEFECT_PATTERN_REVIEW_INSTRUCTION === "When you find a defect, search the phase's changed files for the same pattern and list EVERY location as its own finding in this verdict; if the defect is a weak rule in a check (such as an arbitrary size, length, or file-type limit that lets bad input through), report the root flaw and every boundary of it in ONE finding with the correction for the whole rule rather than one edge case per round" &&
+  /weak rule/i.test(DEFECT_PATTERN_REVIEW_INSTRUCTION) &&
+  /root flaw/i.test(DEFECT_PATTERN_REVIEW_INSTRUCTION) &&
+  /every boundary/i.test(DEFECT_PATTERN_REVIEW_INSTRUCTION) &&
+  /ONE finding/i.test(DEFECT_PATTERN_REVIEW_INSTRUCTION) &&
+  /whole rule/i.test(DEFECT_PATTERN_REVIEW_INSTRUCTION));
 
 if (failed) {
   console.error(`${failed} review-role brief check(s) failed.`);

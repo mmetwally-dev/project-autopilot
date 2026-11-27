@@ -35,10 +35,11 @@ check("later-round verify brief carries the severity rule",
 check("confirmation brief carries the severity rule",
   hasSeverityRule(PLAN_REVIEW_CONFIRMATION_LINE)
   && hasSeverityRule(planReviewerConfirmationLines().join("\n")));
-check("confirmation brief reviews everything but no longer demands every problem",
+check("confirmation brief reviews everything and demands every blocking problem in one round",
   /review the whole plan again from scratch/.test(PLAN_REVIEW_CONFIRMATION_LINE)
-  && !/EXHAUSTIVE/.test(PLAN_REVIEW_CONFIRMATION_LINE)
-  && !/report every problem/.test(PLAN_REVIEW_CONFIRMATION_LINE));
+  && /every blocking problem/i.test(PLAN_REVIEW_CONFIRMATION_LINE)
+  && /unchanged since this round means this round missed it/.test(PLAN_REVIEW_CONFIRMATION_LINE)
+  && /do not pad them with small issues/.test(PLAN_REVIEW_CONFIRMATION_LINE));
 check("convergence-off full brief carries the severity rule", hasSeverityRule(PLAN_REVIEW_FULL_LINE));
 
 // Sentinel: optional notes array (strings) is parsed and kept.

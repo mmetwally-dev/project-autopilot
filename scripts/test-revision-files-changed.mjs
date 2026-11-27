@@ -12,7 +12,7 @@ import {
   standalonePlanFeedbackNote,
   standaloneSpecFeedbackNote,
 } from "./revision-files-changed.mjs";
-import { saveReviewFeedback } from "./review-feedback.mjs";
+import { saveReviewFeedback, DEFECT_PATTERN_REVIEW_INSTRUCTION } from "./review-feedback.mjs";
 
 let ok = 0;
 let failed = 0;
@@ -133,16 +133,26 @@ try {
 
   // Evaluate runRelay brief using Function (same methodology as test-earlier-rounds-dedupe)
   const evaluateBrief = new Function(
-    "roleName", "promptRepository", "mission", "role", "readOnly", "promptScratch", "disposableWorkspace", "relayTask", "review", "planRevision = null",
+    "roleName", "promptRepository", "mission", "role", "readOnly", "promptScratch", "disposableWorkspace", "relayTask", "review", "planRevision = null", "previousScratchSeeded = false", "DEFECT_PATTERN_REVIEW_INSTRUCTION", "REVIEWER_NO_AP_SKILLS_LINE",
     `return (${arraySource}).filter(Boolean).join("\\n");`
   );
   const revisionBrief = evaluateBrief(
     "planner", "/repo", "test-mission", { adapter: "antigravity" }, false,
-    "/scratch", false, "The plan reviewer REJECTED the previous attempt at this stage.", false, 1
+    "/scratch", false, "The plan reviewer REJECTED the previous attempt at this stage.", false, 1, false, DEFECT_PATTERN_REVIEW_INSTRUCTION, ap.REVIEWER_NO_AP_SKILLS_LINE
   );
   check("(4b) evaluated planner revision brief contains the full sentence",
     revisionBrief.includes(REVISION_LINE_FULL),
     revisionBrief.slice(0, 400));
+  const seededBrief = evaluateBrief(
+    "plan_reviewer", "/repo", "test-mission", { adapter: "antigravity" }, true,
+    "/scratch", false, "Review the plan.", true, null, true, DEFECT_PATTERN_REVIEW_INSTRUCTION, ap.REVIEWER_NO_AP_SKILLS_LINE
+  );
+  check("(4c) evaluated brief with previousScratchSeeded=true contains the PowerShell reuse line",
+    seededBrief.includes("A PowerShell runtime from the previous session is already in /workspace/scratch/previous-session/ — reuse it, do not download again."),
+    seededBrief.slice(0, 400));
+  check("(4d) readOnly brief contains REVIEWER_NO_AP_SKILLS_LINE and writable planner brief does not",
+    seededBrief.includes(ap.REVIEWER_NO_AP_SKILLS_LINE) && !revisionBrief.includes(ap.REVIEWER_NO_AP_SKILLS_LINE),
+    { readOnlyHas: seededBrief.includes(ap.REVIEWER_NO_AP_SKILLS_LINE), writableHas: revisionBrief.includes(ap.REVIEWER_NO_AP_SKILLS_LINE) });
 }
 
 // ── Source checks of call sites ───────────────────────────────────────────────

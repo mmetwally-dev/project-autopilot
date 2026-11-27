@@ -49,6 +49,8 @@ const NON_RETRYABLE_ESCALATE_CLASSES = Object.freeze([
   // / adapter runtime sibling missing). Another attempt on the same adapter
   // fails identically until the operator fixes the environment.
   "READ_ONLY_CONTAINMENT_UNAVAILABLE",
+  // Network outage after wait-limit exhaustion: no retry budget is spent.
+  "NETWORK_UNAVAILABLE",
 ]);
 
 // Functional class that is never intercepted here: the caller runs its

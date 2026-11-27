@@ -17,7 +17,7 @@ const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-e2ew-cli-'));
 const fakeClaude = path.join(binDir, 'claude');
 fs.copyFileSync(fs.existsSync('/usr/bin/true') ? '/usr/bin/true' : '/bin/true', fakeClaude);
 fs.chmodSync(fakeClaude, 0o755);
-const E2E_AT = 13;
+const E2E_AT = 14;
 const env = {...process.env, PATH: [binDir, '/usr/bin', '/bin'].join(':')};
 
 // Forced-stdin mode reads the whole answer block up front, so answers are positional: empty

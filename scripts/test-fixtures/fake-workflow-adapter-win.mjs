@@ -44,6 +44,7 @@ import {fileURLToPath} from "node:url";
 
 const PORTED_SCENARIOS = new Set([
   "success",
+  "plan_reviewer_hang",
   "standalone_impl_interrupted",
   "standalone_reviewer_hang", "standalone_reviewer_infra_once", "standalone_reviewer_fail_once",
   "standalone_verifier_hang", "standalone_verifier_infra_once", "standalone_verifier_fail_once", "standalone_verifier_delta_change",
@@ -161,6 +162,11 @@ function hasFeedbackMarker(prompt) {
 // "Validate the existing ..."), never on timing or mutable state.
 function isReReviewPrompt(prompt) {
   return /Re-review the SpecKit gate/.test(prompt);
+}
+
+// Backlog sk5: mirrors fake-workflow-adapter.sh's is_verdict_only_retry_prompt.
+function isVerdictOnlyRetryPrompt(prompt) {
+  return /VERDICT-ONLY RETRY for SpecKit gate/.test(prompt);
 }
 
 function isExistingPlanningPrompt(prompt) {
@@ -655,7 +661,11 @@ async function main() {
   }
 
   if (role === "plan_reviewer") {
-    if (scenario === "plan_review_missing_sentinel_with_path_error") {
+    if (scenario === "plan_reviewer_hang" && unfinishedRoleRuns("plan_reviewer") <= 1) {
+      await sleep(45000);
+      console.error("plan_reviewer_hang: hang window elapsed without interruption");
+      process.exit(124);
+    } else if (scenario === "plan_review_missing_sentinel_with_path_error") {
       // TASK 13 / Problem A regression: an incidental, already-recovered
       // path error mixed into otherwise-normal output must NOT rescue a
       // genuinely missing/malformed review sentinel. Deliberately no
@@ -743,10 +753,11 @@ async function main() {
         reviewOutput("PASS", "");
       }
     } else if (scenario === "speckit_rereview_output_contract") {
-      // TASK-14 Phase 3 call site 3: initial FAIL once, then the re-review
-      // returns no sentinel — passes through unrecorded, escalates
-      // unchanged.
-      if (isReReviewPrompt(prompt)) {
+      // TASK-14 Phase 3 call site 3 + backlog sk5: initial FAIL once, then
+      // the post-revision re-review AND its one-shot verdict-only retry
+      // return no sentinel — passes through unrecorded and escalates with
+      // the no-verdict message without starting a second revision.
+      if (isReReviewPrompt(prompt) || isVerdictOnlyRetryPrompt(prompt)) {
         console.log("cat: docs/does-not-exist-yet.md: No such file or directory");
         console.log("I looked at everything and it looks fine.");
       } else if (!hasFeedbackMarker(prompt)) {
@@ -1114,9 +1125,9 @@ async function main() {
         reviewOutput("PASS", "");
       }
     } else if (role === "code_reviewer" && scenario === "carry_forward_phasewide" && isPhaseReviewCall(prompt)) {
-      // TASK-22: FAIL once with one finding tagged ["T2"] and one explicitly
-      // phase-wide (`tasks: []`), hang once, then PASS. Mirrors the POSIX
-      // branch of the same name.
+      // TASK-22 / Backlog #8: FAIL once with one finding tagged ["T2"] and one
+      // explicitly phase-wide (`tasks: []`), hang once, then PASS. Mirrors the
+      // POSIX branch of the same name.
       if (!priorRoleResult("code_reviewer")) {
         console.log(`AUTOPILOT_REVIEW=${JSON.stringify({decision: "FAIL", findings: [{
           tasks: ["T2"],

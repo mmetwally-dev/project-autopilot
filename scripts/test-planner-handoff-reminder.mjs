@@ -26,6 +26,8 @@ const firstPlanner = src.indexOf(plannerRepo);
 const plannerSlice = firstPlanner >= 0 ? src.slice(firstPlanner, firstPlanner + 1200) : "";
 check("planner: reminder names file:line", plannerSlice.includes("file:line"), plannerSlice.slice(0, 200));
 check("planner: reminder tracks Dead ends", plannerSlice.includes("Dead ends"), plannerSlice.slice(0, 200));
+check("planner: reminder lists Done/Found/Next sections",
+  plannerSlice.includes("1. Done") && plannerSlice.includes("2. Found") && plannerSlice.includes("3. Next"), plannerSlice.slice(0, 300));
 
 // ── Plan reviewer: scratch-note reminder from the shared 1.1 helper ──
 check("reviewer: reviewPrompt renders the shared scratch-note helper",
@@ -38,8 +40,8 @@ const revSlice = revAt >= 0 ? src.slice(revAt - 200, revAt + 1200) : "";
 check("reviewer: reminder pins the overwrite discipline", revSlice.includes("OVERWRITE it (never append)"), revSlice.slice(0, 200));
 check("reviewer: reminder names file:line", revSlice.includes("file:line"), revSlice.slice(0, 200));
 check("reviewer: reminder tracks Dead ends", revSlice.includes("Dead ends"), revSlice.slice(0, 200));
-check("reviewer: reminder lists Done/Found/Next sections",
-  revSlice.includes("1. Done") && revSlice.includes("2. Found") && revSlice.includes("3. Next"), revSlice.slice(0, 300));
+check("reviewer: reminder lists Checked and clear / Findings (final) / Remaining / Dead ends sections",
+  revSlice.includes("1. Checked and clear") && revSlice.includes("2. Findings (final)") && revSlice.includes("3. Remaining") && revSlice.includes("4. Dead ends"), revSlice.slice(0, 300));
 
 console.log(`\n${ok} passed, ${failed} failed`);
 if (failed) process.exit(1);

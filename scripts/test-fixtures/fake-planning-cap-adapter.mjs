@@ -51,7 +51,9 @@ function writeArtifacts() {
 if (reviewer) {
   emit({type: "step_start", part: {type: "step-start"}});
   if (!continuation) {
-    for (let i = 0; i < 45; i += 1) { step(); await sleep(80); }
+    // Plan/tasks reviews use the configured 30-turn cap (no stage multiplier),
+    // so the first generation must spin PAST 30 to still trigger the cap.
+    for (let i = 0; i < 60; i += 1) { step(); await sleep(80); }
     process.exit(0);
   }
   for (let i = 0; i < 2; i += 1) { step(); await sleep(10); }

@@ -60,7 +60,21 @@ import {
 } from "./runtime-mode-selection.mjs";
 import { detect as detectSpecKit } from "../adapters/speckit.mjs";
 import { detect as detectGsd } from "../adapters/gsd.mjs";
-import { detectTestCommand, resolveGatesCommands } from "./detect-test-command.mjs";
+import {
+  detectTestCommand,
+  detectExtraGateCommands,
+  formatExtraGateCommandsPrompt,
+  mergeExtraGateCommands,
+  resolveGatesCommands
+} from "./detect-test-command.mjs";
+import {
+  detectAppServerCommand,
+  appServerPrompt,
+  resolveAppServerAnswer,
+  parsePathList,
+  normalizeReadyUrl,
+  buildAppServerBlock
+} from "./app-server-setup.mjs";
 import {
   PROBE_TIMEOUT_MS,
   buildExclusionCommand,
@@ -1195,6 +1209,43 @@ async function askE2eChoice(current, repo, interactive) {
   }
 }
 
+// Backlog #5: Docker/Supabase CLI access inside the sandbox (shared by setup and `ap config`).
+export const ALLOW_DOCKER_QUESTION = "Let agents use Docker and the Supabase CLI inside the sandbox? (gives root-level access to this machine; only for projects that need a local database)";
+export const ALLOW_DOCKER_PROMPT = `${ALLOW_DOCKER_QUESTION} [y/N]`;
+
+async function askAllowDocker(current, interactive) {
+  const existing = current?.safety?.allow_docker === true || current?.policy?.allow_docker === true;
+  if (!interactive) return existing;
+  const prompt = `${ALLOW_DOCKER_QUESTION} [${existing ? "Y/n" : "y/N"}]: `;
+  if (forceInteractive) console.log(prompt);
+  const raw = (await ask(prompt)).trim().toLowerCase();
+  if (!raw) return existing;
+  return raw === "y" || raw === "yes";
+}
+
+// Backlog #5: free models excluded from automatic fallback (shared by setup and `ap config`).
+export const FREE_MODELS_EXCLUDE_QUESTION = "Free models the automatic fallback must never use (comma-separated adapter/model, * allowed; Enter = none)";
+
+export function parseFreeModelsExcludeAnswer(raw, existing = []) {
+  const trimmed = String(raw ?? "").trim();
+  if (!trimmed) return Array.isArray(existing) ? [...existing] : [];
+  if (trimmed === "-") return [];
+  return trimmed.split(",").map(s => s.trim()).filter(Boolean);
+}
+
+async function askFreeModelsExclude(current, interactive) {
+  const existing = Array.isArray(current?.roles?.free_models?.exclude)
+    ? [...current.roles.free_models.exclude]
+    : (Array.isArray(current?.freeModelExclude) ? [...current.freeModelExclude] : []);
+  if (!interactive) return existing;
+  const prompt = existing.length > 0
+    ? `${FREE_MODELS_EXCLUDE_QUESTION} [current: ${existing.join(", ")}, - = clear]: `
+    : `${FREE_MODELS_EXCLUDE_QUESTION}: `;
+  if (forceInteractive) console.log(prompt);
+  const raw = await ask(prompt);
+  return parseFreeModelsExcludeAnswer(raw, existing);
+}
+
 async function networkSetting(current, runtimeMode) {
   let networkIsolation =
     current?.gates?.network_isolation ??
@@ -1820,8 +1871,10 @@ if (isMainModule) {
         const whoTag = escRoles.length > 1 ? "planner + implementer" : escRoles[0];
         const priors = escRoles.map(r => normalizeEscalationModel(roles[r].escalation_model));
         const prior = priors.find(Boolean) || null;
-        const n = Number(current?.policy?.escalate_after_not_fixed);
-        const times = n === 1 ? "once" : Number.isInteger(n) && n > 2 ? `${n} times` : "twice";
+        const n = Number.isInteger(Number(current?.policy?.escalate_after_not_fixed))
+          ? Number(current?.policy?.escalate_after_not_fixed)
+          : 3;
+        const times = n === 1 ? "once" : n === 2 ? "twice" : `${n} times`;
         let currentText = "";
         if (prior) {
           const distinct = new Set(priors.map(p => (p ? formatFallbackEntry(p) : "off")));
@@ -1885,6 +1938,17 @@ if (isMainModule) {
         }
       }
     }
+
+    // Backlog #5: free models excluded from automatic fallback (shared by `ap setup` and `ap config`).
+    const freeModelsInScope =
+      wizardMode ||
+      scope === SCOPE.ALL ||
+      scope === SCOPE.ROLE;
+    const freeModelExclude = freeModelsInScope
+      ? await askFreeModelsExclude(current, interactive)
+      : (Array.isArray(current?.roles?.free_models?.exclude)
+        ? [...current.roles.free_models.exclude]
+        : (Array.isArray(current?.freeModelExclude) ? [...current.freeModelExclude] : []));
 
     if (wizardMode && scope === SCOPE.ALL) {
       if (frameworkChoices.length === 1) {
@@ -1992,6 +2056,34 @@ if (isMainModule) {
         `Set it by hand: edit .autopilot/config.json "gates": {"commands": ["<full command>"]}`
       );
     }
+
+    // Backlog s15 #5(a): propose detected type-check/lint scripts as additional
+    // gate commands in BOTH first-run setup and `ap config` (`--edit`) with
+    // identical wording. Existing configs are never modified silently.
+    const detectedExtraGateCommands = gatesInScope
+      ? detectExtraGateCommands(repo)
+      : [];
+    const missingExtraGateCommands = detectedExtraGateCommands.filter(
+      (cmd) => !gatesResolution.commands.includes(cmd)
+    );
+    let extraGateAnswer = null;
+    if (
+      gatesInScope &&
+      interactive &&
+      missingExtraGateCommands.length > 0 &&
+      (editMode || !existingGateCommands.length)
+    ) {
+      const extraPrompt = formatExtraGateCommandsPrompt(missingExtraGateCommands);
+      if (forceInteractive) {
+        console.log(extraPrompt);
+      }
+      extraGateAnswer = await ask(extraPrompt);
+    }
+    const resolvedGateCommands = mergeExtraGateCommands({
+      baseCommands: gatesResolution.commands,
+      extraCommands: missingExtraGateCommands,
+      answer: extraGateAnswer
+    });
 
     // Backlog #4 Part A: after the test-command question, offer to run it once
     // exactly as the phase gate would. The execution waits until the network
@@ -2142,10 +2234,56 @@ if (isMainModule) {
     const e2eChoice = await askE2eChoice(current, repo, interactive);
     const e2ePending = storedE2e(current) == null && (e2eChoice === "playwright" || e2eChoice === "cypress");
 
+    // Backlog #5: Docker / Supabase CLI sandbox opt-in (shared by `ap setup` and `ap config`).
+    const allowDocker = gatesInScope
+      ? await askAllowDocker(current, interactive)
+      : (current?.safety?.allow_docker === true || current?.policy?.allow_docker === true);
+
+    // Backlog #3: optional app server the gate starts before the tests. Same
+    // wizard for `ap setup` and `ap config`. Asked only when a start script
+    // was found in package.json or a server is already configured, so
+    // projects without one see no new question (hand edit: tests.app_server).
+    // undefined = keep what the config holds, null = clear, object = new block.
+    let appServerResult;
+    if (gatesInScope && interactive) {
+      const existingBlock = current?.gates?.app_server;
+      const existingCmd = typeof existingBlock?.start_command === "string" && existingBlock.start_command.trim()
+        ? existingBlock.start_command.trim()
+        : "";
+      const detectedApp = detectAppServerCommand(repo);
+      const appPrompt = appServerPrompt({ existing: existingCmd, detected: detectedApp });
+      if (appPrompt) {
+        if (forceInteractive) console.log(appPrompt);
+        const appAnswer = await ask(appPrompt);
+        const decision = resolveAppServerAnswer({ answer: appAnswer, existing: existingCmd, detected: detectedApp });
+        if (decision.action === "clear") appServerResult = null;
+        else if (decision.action === "set") {
+          const readyPrompt = "Page that shows the server is ready (Enter = /): ";
+          const warmPrompt = "Pages to open once after it is ready, comma separated (Enter = none): ";
+          const envPrompt = "Env file passed to the server only (Enter = none): ";
+          if (forceInteractive) console.log(readyPrompt);
+          const readyUrl = normalizeReadyUrl(await ask(readyPrompt));
+          if (forceInteractive) console.log(warmPrompt);
+          const warmupUrls = parsePathList(await ask(warmPrompt));
+          if (forceInteractive) console.log(envPrompt);
+          const envFile = (await ask(envPrompt)).trim();
+          appServerResult = buildAppServerBlock({
+            start_command: decision.start_command,
+            cwd: existingCmd ? existingBlock.cwd : detectedApp?.cwd ?? "",
+            ready_url: readyUrl,
+            warmup_urls: warmupUrls,
+            env_file: envFile,
+            base: existingCmd ? existingBlock : {}
+          });
+          console.log("✓ App server saved. The gate sets APP_BASE_URL and PORT for the test commands. (Change later: tests.app_server)");
+        }
+      }
+    }
+
     // Backlog #4 Part A: the probe runs here, after the final network setting
     // is known, through the gate's own guarded runner (runGuardedCommand) and
     // the same shell environment the phase gate builds.
-    let finalGateCommands = gatesResolution.commands;
+    let finalGateCommands = resolvedGateCommands;
     let notRunInMissions = null;
     let notRunOriginalCommand = null;
     if (probeRequested && probeCandidate) {
@@ -2223,7 +2361,7 @@ if (isMainModule) {
               if (!excluded) {
                 console.log(`  The ${analysis.runner} runner has no known exclusion flag; keeping the command as today.`);
               } else {
-                finalGateCommands = [excluded];
+                finalGateCommands = [excluded, ...finalGateCommands.slice(1)];
                 notRunInMissions = envGroups.map(group => ({
                   files: group.files,
                   reason: group.reason,
@@ -2258,6 +2396,7 @@ if (isMainModule) {
       },
 
       roles,
+      freeModelExclude,
 
       execution,
 
@@ -2314,7 +2453,10 @@ if (isMainModule) {
           : {}),
         ...(notRunOriginalCommand !== null
           ? {not_run_in_missions_original_command: notRunOriginalCommand}
-          : {})
+          : {}),
+        ...(appServerResult ? {app_server: appServerResult} : {}),
+        // "-" clears the block (undefined is dropped when the file is written).
+        ...(appServerResult === null ? {app_server: undefined} : {})
       },
 
       policy: (() => {
@@ -2341,7 +2483,8 @@ if (isMainModule) {
         };
         const mergedPolicy = {
           ...basePolicy,
-          ...(current?.policy || {})
+          ...(current?.policy || {}),
+          allow_docker: allowDocker
         };
         mergedPolicy.caps = mergeRoleCaps(mergedPolicy.caps || {});
         return mergedPolicy;
@@ -2381,7 +2524,8 @@ if (isMainModule) {
           false,
 
         ...(current?.safety ||
-          {})
+          {}),
+        allow_docker: allowDocker
       },
 
       planning: {

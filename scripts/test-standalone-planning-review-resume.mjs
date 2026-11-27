@@ -273,7 +273,15 @@ const autopilotSrc = fs.readFileSync(path.join("scripts", "autopilot.mjs"), "utf
     autopilotSrc.includes("skipPlannerFirst"));
   check("contract: reviewer retry uses a fresh session (resume:false)",
     callsWithOptions(autopilotSrc, 'relayAsync("plan_reviewer",', ["readOnly:true", "review:true", "resume:false", "capEnabled:true", "taskRef:'standalone-planning-plan_reviewer'"])
-      .some((call) => autopilotSrc.includes("()=>" + call)));
+      .some((call) => {
+        for (let from = 0; ; ) {
+          const idx = autopilotSrc.indexOf(call, from);
+          if (idx < 0) return false;
+          const prefix = autopilotSrc.slice(Math.max(0, idx - 500), idx);
+          if (prefix.includes("()=>") || prefix.includes("async ()=>{") || prefix.includes("async()=>{")) return true;
+          from = idx + call.length;
+        }
+      }));
 }
 
 // ---------------------------------------------------------------------

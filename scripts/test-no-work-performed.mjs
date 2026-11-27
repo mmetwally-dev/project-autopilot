@@ -171,10 +171,10 @@ const summaryAbsentOrEmpty = (args) => args.summary === undefined || args.summar
     result.outcome === "escalate" && result.step === "final_review", JSON.stringify({outcome: result.outcome, step: result.step}));
   check("loop: repeated zero-file passes never call the gate", gateCalls === 0, gateCalls);
   check("loop: repeated zero-file passes each thread the summary",
-    seenSummaries.length === 2 && seenSummaries.every((s) => s === "still nothing"),
+    seenSummaries.length === 3 && seenSummaries.every((s) => s === "still nothing"),
     JSON.stringify(seenSummaries));
   check("loop: repeated zero-file passes consume the full budget",
-    state[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY] === 2, JSON.stringify(state));
+    state[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY] === 3, JSON.stringify(state));
 }
 
 // ── Source pins: exact runFinalReview({round,used,limit,gate,brief,summary}) field ──

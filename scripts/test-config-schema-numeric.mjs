@@ -22,6 +22,7 @@ const expectedMinimums = {
   "caps.max_phase_tasks": 1,
   "caps.min_phase_tasks": 1,
   "caps.mission_token_backstop": 1,
+  "caps.final_review_max_turns": 1,
   "retries.plan_revisions": 0,
   "retries.spec_revisions": 0,
   "retries.implementation": 0,
@@ -48,6 +49,10 @@ const expectedMinimums = {
   "advanced.handoff_note_max_chars": 1000,
   "advanced.handoff_wrapup_tokens": 1,
   "advanced.fallback_retry_primary_minutes": 0,
+  "advanced.rate_limit_wait_max_minutes": 0,
+  "advanced.network_wait_minutes": 0,
+  "tests.app_server.port": 1,
+  "tests.app_server.ready_timeout_ms": 1000,
 };
 const CAP_MINIMUMS = {max_turns: 1, max_tokens: 1, extra_sessions: 0, wrap_up_at_tokens: 1};
 for (const role of ROLE_NAMES) {

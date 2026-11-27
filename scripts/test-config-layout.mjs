@@ -103,7 +103,7 @@ layout.roles.planner.fallbacks = [
 ];
 layout.roles.implementer.cli = "opencode";
 layout.roles.implementer.escalation_model = {cli: "claude", model: "sonnet[1m]", reasoning: "high"};
-layout.roles.free_models = {auto_fallback: false, max_turns: 45};
+layout.roles.free_models = {auto_fallback: false, max_turns: 45, exclude: []};
 layout.caps.planner = {max_turns: 31, max_tokens: 210000, extra_sessions: 3, wrap_up_at_tokens: 190000};
 layout.caps.implementer = {max_turns: 41, max_tokens: 190000, extra_sessions: 6, wrap_up_at_tokens: 170000};
 layout.caps.task_size_target_turns = 33;

@@ -52,9 +52,9 @@ const revisionBranch = (_promptHead >= 0 && _revEnd >= 0)
   ? src.slice(_promptHead, _revEnd + '].filter(Boolean).join("\\n\\n")'.length)
   : "";
 const _freshStart = src.indexOf('].filter(Boolean).join("\\n\\n"):[', _promptHead);
-const _freshEnd = _freshStart >= 0 ? src.indexOf('].join("\\n\\n")', _freshStart) : -1;
+const _freshEnd = _freshStart >= 0 ? src.indexOf('].filter(Boolean).join("\\n\\n")', _freshStart + '].filter(Boolean).join("\\n\\n"):['.length) : -1;
 const freshBranch = (_freshStart >= 0 && _freshEnd >= 0)
-  ? src.slice(_freshStart, _freshEnd + '].join("\\n\\n")'.length)
+  ? src.slice(_freshStart, _freshEnd + '].filter(Boolean).join("\\n\\n")'.length)
   : "";
 const tasksBranch = sliceBetween('if(step==="tasks") return `', 'return "";', src.indexOf("function artifactContractNoteFor"));
 const rulesComment = sliceBetween("// Planning-prompt rules", 'const PLANNER_READ_RANGE_LINE="');

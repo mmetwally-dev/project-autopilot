@@ -17,6 +17,8 @@
 //   cap_nosid   — like cap_turns but emits no session id (mission 045: no
 //                 session id to resume no longer selects a skip — the
 //                 orchestrator fallback fires regardless)
+//   cap_wrapup_runaway — like cap_turns, but the resumed wrap-up turn spins
+//                 past WRAPUP_MAX_TURNS instead of writing the note
 //   cap_wrapup_silent — like cap_turns but never writes any note (the
 //                 missing-note orchestrator fallback)
 import fs from "node:fs";
@@ -101,9 +103,9 @@ const REVIEW_FAIL = 'AUTOPILOT_REVIEW={"decision":"FAIL","findings":["fixture pl
 const PLAN_OK = "# Plan\n\nObjective: cap continuation reset probe.\n";
 const TASKS_OK = "## Phase 1: General\n\n- [ ] Do the fixture task — accept: done ; verify: none\n";
 
-async function spinToCap(tokens) {
+async function spinToCap(tokens, turns = SPIN_TURNS) {
   emit({type: "step_start", part: {type: "step-start"}});
-  for (let i = 0; i < SPIN_TURNS; i += 1) {
+  for (let i = 0; i < turns; i += 1) {
     stepFinish(tokens);
     await sleep(SPIN_MS);
   }
@@ -164,24 +166,32 @@ if (sc === "live_usage") {
   emit({type: "text", part: {type: "text", text: TASK_RESULT}});
   // The second dispatch chain below must not run for this scenario.
   process.exit(0);
-} else if (sc === "cap_files_spin" && !gen2) {
+} else if (sc === "cap_files_spin" && !gen2 && !prompt.includes("Write your hand-off note NOW")) {
   // Attribution-tail probe: real tree writes before the spin, so the capped
   // generation's dead end can name completed files (not just output tail).
   for (let i = 1; i <= 3; i += 1) {
     try { fs.writeFileSync(`cap-e2e-probe-0${i}.txt`, `probe file ${i}\n`); } catch {}
   }
 }
-// LEGACY (Backlog #26 Step B): the orchestrator-forced wrap-up turn. Its
+// Backlog #8: the resumed wrap-up turn (it was LEGACY after mission 045). Its
 // prompt was the wrap-up message ONLY (no dead-ends section, so gen2 is
 // false here) — handled BEFORE the spin branches below so every scenario
 // (including cap_always) answers fast instead of spinning into the wrap-up
 // ceiling. It used to write the note at the exact path the prompt named.
-// Mission 045 removed the wrap-up resume, so autopilot.mjs never builds this
-// prompt again and this branch is dead fixture code: the rollover e2e now
-// asserts the ORCHESTRATOR fallback note instead. Kept so the old shape
-// still compiles; `cap_wrapup_silent` used to write nothing here.
+// Backlog #8 restored the resume, so this branch is live again;
+// `cap_wrapup_silent` writes nothing here (note stays stale -> fallback).
 const WRAPUP_MARKER = "Write your hand-off note NOW";
 if (prompt.includes(WRAPUP_MARKER)) {
+  // Backlog #8: record the argv of every wrap-up turn so the rollover e2e can
+  // prove the SAME session was resumed (--session <id>). Under .autopilot/ so
+  // it never counts as a project edit for the note-freshness check.
+  try { fs.appendFileSync(".autopilot/.wrapup-args.log", `${args.join(" ")}\n`); } catch {}
+  if (sc === "cap_wrapup_runaway") {
+    // The wrap-up turn itself ignores its job and keeps working: the
+    // WRAPUP_MAX_TURNS ceiling must stop it, and it must not wrap up again.
+    await spinToCap(tiny);
+    process.exit(0);
+  }
   if (sc !== "cap_wrapup_silent") {
     const wrapMatch = /Write your hand-off note NOW to (\S+)/.exec(prompt);
     if (wrapMatch) {
@@ -236,7 +246,9 @@ if (sc === "cap_verdict") {
   // caps once and completes on the resumed generation. A completed round
   // resets the reviewer allowance, so the NEXT round may cap again under the
   // same allowance of 1. The first round FAILs, the later rounds PASS.
-  if (!gen2) await spinToCap(tiny);
+  // Plan/tasks reviews use the configured 30-turn cap (no stage multiplier),
+  // so this generation must spin PAST 30 to still trigger the cap monitor.
+  if (!gen2) await spinToCap(tiny, 60);
   else if (prompt.includes("confirmation full review after a scoped re-review PASS")
     || prompt.includes("Prior findings to re-check")) {
     emit({type: "text", part: {type: "text", text: REVIEW_PASS}});

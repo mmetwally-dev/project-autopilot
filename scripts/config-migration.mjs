@@ -25,7 +25,7 @@ const CUMULATIVE_TOKEN_THRESHOLD = 300_000;
 // release): operator-added keys that belong to no section are genuine operator
 // data, not shipped/legacy defaults, so migration carries them through rather
 // than silently dropping them. Late v4 validation flags them as unknown.
-const KNOWN_RUNTIME_TOP_KEYS = new Set(["$schema", "schema_version", "project", "roles", "policy", "execution", "workflow", "gates", "planning", "capabilities", "safety", "freeModelAutoFallback", "config_metadata"]);
+const KNOWN_RUNTIME_TOP_KEYS = new Set(["$schema", "schema_version", "project", "roles", "policy", "execution", "workflow", "gates", "planning", "capabilities", "safety", "freeModelAutoFallback", "freeModelExclude", "config_metadata"]);
 const KNOWN_PROJECT_KEYS = new Set(["repo", "planning_framework", "state_file", "runs_dir"]);
 const KNOWN_EXECUTION_KEYS = new Set(["runtime_mode", "wsl_distro"]);
 
@@ -439,6 +439,32 @@ export function migrateV4Caps(layout = {}) {
       changed = true;
     }
   }
+  if (out.retries && typeof out.retries === "object" && !Array.isArray(out.retries)) {
+    if (out.retries.implementation === 4) {
+      const from = out.retries.implementation;
+      out.retries.implementation = 5;
+      changes.push({ path: "retries.implementation", from, to: 5 });
+      changed = true;
+    }
+    if (out.retries.verification === 4) {
+      const from = out.retries.verification;
+      out.retries.verification = 5;
+      changes.push({ path: "retries.verification", from, to: 5 });
+      changed = true;
+    }
+    if (out.retries.final_review_fix_rounds === 2) {
+      const from = out.retries.final_review_fix_rounds;
+      out.retries.final_review_fix_rounds = FINAL_REVIEW_FIX_ROUNDS_DEFAULT;
+      changes.push({ path: "retries.final_review_fix_rounds", from, to: FINAL_REVIEW_FIX_ROUNDS_DEFAULT });
+      changed = true;
+    }
+    if (out.retries.escalate_after_not_fixed === 2) {
+      const from = out.retries.escalate_after_not_fixed;
+      out.retries.escalate_after_not_fixed = 3;
+      changes.push({ path: "retries.escalate_after_not_fixed", from, to: 3 });
+      changed = true;
+    }
+  }
   return { layout: out, changed, changes };
 }
 
@@ -515,7 +541,9 @@ export function migrateConfig(input, existingMeta = {}) {
   }
   // config_metadata is machine-written; it belongs in config.meta.json, not the user's config.json.
   delete layout.config_metadata;
-  return {config: layout, layout, changed: legacy.changed, from: legacy.from, to: CURRENT_SCHEMA, meta, removedCertificationFields: legacy.removedCertificationFields};
+  const v4Caps = migrateV4Caps(layout);
+  const finalLayout = v4Caps.layout;
+  return {config: finalLayout, layout: finalLayout, changed: legacy.changed || v4Caps.changed, from: legacy.from, to: CURRENT_SCHEMA, meta, removedCertificationFields: legacy.removedCertificationFields};
 }
 
 // Loads the file and migrates it. The returned `config` is the legacy runtime

@@ -15,7 +15,7 @@ import {
   runAutopilotUntilMarker, hangStarted, cleanup,
 } from "./test-fixtures/workflow-order-harness.mjs";
 import {fixtureGit} from "./test-fixtures/fixture-git.mjs";
-import {PLAN_REVIEW_CONFIRMATION_LINE, PLAN_REVIEW_EXHAUSTIVE_LINE} from "./plan-review-rounds.mjs";
+import {PLAN_REVIEW_CONFIRMATION_LINE, PLAN_REVIEW_EXHAUSTIVE_LINE, PLAN_REVIEW_FULL_LINE, PLAN_REVIEW_VERIFY_LINE} from "./plan-review-rounds.mjs";
 
 const PREVIOUS = "Previous findings from all earlier review rounds";
 let failures = 0;
@@ -112,18 +112,27 @@ try {
     check("sa1 review state cleaned on accept", !st.planReviewConfirmation && !st.planReviewHistory && !st.standalonePlanReview && !st.standalonePlanningReviewCheckpoint, {c: st.planReviewConfirmation, h: !!st.planReviewHistory});
   }
   {
-    // 2. FAIL -> scoped PASS -> confirmation FAIL -> revision -> scoped PASS -> confirmation PASS.
-    const {repo, binDir} = setup("sa2", "standalone", ["FAIL", "PASS", "FAIL", "PASS", "PASS"]);
+    // 2. FAIL -> scoped PASS -> confirmation FAIL -> FULL review with the
+    // previous findings appended PASSes. Backlog #8: that PASS is accepted
+    // without another confirmation (the full round already read everything).
+    const {repo, binDir} = setup("sa2", "standalone", ["FAIL", "PASS", "FAIL", "PASS"]);
     const r = plan(repo, binDir);
     const rv = runs(repo, "plan_reviewer");
     const st = readState(repo);
     check("sa2 exits 0 and reaches tasks_ready", r.status === 0 && st.phase === "tasks_ready", {status: r.status, err: r.stderr.slice(-300)});
-    check("sa2 five reviewer runs", rv.length === 5, rv.length);
-    check("sa2 confirmation runs are #3 and #5 only", rv.map(isConfirmation).join() === "false,false,true,false,true", rv.map(isConfirmation));
-    check("sa2 the scoped re-review after the confirmation FAIL lists the confirmation findings",
-      rv[3] && hasPrev(rv[3]) && rv[3].brief.includes("gap-3"), rv[3]?.brief.slice(-500));
-    check("sa2 both confirmations are fresh full briefs", !hasPrev(rv[2]) && !hasPrev(rv[4]));
+    check("sa2 four reviewer runs", rv.length === 4, rv.length);
+    check("sa2 only run #3 is a confirmation", rv.map(isConfirmation).join() === "false,false,true,false", rv.map(isConfirmation));
+    check("sa2 the round after the confirmation FAIL is a full review with the confirmation findings",
+      rv[3] && !isConfirmation(rv[3]) && hasPrev(rv[3]) && rv[3].brief.includes(PLAN_REVIEW_FULL_LINE) && rv[3].brief.includes("gap-3"), rv[3]?.brief.slice(-500));
+    check("sa2 the round after the confirmation FAIL is not a scoped verify re-review", rv[3] && !rv[3].brief.includes(PLAN_REVIEW_VERIFY_LINE), rv[3]?.brief.slice(-500));
+    check("sa2 the round after the confirmation FAIL carries the full re-check run note", rv[3]?.note === "full re-check", rv[3]?.note);
+    check("sa2 a normal scoped re-review keeps no run note", rv[1]?.note === null, rv[1]?.note);
+    check("sa2 the post-confirmation full round logs the full re-check line (confirmation + full round)",
+      (r.stdout.match(/plan review: full re-check/g) || []).length === 2, (r.stdout.match(/plan review: full re-check/g) || []).length);
+    check("sa2 the confirmation itself is still a fresh full brief", !hasPrev(rv[2]));
     check("sa2 a planner revision ran after the confirmation FAIL (1 + 2 planner runs)", runs(repo, "planner").length === 3, runs(repo, "planner").length);
+    check("sa2 the accepted full round ran no extra confirmation", rv.filter(isConfirmation).length === 1, rv.map(isConfirmation));
+    check("sa2 accept clears the confirmation-failed marker", st.planReviewConfirmationFailed === undefined && st.planReviewConfirmation === undefined, {cf: st.planReviewConfirmationFailed, c: st.planReviewConfirmation});
   }
   {
     // 3. First full review PASS -> accepted, no confirmation round.
@@ -167,10 +176,36 @@ try {
     check("sa5b budget 2: confirmation FAIL spends the second revision and escalates", rb.status !== 0 && /failed review after 2 revision/.test(rb.stdout + rb.stderr), {status: rb.status});
     check("sa5b revision count is 2 and the plan was not accepted", stb.standalonePlanReview?.revision === 2 && stb.phase !== "tasks_ready", {rev: stb.standalonePlanReview?.revision, phase: stb.phase});
     check("sa5b exactly one planner revision ran before the escalation (1 + 1)", runs(b.repo, "planner").length === 2, runs(b.repo, "planner").length);
-    // 5c. Budget 3: confirmation FAIL leads to a second revision, then success.
-    const c = setup("sa5c", "standalone", ["FAIL", "PASS", "FAIL", "PASS", "PASS"], 3);
+    // 5c. Budget 3: confirmation FAIL leads to a second revision, then the
+    // full round PASSes and is accepted without another confirmation.
+    const c = setup("sa5c", "standalone", ["FAIL", "PASS", "FAIL", "PASS"], 3);
     const rc = plan(c.repo, c.binDir);
     check("sa5c budget 3: two revisions (one from a confirmation FAIL) succeed", rc.status === 0 && readState(c.repo).phase === "tasks_ready", {status: rc.status, err: rc.stderr.slice(-200)});
+  }
+  {
+    // 6. Kill during the full round that follows a confirmation FAIL: the
+    // persisted marker makes the resume a FULL review with the previous
+    // findings again (never a scoped re-review, never an acceptance).
+    const {repo, binDir} = setup("sa6", "standalone", ["FAIL", "PASS", "FAIL", "HANG", "PASS"]);
+    const k = await runAutopilotUntilMarker(repo, binDir, {
+      request: "fixture request", markerFile: path.join(repo, ".never-marker"),
+      readyWhen: () => hangStarted(repo, "plan_reviewer", 4), timeoutMs: 240000,
+    });
+    check("sa6 run 1 killed during the post-confirmation full review", k.readyObserved === true && k.killed === true && k.terminationConfirmed === true, {ready: k.readyObserved, killed: k.killed});
+    const mid = readState(repo);
+    check("sa6 the confirmation-failed marker persisted through the kill",
+      mid.planReviewConfirmationFailed?.["standalone-plan"] === true && !mid.planReviewConfirmation, {failed: mid.planReviewConfirmationFailed, pending: mid.planReviewConfirmation});
+    check("sa6 planning is not accepted after the kill", mid.phase !== "tasks_ready", mid.phase);
+    const plannersBefore = runs(repo, "planner").length;
+    const r = plan(repo, binDir, "");
+    const rv = runs(repo, "plan_reviewer");
+    const st = readState(repo);
+    check("sa6 resume finishes at tasks_ready", r.status === 0 && st.phase === "tasks_ready", {status: r.status, err: r.stderr.slice(-300), out: r.stdout.slice(-300)});
+    check("sa6 resume re-ran the FULL review with previous findings, not a confirmation",
+      rv.length === 4 && isConfirmation(rv[3]) === false && hasPrev(rv[3]) && rv[3].brief.includes(PLAN_REVIEW_FULL_LINE) && rv[3].brief.includes("gap-3"), {n: rv.length, conf: rv.map(isConfirmation), brief: rv[3]?.brief.slice(-400)});
+    check("sa6 resume did not re-run the planner", runs(repo, "planner").length === plannersBefore, {before: plannersBefore});
+    check("sa6 the resumed post-confirmation full round carries the full re-check run note", rv[3]?.note === "full re-check", rv[3]?.note);
+    check("sa6 the failed-confirmation marker is cleared on accept", !readState(repo).planReviewConfirmationFailed && !readState(repo).planReviewConfirmation);
   }
 
   // ---- SpecKit (gates review-spec, review-plan, review-tasks share the script;
@@ -191,16 +226,25 @@ try {
     check("sk1 review state cleaned", !st.planReviewConfirmation && !st.planReviewRevisions && !st.planReviewHistory, {c: st.planReviewConfirmation, r: st.planReviewRevisions});
   }
   {
-    // K2. confirmation FAIL -> second revision -> scoped PASS -> confirmation PASS.
-    const {repo, binDir} = setup("sk2", "speckit", ["PASS", "FAIL", "PASS", "FAIL", "PASS", "PASS", "PASS"]);
+    // K2. plan gate: confirmation FAIL -> second revision -> FULL review with
+    // previous findings PASSes and is accepted (no second confirmation).
+    const {repo, binDir} = setup("sk2", "speckit", ["PASS", "FAIL", "PASS", "FAIL", "PASS", "PASS"]);
     const r = plan(repo, binDir);
     const rv = runs(repo, "plan_reviewer");
     const st = readState(repo);
     check("sk2 exits 0 and reaches tasks_ready", r.status === 0 && st.phase === "tasks_ready", {status: r.status, err: r.stderr.slice(-300), out: r.stdout.slice(-300)});
-    check("sk2 seven reviewer runs", rv.length === 7, rv.length);
-    check("sk2 confirmations are runs #4 and #6", rv.map(isConfirmation).join() === "false,false,false,true,false,true,false", rv.map(isConfirmation));
-    check("sk2 re-review after the confirmation FAIL lists its findings", rv[4] && hasPrev(rv[4]) && rv[4].brief.includes("gap-4"));
+    check("sk2 six reviewer runs", rv.length === 6, rv.length);
+    check("sk2 only the fourth run is a confirmation", rv.map(isConfirmation).join() === "false,false,false,true,false,false", rv.map(isConfirmation));
+    check("sk2 the round after the confirmation FAIL is a full review listing its findings",
+      rv[4] && hasPrev(rv[4]) && rv[4].brief.includes(PLAN_REVIEW_FULL_LINE) && rv[4].brief.includes("gap-4"), rv[4]?.brief.slice(-400));
+    check("sk2 the round after the confirmation FAIL is not a scoped verify re-review", rv[4] && !rv[4].brief.includes(PLAN_REVIEW_VERIFY_LINE));
+    check("sk2 the round after the confirmation FAIL carries the full re-check run note", rv[4]?.note === "full re-check", rv[4]?.note);
+    check("sk2 a normal scoped re-review keeps no run note", rv[2]?.note === null, rv[2]?.note);
+    check("sk2 the post-confirmation full round logs the gate full re-check line (confirmation + full round)",
+      (r.stdout.match(/SpecKit gate review-plan: full re-check/g) || []).length === 2, (r.stdout.match(/SpecKit gate review-plan: full re-check/g) || []).length);
     check("sk2 two planner revisions ran (3 stage planners + 2)", runs(repo, "planner").length === 5, runs(repo, "planner").length);
+    check("sk2 the accepted full round ran no extra confirmation", rv.filter(isConfirmation).length === 1, rv.map(isConfirmation));
+    check("sk2 accept clears the confirmation-failed marker", st.planReviewConfirmationFailed === undefined, st.planReviewConfirmationFailed);
   }
   {
     // K3. first review PASS -> accepted, no confirmation at any gate.
@@ -218,8 +262,8 @@ try {
     check("sk4 budget 1: confirmation FAIL escalates instead of revising again", r.status !== 0 && rv.length === 4 && isConfirmation(rv[3]), {status: r.status, n: rv.length});
     check("sk4 only the one revision ran (specify + plan planners + 1; tasks stage never reached)", runs(repo, "planner").length === 3, runs(repo, "planner").length);
     check("sk4 the plan was not accepted", st.phase !== "tasks_ready", st.phase);
-    // K5. budget 2 allows the second revision (the confirmation PASS consumes none).
-    const b = setup("sk5", "speckit", ["PASS", "FAIL", "PASS", "FAIL", "PASS", "PASS", "PASS"], 2);
+    // K5. budget 2 allows the second revision (the accepted full round consumes none).
+    const b = setup("sk5", "speckit", ["PASS", "FAIL", "PASS", "FAIL", "PASS", "PASS"], 2);
     const rb = plan(b.repo, b.binDir);
     check("sk5 budget 2: FAIL revision + confirmation-FAIL revision succeed", rb.status === 0 && readState(b.repo).phase === "tasks_ready", {status: rb.status, err: rb.stderr.slice(-200)});
   }

@@ -90,7 +90,7 @@ check("wire: relay signature default is null",
 check("wire: relay forwards carriedForwardTasks to runRelay",
   /capEnabled,contScope,planRevision,carriedForwardTasks(?:,resultExtra)?\}\), callSite\);/.test(autopilotSource));
 check("wire: runRelay signature default is null",
-  /capEnabled=false,contScope=null,planRevision=null,carriedForwardTasks=null(?:,resultExtra=null)?,__fallbackDepth=0=\{\}\(\)|capEnabled=false,contScope=null,planRevision=null,carriedForwardTasks=null(?:,resultExtra=null)?,__fallbackDepth=0/.test(autopilotSource));
+  /capEnabled=false,contScope=null,planRevision=null,carriedForwardTasks=null(?:,resultExtra=null)?(?:,wrapUpScratchCopyTo=null)?,__fallbackDepth=0=\{\}\(\)|capEnabled=false,contScope=null,planRevision=null,carriedForwardTasks=null(?:,resultExtra=null)?(?:,wrapUpScratchCopyTo=null)?,__fallbackDepth=0/.test(autopilotSource));
 check("wire: retry path re-passes carriedForwardTasks",
   /isWrapUp,runNote,capEnabled,contScope,planRevision,carriedForwardTasks(?:,resultExtra)?,__fallbackDepth/.test(autopilotSource));
 check("wire: guard collapses non-arrays/empty to null",
@@ -120,14 +120,19 @@ check("site: standalone implementer attempt relay passes carriedForwardTasks",
 
 // ── 10. SpecKit implementer loop call-site pins ──────────────────────────
 const speckitFnStart = autopilotSource.indexOf("async function runImplementation(");
-const speckitFnEnd = autopilotSource.indexOf("async function runStandalonePlanning(", speckitFnStart);
-const speckitBody = autopilotSource.slice(speckitFnStart, speckitFnEnd !== -1 ? speckitFnEnd : speckitFnStart + 50000);
+const speckitTail = autopilotSource.slice(speckitFnStart + 1);
+const speckitNextFn = speckitTail.match(/\n(?:async )?function /);
+const speckitBody = speckitNextFn
+  ? autopilotSource.slice(speckitFnStart, speckitFnStart + 1 + speckitNextFn.index)
+  : autopilotSource.slice(speckitFnStart);
 check("site: speckit loop declares carriedTasks array",
   /const carriedTasks=\[\]/.test(speckitBody));
 check("site: speckit loop pushes carried task ids",
   /carriedTasks\.push\(taskId\)/.test(speckitBody));
 check("site: speckit implementer attempt relay passes carriedForwardTasks",
   /relay\("implementer",`[\s\S]*?`,c,s,\{[\s\S]*?carriedForwardTasks:\[...carriedTasks\]\}/.test(speckitBody));
+check("site: speckit combined overlap relay passes carriedForwardTasks",
+  /relay\("implementer",combinedBrief,c,s,\{[\s\S]*?carriedForwardTasks:\[\.\.\.carriedTasks\],?\s*\}\)/.test(speckitBody));
 
 // ── 11. Null elsewhere: non-implementer roles never pass it ──────────────
 for (const [label, pattern] of [

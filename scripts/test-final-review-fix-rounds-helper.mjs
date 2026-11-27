@@ -32,14 +32,15 @@ const FAIL = {status: "completed", review: {decision: "FAIL", findings: ["findin
 const PASS = {status: "completed", review: {decision: "PASS", findings: []}};
 
 // ── Counter + resolver ──
-check("default budget resolves to 2", resolveFinalReviewFixRounds({}) === 2);
+check("default budget resolves to 3", resolveFinalReviewFixRounds({}) === 3);
 check("missing counter reads as 0",
   readFinalReviewFixRoundsUsed({}) === 0 && readFinalReviewFixRoundsUsed(null) === 0
   && readFinalReviewFixRoundsUsed({[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY]: "x"}) === 0);
 check("remaining degrades from the durable counter",
-  finalReviewFixRoundsRemaining({}, {}) === 2
-  && finalReviewFixRoundsRemaining({[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY]: 1}, {}) === 1
-  && finalReviewFixRoundsRemaining({[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY]: 2}, {}) === 0
+  finalReviewFixRoundsRemaining({}, {}) === 3
+  && finalReviewFixRoundsRemaining({[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY]: 1}, {}) === 2
+  && finalReviewFixRoundsRemaining({[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY]: 2}, {}) === 1
+  && finalReviewFixRoundsRemaining({[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY]: 3}, {}) === 0
   && finalReviewFixRoundsRemaining({[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY]: 9}, {}) === 0);
 
 // ── Consume persists ──
@@ -48,13 +49,16 @@ check("remaining degrades from the durable counter",
   let saves = 0;
   const r1 = consumeFinalReviewFixRound(state, {}, {saveState: () => { saves += 1; }});
   check("consume persists the counter and calls saveState",
-    r1.used === 1 && r1.allowed === true && r1.limit === 2
+    r1.used === 1 && r1.allowed === true && r1.limit === 3
     && state[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY] === 1 && saves === 1, JSON.stringify(r1));
   const r2 = consumeFinalReviewFixRound(state, {}, {saveState: () => { saves += 1; }});
   check("second consume persists across rounds",
     r2.used === 2 && r2.allowed === true && state[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY] === 2 && saves === 2);
-  const r3 = consumeFinalReviewFixRound(state, {}, {});
-  check("over-budget consume reports disallowed", r3.used === 3 && r3.allowed === false);
+  const r3 = consumeFinalReviewFixRound(state, {}, {saveState: () => { saves += 1; }});
+  check("third consume persists across rounds up to limit",
+    r3.used === 3 && r3.allowed === true && state[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY] === 3 && saves === 3);
+  const r4 = consumeFinalReviewFixRound(state, {}, {});
+  check("over-budget consume reports disallowed", r4.used === 4 && r4.allowed === false);
 }
 
 // ── Bypass ──
@@ -97,7 +101,7 @@ check("ambiguous signals never bypass",
     },
   });
   check("FAIL-once-then-PASS passes without escalation",
-    result.outcome === "passed" && result.roundsUsed === 2 && result.limit === 2, JSON.stringify({outcome: result.outcome, roundsUsed: result.roundsUsed}));
+    result.outcome === "passed" && result.roundsUsed === 2 && result.limit === 3, JSON.stringify({outcome: result.outcome, roundsUsed: result.roundsUsed}));
   check("counter persisted across the loop rounds",
     state[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY] === 2, JSON.stringify(state));
   check("finding record written once", calls.record === 1, JSON.stringify(calls));
@@ -122,17 +126,17 @@ check("ambiguous signals never bypass",
     },
   });
   check("over-budget FAILs escalate",
-    result.outcome === "escalate" && reviews === 2, JSON.stringify({outcome: result.outcome, reviews}));
+    result.outcome === "escalate" && reviews === 3, JSON.stringify({outcome: result.outcome, reviews}));
   check("escalation keeps the message and step",
     result.step === FINAL_REVIEW_ESCALATION_STEP && result.step === "final_review"
     && result.message === FINAL_REVIEW_ESCALATION_MESSAGE && result.message === "Final review failed.",
     JSON.stringify({step: result.step, message: result.message}));
-  check("counter stops at the budget", state[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY] === 2, JSON.stringify(state));
+  check("counter stops at the budget", state[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY] === 3, JSON.stringify(state));
 }
 
 // ── Pre-seeded counter shortens the loop (durability across runs) ──
 {
-  const state = {[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY]: 1};
+  const state = {[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY]: 2};
   let reviews = 0;
   const result = await runFinalReviewFixRounds({
     state, policy: {},
@@ -147,7 +151,7 @@ check("ambiguous signals never bypass",
     },
   });
   check("pre-seeded counter leaves one round then escalates",
-    result.outcome === "escalate" && reviews === 1 && state[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY] === 2,
+    result.outcome === "escalate" && reviews === 1 && state[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY] === 3,
     JSON.stringify({outcome: result.outcome, reviews, state}));
 }
 
@@ -211,15 +215,15 @@ for (const pv of [true, "read_only_violation"]) {
 
 // ── Terminal reset clears the durable counter (mission-complete hygiene) ──
 {
-  const state = {[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY]: 2, phase: "complete"};
+  const state = {[FINAL_REVIEW_FIX_ROUNDS_STATE_KEY]: 3, phase: "complete"};
   resetFinalReviewFixRoundsUsed(state);
   check("reset clears the counter for the next mission run",
     !(FINAL_REVIEW_FIX_ROUNDS_STATE_KEY in state) && readFinalReviewFixRoundsUsed(state) === 0
-    && finalReviewFixRoundsRemaining(state, {}) === 2, JSON.stringify(state));
+    && finalReviewFixRoundsRemaining(state, {}) === 3, JSON.stringify(state));
   const empty = {};
   resetFinalReviewFixRoundsUsed(empty);
   check("reset on a fresh state is a no-op",
-    !(FINAL_REVIEW_FIX_ROUNDS_STATE_KEY in empty) && finalReviewFixRoundsRemaining(empty, {}) === 2);
+    !(FINAL_REVIEW_FIX_ROUNDS_STATE_KEY in empty) && finalReviewFixRoundsRemaining(empty, {}) === 3);
   check("reset tolerates null state", resetFinalReviewFixRoundsUsed(null) === null);
 }
 

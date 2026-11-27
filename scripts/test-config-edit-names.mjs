@@ -317,6 +317,7 @@ async function main() {
     }
     stdinInput.push(
       '',   // Stronger model when stuck: No (off)
+      '',   // Free models exclude: Enter keeps saved list
       '',   // Test command: Enter keeps the saved command
       'y'   // Save anyway if a model could not be live-verified
     );

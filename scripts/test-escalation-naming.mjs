@@ -152,6 +152,14 @@ const naming = input => decideEscalationName(input);
     !/opencode|muse-spark/.test(bare?.detail || ""), bare);
   check("RATE_LIMITED fallback still carries the resume instruction",
     bare?.detail?.includes("ap run"), bare);
+  // Evidence with retryAt or claude resetsAt keeps both the `ap run` resume
+  // instruction and the formatted local time.
+  const withRetryAt = naming({failureClass: "RATE_LIMITED", retryable: false, used: 0, limit: 2, budget: "infrastructureRetryBudget", evidence: [{type: "rate_limited", retryAt: "2026-09-15T05:30:00.000Z"}]});
+  check("RATE_LIMITED with retryAt keeps `ap run` and formatted time",
+    withRetryAt?.step === "rate_limited_escalation" && /resume with `ap run` after \d{1,2}:\d{2} [AP]M/.test(withRetryAt?.detail || ""), withRetryAt);
+  const withResetsAt = naming({failureClass: "RATE_LIMITED", retryable: false, used: 0, limit: 2, budget: "infrastructureRetryBudget", evidence: [{type: "rate_limited", event: {type: "rate_limit_event", rate_limit_info: {status: "rejected", resetsAt: 1789450200}}}]});
+  check("RATE_LIMITED with claude resetsAt keeps `ap run` and formatted time",
+    withResetsAt?.step === "rate_limited_escalation" && /resume with `ap run` after \d{1,2}:\d{2} [AP]M/.test(withResetsAt?.detail || ""), withResetsAt);
   // Callers without evidence for non-RATE_LIMITED classes are unchanged.
   const unchanged = naming({failureClass: "PERMISSION_DENIED", retryable: false, used: 1, limit: 2, budget: "adapterRetryBudget"});
   check("non-RATE_LIMITED without evidence still persists non_retryable_failure",

@@ -126,6 +126,12 @@ for (const framework of ["standalone", "speckit"]) {
     text.includes(SECTION.brief) && text.includes("phase-briefs/phase-1.md") && /optional/i.test(text));
   check(`[${framework}] revision and task digest bound`, text.includes("revision: 1") && text.includes(DIGEST));
   check(`[${framework}] single-verification contract present`, text.includes(SECTION.singleVerification));
+  check(`[${framework}] implementer prompt says never run the full suite or gate commands`,
+    text.includes("Never run the full test suite or the configured gate commands") && text.includes("only this task's verify and file-scoped tests"));
+  {
+    const roBuilt = buildTaskPrompt(baseOpts(framework, fixture, {role: "codeReviewer", currentTaskId: fixture.taskIds[1]}));
+    check(`[${framework}] no-full-suite line is implementer-only`, roBuilt.ok && !roBuilt.text.includes("Never run the full test suite"));
+  }
   check(`[${framework}] dead-ends section absent without deadEnds opt`, !text.includes(SECTION.deadEnds));
   check(`[${framework}] implementer prompt carries the EOL-normalized diff fallback`,
     text.includes("git diff --ignore-cr-at-eol") && text.includes("git -c core.autocrlf=input diff"), text.slice(-300));
@@ -248,7 +254,8 @@ for (const framework of ["standalone", "speckit"]) {
       reminder.includes(handoffNoteRelPath("001-example", ref)) && /read-only for this role/.test(reminder));
     check("helper: pins overwrite discipline, the four sections, and the limit",
       reminder.includes("OVERWRITE your hand-off note at") && reminder.includes("max 4000 characters")
-      && reminder.includes("Done/Found/Next/Dead ends"));
+      && reminder.includes("1. Checked and clear") && reminder.includes("2. Findings (final)")
+      && reminder.includes("3. Remaining") && reminder.includes("4. Dead ends"));
     const ranged = buildTaskPrompt(baseOpts("standalone", fixture, {role: "codeReviewer", currentTaskId: fixture.taskIds[1], handoffNoteRef: ref}));
     const milestoneHeader = `\n## ${SECTION.milestoneNote}\n`;
     const milestoneStart = ranged.ok ? ranged.text.indexOf(milestoneHeader) : -1;

@@ -143,13 +143,51 @@ export function resolvePlaywrightRuntimeInput(playwrightRuntime) {
   return {ok: true, active: true, moduleDir: moduleCheck.canonical, browserRoot: browserCheck.canonical, reason: null, detail: null};
 }
 
-export function buildNetworkIsolationInvocation({binary, args = [], cwd}) {
-  const prefix = networkIsolationPrefix();
+// joinNetworkNamespace (backlog #4): an argv prefix that joins an EXISTING
+// isolated namespace (app-net.mjs session.joinPrefix, the namespace the app
+// server runs in) instead of creating a fresh one.
+export function buildNetworkIsolationInvocation({binary, args = [], cwd, joinNetworkNamespace = null}) {
+  const prefix = Array.isArray(joinNetworkNamespace) && joinNetworkNamespace.length
+    ? [...joinNetworkNamespace]
+    : networkIsolationPrefix();
   if (!prefix) return {available: false, reason: "network_namespace_unavailable", binary: null, args: [], cwd};
   return {available: true, reason: null, binary: prefix[0], args: [...prefix.slice(1), binary, ...args.map(String)], cwd};
 }
 
-export function buildExecutionEnvelope({repo, scratchDir = null, readOnly = false, config = {}, binary, args = [], permissionFiles = [], runtimeFiles = [], providerEgressPolicy = null, browserCacheDir = null, extraLibraryDirs = [], playwrightModuleDir = null, playwrightBrowserRoot = null, sharedCacheMount = null, sharedCacheCompanionMount = null, extraEnv = {}, sessionStoreMounts = [], credentialDataMounts = []}) {
+// Backlog #5: pure helper that computes the extra bwrap args and sandbox
+// metadata for safety.allow_docker. Returns empty args when allow_docker is
+// false so callers see byte-identical bwrap args.
+export function buildDockerEnvelopeArgs({config = {}, mounts = systemMounts(), dockerSocketPath = "/var/run/docker.sock", hostPath = process.env.PATH || ""} = {}) {
+  const allowDocker = Boolean(config?.safety?.allow_docker === true || config?.policy?.allow_docker === true);
+  if (!allowDocker) return {allowDocker: false, args: [], dockerSocket: null, dockerBinDirs: []};
+  const extraArgs = [];
+  let dockerSocket = null;
+  const dockerBinDirs = [];
+  if (dockerSocketPath && fs.existsSync(dockerSocketPath)) {
+    const resolvedSocket = realPath(dockerSocketPath);
+    extraArgs.push("--dir", "/var", "--dir", "/var/run", "--bind", resolvedSocket, "/var/run/docker.sock");
+    dockerSocket = {host: resolvedSocket, sandbox: "/var/run/docker.sock"};
+  }
+  const seenBinDirs = new Set();
+  for (const toolName of ["docker", "supabase"]) {
+    const found = findExecutableOnPath(toolName, hostPath);
+    if (!found) continue;
+    const resolvedTool = realPath(found);
+    const binDir = path.dirname(resolvedTool);
+    if (seenBinDirs.has(binDir)) continue;
+    seenBinDirs.add(binDir);
+    if (!pathVisibleThroughSystemMounts(binDir, mounts)) {
+      for (const directory of parentDirectories([binDir])) {
+        if (!pathVisibleThroughSystemMounts(directory, mounts)) extraArgs.push("--dir", directory);
+      }
+      extraArgs.push("--ro-bind", binDir, binDir);
+    }
+    dockerBinDirs.push(binDir);
+  }
+  return {allowDocker: true, args: extraArgs, dockerSocket, dockerBinDirs};
+}
+
+export function buildExecutionEnvelope({repo, scratchDir = null, readOnly = false, config = {}, binary, args = [], permissionFiles = [], runtimeFiles = [], providerEgressPolicy = null, browserCacheDir = null, extraLibraryDirs = [], playwrightModuleDir = null, playwrightBrowserRoot = null, sharedCacheMount = null, sharedCacheCompanionMount = null, extraEnv = {}, sessionStoreMounts = [], credentialDataMounts = [], browserBrokerSocket = null, extraReadOnlyMounts = [], dockerSocketPath = "/var/run/docker.sock", hostPath = process.env.PATH || ""}) {
   const context = executionEnvelopeContext({repo, config, binaryPath: binary, permissionFiles, runtimeFiles, providerEgressPolicy});
   if (!context.mechanism.available) {
     return {available: false, reason: context.mechanism.reason, context, binary: null, args: [], cwd: repo, sandbox: null};
@@ -255,6 +293,13 @@ export function buildExecutionEnvelope({repo, scratchDir = null, readOnly = fals
     bwrapArgs.push("--ro-bind", mount, mount);
   }
   bwrapArgs.push("--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/home", "--tmpfs", "/root");
+  // Backlog #5: opt-in Docker/Supabase CLI access inside the sandbox. When
+  // safety.allow_docker is false (default), zero extra args are emitted.
+  const dockerMounts = buildDockerEnvelopeArgs({config, mounts, dockerSocketPath, hostPath});
+  const allowDocker = dockerMounts.allowDocker;
+  const dockerSocket = dockerMounts.dockerSocket;
+  const dockerBinDirs = dockerMounts.dockerBinDirs;
+  if (dockerMounts.args.length) bwrapArgs.push(...dockerMounts.args);
   const browserMounts = [];
   if (browserCacheDir && fs.existsSync(browserCacheDir)) {
     bwrapArgs.push("--ro-bind", realPath(browserCacheDir), "/ms-playwright");
@@ -396,6 +441,35 @@ export function buildExecutionEnvelope({repo, scratchDir = null, readOnly = fals
     bwrapArgs.push("--ro-bind", realPath(resolvedBinary), sandboxBinary);
   }
   for (const mount of runtimeMounts) bwrapArgs.push("--ro-bind", mount.source, mount.target);
+  // Optional host-side verifier browser-check broker socket (single Unix domain
+  // socket file, never a directory) and optional read-only helper directory
+  // mounts. Omitting them leaves bwrapArgs byte-identical.
+  if (browserBrokerSocket != null) {
+    if (typeof browserBrokerSocket !== "object" || typeof browserBrokerSocket.host !== "string" || typeof browserBrokerSocket.sandbox !== "string" || !browserBrokerSocket.sandbox.startsWith("/")) {
+      return {available: false, reason: "browser_broker_mount_invalid", detail: "malformed browserBrokerSocket", context, binary: null, args: [], cwd: repo, sandbox: null};
+    }
+    const check = validateAbsoluteRealPath(browserBrokerSocket.host, {requireDirectory: false});
+    if (!check.ok) {
+      return {available: false, reason: "browser_broker_mount_invalid", detail: `browserBrokerSocket.host:${check.reason}`, context, binary: null, args: [], cwd: repo, sandbox: null};
+    }
+    for (const directory of parentDirectories([browserBrokerSocket.sandbox])) bwrapArgs.push("--dir", directory);
+    bwrapArgs.push("--bind", check.canonical, browserBrokerSocket.sandbox);
+  }
+  if (Array.isArray(extraReadOnlyMounts) && extraReadOnlyMounts.length > 0) {
+    const validatedRoMounts = [];
+    for (const mount of extraReadOnlyMounts) {
+      if (mount == null || typeof mount !== "object" || typeof mount.host !== "string" || typeof mount.sandbox !== "string" || !mount.sandbox.startsWith("/")) {
+        return {available: false, reason: "extra_ro_mount_invalid", detail: "malformed extraReadOnlyMounts entry", context, binary: null, args: [], cwd: repo, sandbox: null};
+      }
+      const check = validateAbsoluteRealDirectory(mount.host);
+      if (!check.ok) {
+        return {available: false, reason: "extra_ro_mount_invalid", detail: `extraReadOnlyMounts.host:${check.reason}`, context, binary: null, args: [], cwd: repo, sandbox: null};
+      }
+      validatedRoMounts.push({host: check.canonical, sandbox: mount.sandbox});
+    }
+    for (const directory of parentDirectories(validatedRoMounts.map(m => m.sandbox))) bwrapArgs.push("--dir", directory);
+    for (const mount of validatedRoMounts) bwrapArgs.push("--ro-bind", mount.host, mount.sandbox);
+  }
   bwrapArgs.push(
     "--setenv", "TMPDIR", "/workspace/scratch",
     "--remount-ro", "/",
@@ -413,7 +487,7 @@ export function buildExecutionEnvelope({repo, scratchDir = null, readOnly = fals
     binary: context.mechanism.binary,
     args: bwrapArgs,
     cwd: repository,
-    sandbox: {repository: "/workspace/repository", scratch: "/workspace/scratch", binary: sandboxBinary, providerEgress: null, browserCache: browserMounts, libraryMounts, playwrightModule, sharedCache, sharedCacheRg, sessionStores, credentialData, extraEnv: extraEnv && typeof extraEnv === "object" ? {...extraEnv} : {}}
+    sandbox: {repository: "/workspace/repository", scratch: "/workspace/scratch", binary: sandboxBinary, providerEgress: null, browserCache: browserMounts, libraryMounts, playwrightModule, sharedCache, sharedCacheRg, sessionStores, credentialData, extraEnv: extraEnv && typeof extraEnv === "object" ? {...extraEnv} : {}, ...(allowDocker ? {allowDocker: true, dockerSocket, dockerBinDirs} : {})}
   };
 }
 
@@ -490,6 +564,14 @@ export function mapEnvironmentIntoEnvelope(environment, envelope, repo, scratchD
   // extraEnv sees no new env vars). Following the AUTOPILOT_PLAYWRIGHT_
   // MODULE_ROOT pattern above in spirit: a caller-computed, always-set
   // value whenever its corresponding mount is active.
+  if (envelope.sandbox?.dockerBinDirs?.length) {
+    const pathKey = Object.keys(mapped).find(k => k.toLowerCase() === "path") || "PATH";
+    const existingEntries = mapped[pathKey] ? String(mapped[pathKey]).split(path.delimiter).filter(Boolean) : [];
+    for (const dir of envelope.sandbox.dockerBinDirs) {
+      if (!existingEntries.includes(dir)) existingEntries.push(dir);
+    }
+    mapped[pathKey] = existingEntries.join(path.delimiter);
+  }
   if (envelope.sandbox?.extraEnv) {
     Object.assign(mapped, envelope.sandbox.extraEnv);
   }
@@ -542,6 +624,18 @@ function systemMounts() {
 function pathVisibleThroughSystemMounts(binary, mounts) {
   const absolute = path.resolve(binary);
   return mounts.some(mount => isWithin(path.resolve(mount), absolute));
+}
+
+function findExecutableOnPath(name, pathEnv) {
+  for (const dir of String(pathEnv || "").split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, name);
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      if (fs.statSync(candidate).isFile()) return candidate;
+    } catch { /* missing or not executable */ }
+  }
+  return null;
 }
 
 function permissionTarget(file) {

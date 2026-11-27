@@ -17,6 +17,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import {isFreeModel} from "./free-model.mjs";
+import {parseFoundEntries} from "./standalone-handoff.mjs";
 import {
   AGY_WRITE_TOOLS,
   AGY_READ_TOOLS,
@@ -60,6 +61,10 @@ export function resolveMinPhaseTasks(policy) {
   return Number.isInteger(raw) && raw > 0 ? raw : MIN_PHASE_TASKS_DEFAULT;
 }
 export const TASK_SIZE_ANNOTATION = "size: cannot split";
+// Backlog rv #4: planner rule preventing one source file from being sliced
+// into "part 1a/1b/..." tasks across a phase. Shared verbatim by both the
+// standalone planner prompt and the SpecKit tasks-stage artifact contract.
+export const SAME_FILE_SPLIT_RULE = "Do not grow one source file through many tasks ('part 1a', 'part 1b', …): when 3 or more tasks of a phase would extend the same non-test file, split the work into one module per concern (e.g. a folder with one file per step plus a thin entry file) so each task owns its own file.";
 // Planner wording: the concrete size rule (like SpecKit's one-action tasks),
 // the top rule "task size wins over phase count", and the background turn
 // figure. Contains no semicolon-sensitive pins; keeps the legacy phrases.
@@ -69,7 +74,7 @@ export function taskSizingRuleText(target = TASK_SIZE_TARGET_TURNS_DEFAULT) {
 // Reviewer wording: FAIL the concrete size rule by counting changes/files in
 // the task line (no turn estimate needed), with a concrete split proposed.
 export function taskSizeReviewText(target = TASK_SIZE_TARGET_TURNS_DEFAULT) {
-  return `FAIL a task that breaks the concrete size rule: count the distinct changes and the files to edit named in the task line — more than 3 distinct changes or more than 2 files to edit (its test file excluded) is oversized, and the line must name the exact file path(s) it edits. Cite the task id and propose the concrete split into additional tasks. Do not FAIL a task whose line carries the annotation \`${TASK_SIZE_ANNOTATION} — <reason>\` (accept it). About ${target} implementer turns is only a background figure — never FAIL a task on a turn estimate alone, and never FAIL a small task for being small. Check the size of EVERY task in this one review and list every oversized task now; do not stop after the first few.`;
+  return `FAIL a task that breaks the concrete size rule: count the distinct changes and the files to edit named in the task line — more than 3 distinct changes or more than 2 files to edit (its test file excluded) is oversized, and the line must name the exact file path(s) it edits. Cite the task id and propose the concrete split into additional tasks. Also raise a [RULE: task size] finding when 4 or more tasks in one phase edit the same non-test file: cite the task ids and propose splitting the file into one module per concern (e.g. a folder with one file per step plus a thin entry file). Do not FAIL a task whose line carries the annotation \`${TASK_SIZE_ANNOTATION} — <reason>\` (accept it). About ${target} implementer turns is only a background figure — never FAIL a task on a turn estimate alone, and never FAIL a small task for being small. Check the size of EVERY task in this one review and list every oversized task now; do not stop after the first few.`;
 }
 // Hard backstop for ONE role call (not a mission timeout): a call that runs
 // past this is killed and resumed/failed. 200 minutes leaves room for the
@@ -218,7 +223,7 @@ export function mergeRoleCaps(existingCaps = {}) {
 // "unreadable_time" | "clock_skew" | "note_not_newer_than_project_edit" |
 // "stale_note".
 export function isHandoffNoteFresh({
-  noteText, noteMtimeMs, lastProjectEditMtimeMs, nowMs, freshnessWindowMs = HANDOFF_NOTE_FRESHNESS_WINDOW_MS,
+  noteText, noteMtimeMs, lastProjectEditMtimeMs, nowMs, freshnessWindowMs = HANDOFF_NOTE_FRESHNESS_WINDOW_MS, minMtimeMs = null,
 } = {}) {
   if (noteText === null || noteText === undefined) return {fresh: false, reason: "missing_note"};
   if (typeof noteText !== "string") return {fresh: false, reason: "missing_note"};
@@ -240,6 +245,12 @@ export function isHandoffNoteFresh({
   // Skewed clocks (or garbage epochs) can never read as fresh: a note or a
   // project edit dated after "now" means the timestamps are untrustworthy.
   if (noteMtime > now || lastEdit > now) return {fresh: false, reason: "clock_skew"};
+  // Backlog s15 #9: when a caller provides minMtimeMs (e.g. current session
+  // start for a read-only review role), a note written by an earlier session
+  // before this session started is not fresh for this session.
+  if (minMtimeMs !== null && minMtimeMs !== undefined && Number.isFinite(Number(minMtimeMs)) && noteMtime < Number(minMtimeMs)) {
+    return {fresh: false, reason: "note_older_than_session"};
+  }
   // The note must be strictly newer than the last project edit: an edit made
   // after the note was written invalidates whatever the note concluded.
   if (!(noteMtime > lastEdit)) return {fresh: false, reason: "note_not_newer_than_project_edit"};
@@ -667,6 +678,19 @@ export function resolvePerRoleLimits(roleName, policy = {}, effective = {}) {
   return {perTaskMaxTurns: maxTurns, perTaskMaxTokens: maxTokens, continuationAllowance, wrapUpTokenThreshold};
 }
 
+// Final review runs over the whole mission delta rather than a single phase,
+// so its default turns cap is 2x the per-phase code_reviewer turns cap unless
+// policy.final_review_max_turns is explicitly configured.
+export function resolveFinalReviewMaxTurns(policy = {}, effective = {}) {
+  const raw = policy?.final_review_max_turns;
+  const explicit = raw === null || raw === undefined ? NaN : Number(raw);
+  if (Number.isInteger(explicit) && explicit >= 1) {
+    return applyFreeModelTurnsCap(explicit, policy, effective);
+  }
+  const base = resolvePerRoleLimits("code_reviewer", policy, effective).perTaskMaxTurns;
+  return base * 2;
+}
+
 // Implementer fallback (not in PER_ROLE_CAPS_DEFAULT) — used when role is "implementer" or unknown.
 // Handled directly in resolvePerRoleLimits using PER_TASK_* constants; not added to PER_ROLE_CAPS_DEFAULT.
 
@@ -698,21 +722,40 @@ export function checkWrapupTrigger({usage, perTaskMaxTurns, perTaskMaxTokens, wr
   return null;
 }
 
+export const REVIEW_HANDOFF_NOTE_LINES = [
+  "1. Checked and clear — file:line ranges + topics reviewed and found OK.",
+  "2. Findings (final) — each BLOCKING/minor finding with file:line evidence.",
+  "3. Remaining — concrete files/sections still to review.",
+  "4. Dead ends — what you tried that did not work, and why.",
+];
+
+export const REVIEW_HANDOFF_NOTE_SHORT = "Checked and clear / Findings (final) / Remaining / Dead ends";
+
+export function isReviewHandoffRole(role) {
+  return role === "plan_reviewer" || role === "code_reviewer" || role === "codeReviewer" || role === "verifier";
+}
+
 // Backlog #26 Step B (TASK-34): the wrap-up prompt. The ONLY message the
 // resumed session receives: write the note now, do not continue the task,
 // do not read more files. Fill path + limit at the call site.
-export function buildWrapUpPrompt(noteRelPath, noteMaxChars) {
+export function buildWrapUpPrompt(noteRelPath, noteMaxChars, options = {}) {
   const pathText = String(noteRelPath ?? "<note-path>");
   const limitText = String(noteMaxChars ?? HANDOFF_NOTE_MAX_CHARS_DEFAULT);
+  const useReviewFormat = Boolean(options?.review || isReviewHandoffRole(options?.role));
+  const sectionLines = useReviewFormat
+    ? REVIEW_HANDOFF_NOTE_LINES
+    : [
+        "1. Done — files changed (names only).",
+        "2. Found — facts the next session needs: exact file:line, function",
+        "   names, how the code works there.",
+        "3. Next — the exact next edit: file, line, what to change.",
+        "4. Dead ends — what you tried that did not work, and why.",
+      ];
   return [
     "STOP — this session's budget is almost used up. Do NOT continue the task",
     `and do NOT read more files. Write your hand-off note NOW to ${pathText}`,
     `(overwrite it), max ${limitText} characters:`,
-    "1. Done — files changed (names only).",
-    "2. Found — facts the next session needs: exact file:line, function",
-    "   names, how the code works there.",
-    "3. Next — the exact next edit: file, line, what to change.",
-    "4. Dead ends — what you tried that did not work, and why.",
+    ...sectionLines,
     "Then stop.",
   ].join("\n");
 }
@@ -740,6 +783,15 @@ export function sessionStoreRelDir(mission, taskRef) {
 export function sessionStoreSandboxSubpath(adapterId) {
   if (adapterId === "opencode") return ".local/share/opencode";
   if (adapterId === "claude") return ".claude";
+  return null;
+}
+
+// Home-relative session store directory used by the wrap-up resume turn so a
+// capped sandboxed/read-only role's resume sees the capped run's session files.
+export function wrapUpSessionStoreSubpath(adapterId) {
+  if (adapterId === "claude") return ".claude";
+  if (adapterId === "opencode") return ".local/share/opencode";
+  if (adapterId === "antigravity" || adapterId === "agy") return ".gemini/antigravity-cli";
   return null;
 }
 
@@ -847,7 +899,7 @@ export function resolveNoProgressGenerations(policy = {}) {
 // spawns finding-fix tasks and re-reviews, up to this many fix rounds per
 // mission run; exhaustion escalates instead of looping forever. Absent or
 // invalid means the code default (2), never "no fix rounds".
-export const FINAL_REVIEW_FIX_ROUNDS_DEFAULT = 2;
+export const FINAL_REVIEW_FIX_ROUNDS_DEFAULT = 3;
 export function resolveFinalReviewFixRounds(policy = {}) {
   const raw = Number(policy?.final_review_fix_rounds);
   if (Number.isInteger(raw) && raw >= 1) return raw;
@@ -1018,6 +1070,29 @@ export function noteSaysOnlyGateLeft(noteText) {
   if (FINDINGS_PATTERN.test(next)) return false;
 
   return true;
+}
+
+// Backlog #9(b): a capped reviewer whose fresh hand-off note already reports
+// a finished review AND a decided PASS/FAIL verdict only owes the
+// orchestrator the AUTOPILOT_REVIEW sentinel. The next plan_reviewer session
+// is then a short VERDICT-ONLY turn instead of a full re-review. Deliberately
+// strict: completion without a verdict, "still reviewing", "verdict pending"
+// and "verdict not decided" all stay false so a half-finished review never
+// gets a verdict-only session.
+export function noteSaysReviewComplete(noteText) {
+  if (typeof noteText !== "string" || !noteText.trim()) return false;
+  const NEGATIVE = /\bnot\s+(?:yet\s+)?(?:complete|completed|done|finished)\b|\bincomplete\b|\bstill\s+(?:reviewing|checking|running|in\s+progress|working)\b|\b(?:review|verdict|audit|analysis)\s+(?:is\s+)?(?:pending|undecided|outstanding)\b|\bverdict\s+(?:is\s+)?not\s+(?:yet\s+)?(?:decided|reached|settled)\b|\b(?:verdict|decision)\s+(?:pending|undecided|tbd)\b|\bno\s+(?:final\s+)?verdict\b|\bnot\s+(?:yet\s+)?decided\b/i;
+  if (NEGATIVE.test(noteText)) return false;
+
+  const COMPLETE = /\b(?:review|analysis|audit|check)\s+(?:is\s+)?(?:now\s+)?(?:complete|completed|done|finished)\b|\b(?:finished|completed|done\s+with)\s+(?:the\s+)?(?:review|analysis|audit)\b|\breview\s+complete\b/i;
+  const VERDICT = /\b(?:verdict|decision|decided|result)\b[^\n]{0,40}\b(?:PASS|FAIL)\b|\b(?:PASS|FAIL)\b[^\n]{0,40}\b(?:verdict|decision|decided)\b|\b(?:complete|completed|finished)\b[^\n]{0,60}\b(?:PASS|FAIL)\b|\b(?:PASS|FAIL)\b[^\n]{0,60}\b(?:complete|completed|finished)\b|\bverdict\s+(?:is\s+)?(?:decided|reached|settled)\b|\bfindings?\s+(?:are\s+)?in\s+(?:the\s+)?final\s+sentinel\b/i;
+  if (COMPLETE.test(noteText) && VERDICT.test(noteText)) return true;
+
+  // A note that states the outcome itself ("verdict decided", "Decision:
+  // FAIL") has finished the review even without the word "complete". The
+  // negatives above still reject pending/undecided/not-decided wording.
+  const DECIDED = /\b(?:verdict|review|decision)\b[^\n]{0,40}\b(?:decided|settled|reached|final)\b|\b(?:verdict|decision)\s*[:\-]\s*(?:PASS|FAIL)\b/i;
+  return DECIDED.test(noteText);
 }
 
 export function noteSaysRevisionDone(noteText) {
@@ -2114,6 +2189,11 @@ export function scratchHandoffNotePath(scratchDir, taskRef) {
 // Destination: .autopilot/missions/<mission>/handoff/<safe taskRef>-scratch/
 export const CARRIED_SCRATCH_MAX_FILE_BYTES = 1024 * 1024; // 1 MB
 export const CARRIED_SCRATCH_TOTAL_CAP_BYTES = 20 * 1024 * 1024; // 20 MB
+// Backlog #9(a)/(c): PowerShell runtime downloads/extractions (e.g.
+// powershell.tar.gz, powershell-cache, pwsh, pwsh-review) exceed 1 MB/20 MB
+// and must still be carried so continuation sessions do not re-download them.
+export const CARRIED_POWERSHELL_CAP_BYTES = 512 * 1024 * 1024; // 512 MB
+const CARRIED_POWERSHELL_PATH_RE = /(?:^|\/)(?:powershell|pwsh)/i;
 
 export function carriedScratchDir(repo, mission, taskRef) {
   const safe = String(taskRef ?? "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "task";
@@ -2130,6 +2210,7 @@ export function copyCarriedScratch(srcDir, destDir) {
     fs.mkdirSync(destDir, {recursive: true});
 
     let totalBytes = 0;
+    let pwshBytes = 0;
     let copiedCount = 0;
 
     function walkAndCopy(currentSrc, currentDest, relPath) {
@@ -2145,15 +2226,22 @@ export function copyCarriedScratch(srcDir, destDir) {
 
         if (entry.isDirectory()) {
           walkAndCopy(srcEntryPath, destEntryPath, entryRel);
-          if (totalBytes >= CARRIED_SCRATCH_TOTAL_CAP_BYTES) return;
+          if (totalBytes >= CARRIED_SCRATCH_TOTAL_CAP_BYTES && pwshBytes >= CARRIED_POWERSHELL_CAP_BYTES) return;
         } else if (entry.isFile()) {
           try {
             const stat = fs.statSync(srcEntryPath);
-            if (stat.size > CARRIED_SCRATCH_MAX_FILE_BYTES) continue;
-            if (totalBytes + stat.size > CARRIED_SCRATCH_TOTAL_CAP_BYTES) return;
+            const isPwsh = CARRIED_POWERSHELL_PATH_RE.test(entryRel);
+            if (isPwsh) {
+              if (pwshBytes + stat.size > CARRIED_POWERSHELL_CAP_BYTES) continue;
+            } else {
+              if (stat.size > CARRIED_SCRATCH_MAX_FILE_BYTES) continue;
+              if (totalBytes + stat.size > CARRIED_SCRATCH_TOTAL_CAP_BYTES) continue;
+            }
             fs.mkdirSync(path.dirname(destEntryPath), {recursive: true});
             fs.copyFileSync(srcEntryPath, destEntryPath);
-            totalBytes += stat.size;
+            try { fs.chmodSync(destEntryPath, stat.mode & 0o777); } catch {}
+            if (isPwsh) pwshBytes += stat.size;
+            else totalBytes += stat.size;
             copiedCount++;
           } catch {}
         }
@@ -2161,7 +2249,7 @@ export function copyCarriedScratch(srcDir, destDir) {
     }
 
     walkAndCopy(srcDir, destDir, "");
-    return {copied: copiedCount, bytes: totalBytes};
+    return {copied: copiedCount, bytes: totalBytes + pwshBytes};
   } catch {
     return {copied: 0, bytes: 0};
   }
@@ -2197,6 +2285,499 @@ export function deleteCarriedScratch(repo, mission, taskRef) {
       return true;
     }
   } catch {}
+  return false;
+}
+
+// Backlog #8: progress-aware review stop helpers.
+// Compares what each capped review session left (carried scratch report text,
+// hand-off note, and files-checked/workDigest). Stops only when session 2
+// made NO progress over session 1 (identical report, same workDigest, and no new
+// findings or files in note).
+export function readCarriedScratchReportText(dir) {
+  try {
+    if (!dir || !fs.existsSync(dir)) return "";
+    const files = [];
+    // The hand-off note lives in the scratch dir as <safe taskRef>.md (dir is
+    // <safe taskRef>-scratch). It is status prose compared separately as
+    // noteText, so it must not count as report content.
+    const noteBase = path.basename(String(dir).replace(/[\\/]+$/, "")).replace(/-scratch$/, "") + ".md";
+    function walk(current) {
+      const entries = fs.readdirSync(current, {withFileTypes: true});
+      for (const entry of entries) {
+        if (current === dir && entry.name === noteBase) continue;
+        if (entry.name === ".autopilot-home" || entry.name === "powershell" || entry.name === "pwsh" || entry.name === "previous-session" || entry.name === "git-guard") continue;
+        const full = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+        } else if (entry.isFile()) {
+          const rel = path.relative(dir, full).replace(/\\/g, "/");
+          files.push({rel, full});
+        }
+      }
+    }
+    walk(dir);
+    files.sort((a, b) => a.rel.localeCompare(b.rel));
+    const parts = [];
+    for (const f of files) {
+      try {
+        const content = fs.readFileSync(f.full, "utf8");
+        parts.push(`${f.rel}:\n${content.trim()}`);
+      } catch {}
+    }
+    return parts.join("\n---\n").trim();
+  } catch {
+    return "";
+  }
+}
+
+const EXCLUDED_FILE_BASENAMES = new Set([
+  "report.md", "handoff.md", "result.json", "status.json", "state.json",
+  "config.json", "package.json", "package-lock.json"
+]);
+
+const EXCLUDED_FILE_EXTENSIONS = new Set([
+  "done", "lock", "log", "tmp"
+]);
+
+export function extractFilesFromText(text) {
+  if (!text) return new Set();
+  const raw = String(text);
+  const matches = raw.match(/\b(?:\/[a-zA-Z0-9_.-]+)+|\b[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_./-]+\b|\b[a-zA-Z0-9_.-]+\.(?:[a-zA-Z0-9]+)\b/g) || [];
+  const files = new Set();
+  for (let m of matches) {
+    m = m.replace(/[.,;:()"`<>\[\]{}]+$/, "").replace(/^[.,;:()"`<>\[\]{}]+/, "");
+    if (!m) continue;
+    m = m.replace(/\\/g, "/");
+    m = m.replace(/^\/workspace\//, "").replace(/^\.\//, "").replace(/^\/+/, "");
+
+    if (m.startsWith(".autopilot/") || m.startsWith("scratch/") || m.startsWith("previous-session/") || m.startsWith("node_modules/")) {
+      continue;
+    }
+    const extMatch = /\.([a-zA-Z0-9]+)$/.exec(m);
+    if (!extMatch && !m.includes("/")) continue;
+    const ext = extMatch ? extMatch[1].toLowerCase() : "";
+    if (EXCLUDED_FILE_EXTENSIONS.has(ext)) continue;
+    const basename = m.split("/").pop().toLowerCase();
+    if (EXCLUDED_FILE_BASENAMES.has(basename)) continue;
+    if (/^\d+(?:\.\d+)+$/.test(m)) continue;
+    if (m.startsWith("http://") || m.startsWith("https://")) continue;
+
+    if (/\.(?:m?[jt]sx?|json|md|py|sh|yml|yaml|css|html|txt|go|rs|c|cpp|h|rb|java|sql)$/i.test(m) || m.includes("/")) {
+      files.add(m.toLowerCase());
+    }
+  }
+  return files;
+}
+
+const NON_FINDING_PATTERNS = [
+  /^(?:\(none\)|none|nil|n\/a|clean|all (?:good|pass|checks pass)|no (?:open )?findings|no issues?)\.?$/i,
+  /\b(?:still reviewing|review in progress|still checking|more checks remain|no verdict(?: yet)?|verdict (?:pending|not decided))\b/i,
+  /\breport at \S+/i,
+  /\b(?:new findings in|findings in) \S+/i,
+  /\(already checked \+ result\)/i,
+  /\(none: no decoded file reads\)/i,
+  /^This session changed no files/i,
+  /^Cut: unknown/i,
+  /^Point: unknown/i,
+  /^Largest read:/i,
+  /^Resume:/i,
+  /^Session work digest/i,
+];
+
+function isNonFinding(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return true;
+  for (const pat of NON_FINDING_PATTERNS) {
+    if (pat.test(trimmed)) return true;
+  }
+  return false;
+}
+
+export function extractFindingsFromText(text) {
+  if (!text) return [];
+  const lines = String(text).split(/\r?\n/);
+  const findings = [];
+  let inFindingsSection = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const headingMatch = /^#{1,4}\s+(.*)/i.exec(trimmed);
+    if (headingMatch) {
+      const headerTitle = headingMatch[1].trim();
+      if (/^(?:findings|found|issues|defects|problems|violations)\b/i.test(headerTitle)) {
+        inFindingsSection = true;
+        continue;
+      } else {
+        inFindingsSection = false;
+        continue;
+      }
+    }
+
+    const numberedSectionMatch = /^\d+\.\s+([A-Za-z]+)\b\s*[-—–:]?\s*(.*)/i.exec(trimmed);
+    if (numberedSectionMatch) {
+      const sectionName = numberedSectionMatch[1].trim();
+      if (/^(?:found|findings)\b/i.test(sectionName)) {
+        inFindingsSection = true;
+        const inlineContent = numberedSectionMatch[2].trim();
+        if (inlineContent && !isNonFinding(inlineContent)) {
+          findings.push(inlineContent);
+        }
+        continue;
+      } else {
+        inFindingsSection = false;
+        continue;
+      }
+    }
+
+    const explicitMatch = /^\s*(?:[-*•]\s+)?(?:(?:Finding|Issue|Bug|Defect|Problem|Violation|Vulnerability)(?:\s*#?\d+)?\s*[-—–:]\s*|\bFAIL\s*[-—–:]\s*)(.+)/i.exec(trimmed);
+    if (explicitMatch) {
+      const content = explicitMatch[1].trim();
+      if (content && !isNonFinding(content)) {
+        findings.push(content);
+        continue;
+      }
+    }
+
+    if (inFindingsSection) {
+      const bulletMatch = /^\s*(?:[-*•]|\d+\.)\s+(.+)/.exec(trimmed);
+      if (bulletMatch) {
+        const content = bulletMatch[1].trim();
+        if (content && !isNonFinding(content)) {
+          findings.push(content);
+        }
+      }
+    }
+  }
+
+  return findings;
+}
+
+const STOPWORDS = new Set([
+  "a", "an", "the", "in", "on", "at", "to", "for", "of", "and", "or",
+  "is", "are", "was", "were", "be", "been", "with", "by", "that", "this"
+]);
+
+export function normalizeFinding(finding) {
+  let s = String(finding ?? "").trim();
+  s = s.replace(/\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b/gi, "");
+  s = s.replace(/\b\d{4}[-/]\d{2}[-/]\d{2}\b/g, "");
+  s = s.replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, "");
+  s = s.replace(/\b\d{10,13}\b/g, "");
+  s = s.replace(/\b(?:run|sess|session|msg|task|b10)-[a-zA-Z0-9_-]+\b/gi, "");
+  s = s.replace(/\b[0-9a-f]{8,40}\b/gi, "");
+  s = s.toLowerCase();
+  s = s.replace(/[^\w\s.-]/g, " ");
+  s = s.replace(/\s+/g, " ").trim();
+  return s;
+}
+
+export function findingWordTokens(normalizedFinding) {
+  const words = normalizedFinding.split(/\s+/).filter((w) => w.length > 1 && !STOPWORDS.has(w));
+  return new Set(words);
+}
+
+export function isRewordedIdenticalFinding(currNormalized, prevNormalized) {
+  if (currNormalized === prevNormalized) return true;
+  const wordsCurr = findingWordTokens(currNormalized);
+  const wordsPrev = findingWordTokens(prevNormalized);
+  if (wordsCurr.size === 0 || wordsPrev.size === 0) return false;
+
+  let common = 0;
+  for (const w of wordsCurr) {
+    if (wordsPrev.has(w)) common++;
+  }
+  const unionSize = wordsCurr.size + wordsPrev.size - common;
+  const jaccard = unionSize > 0 ? common / unionSize : 0;
+  if (jaccard >= 0.6) return true;
+
+  if (common >= Math.min(wordsCurr.size, wordsPrev.size) && Math.min(wordsCurr.size, wordsPrev.size) >= 2) {
+    return true;
+  }
+  return false;
+}
+
+export function extractNormalisedReportLines(text) {
+  if (!text) return [];
+  const lines = String(text).split(/\r?\n/);
+  const out = [];
+  for (const line of lines) {
+    const norm = normalizeFinding(line);
+    if (norm) {
+      out.push(norm);
+    }
+  }
+  return out;
+}
+
+const CHECKED_CLEAR_HEADER_RE = /^(?:#{1,4}\s+|(?:\d+\.\s+)?)checked\s+and\s+clear\b(?:\s*[-—–:]\s*(.*))?$/i;
+const FINDINGS_SECTION_HEADER_RE = /^(?:#{1,4}\s+|(?:\d+\.\s+)?)findings\b(?:\s*\(final\))?(?:\s*[-—–:]\s*(.*))?$/i;
+const ANY_NOTE_SECTION_HEADER_RE = /^(?:#{1,4}\s+\S|\d+\.\s+(?:checked\s+and\s+clear|findings(?:\s*\(final\))?|remaining|dead\s+ends|done|found|next)(?:\b|$|\s|[-—–:]))/i;
+const EMPTY_PLACEHOLDER_RE = /^(?:none(?:\s+yet)?|nothing(?:\s+yet)?|n\/a|no\s+(?:blocking\s+)?findings(?:\s+yet)?|no\s+files(?:\s+yet)?|still\s+reviewing|\(none\)|[-—–]+)\.?$/i;
+
+export function extractCheckedAndClearSection(noteText) {
+  if (!noteText) return {present: false, items: [], raw: ""};
+  const lines = String(noteText).split(/\r?\n/);
+  let present = false;
+  let inSection = false;
+  const rawLines = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const checkedMatch = CHECKED_CLEAR_HEADER_RE.exec(trimmed);
+    if (checkedMatch) {
+      present = true;
+      inSection = true;
+      const inline = String(checkedMatch[1] ?? "").trim();
+      if (inline && !EMPTY_PLACEHOLDER_RE.test(inline)) rawLines.push(inline);
+      continue;
+    }
+    if (inSection) {
+      if (ANY_NOTE_SECTION_HEADER_RE.test(trimmed)) {
+        inSection = false;
+        continue;
+      }
+      if (trimmed && !EMPTY_PLACEHOLDER_RE.test(trimmed.replace(/^[-*•]\s+/, ""))) {
+        rawLines.push(trimmed.replace(/^[-*•]\s+/, ""));
+      }
+    }
+  }
+
+  const items = [];
+  for (const entry of rawLines) {
+    const parts = entry.split(/\s*;\s*/).map((p) => p.trim()).filter(Boolean);
+    for (const part of parts) {
+      if (!EMPTY_PLACEHOLDER_RE.test(part)) items.push(part);
+    }
+  }
+  return {present, items, raw: rawLines.join("\n")};
+}
+
+function extractLineRangeTokens(text) {
+  const out = new Set();
+  if (!text) return out;
+  const re = /\b[A-Za-z0-9_./-]+\.[A-Za-z0-9]{1,8}(?::\d+(?:-\d+)?)?/g;
+  let m;
+  while ((m = re.exec(String(text))) !== null) {
+    out.add(m[0].toLowerCase());
+  }
+  return out;
+}
+
+function checkedAndClearGrew(prevSection, currSection) {
+  if (!currSection.items.length) return false;
+  if (!prevSection.items.length) return true;
+
+  // 1. Any new file path or file:line-range token in Checked and clear counts as growth.
+  const prevTokens = extractLineRangeTokens(prevSection.raw);
+  const currTokens = extractLineRangeTokens(currSection.raw);
+  for (const tok of currTokens) {
+    if (!prevTokens.has(tok)) return true;
+  }
+
+  // 2. Any new non-reworded topic/item in Checked and clear counts as growth.
+  const prevNorms = prevSection.items.map((it) => normalizeFinding(it)).filter(Boolean);
+  const currNorms = currSection.items.map((it) => normalizeFinding(it)).filter(Boolean);
+  for (const c of currNorms) {
+    const isOld = prevNorms.some((p) => isRewordedIdenticalFinding(c, p));
+    if (!isOld) return true;
+  }
+  return false;
+}
+
+export function extractBlockingFindingsFromReviewNote(noteText) {
+  if (!noteText) return [];
+  const lines = String(noteText).split(/\r?\n/);
+  let inFindings = false;
+  let subSeverity = null; // "blocking" | "minor" | null
+  const out = [];
+  const seen = new Set();
+
+  const pushFinding = (raw) => {
+    const cleaned = String(raw ?? "").trim().replace(/^[-*•]\s+/, "").trim();
+    if (!cleaned || EMPTY_PLACEHOLDER_RE.test(cleaned)) return;
+    if (/^no\s+blocking\b/i.test(cleaned)) return;
+    if (/^\s*(?:\[?minor\]?|\(minor\)|minor\s*[-—–:]|note\s*[-—–:]|nit\s*[-—–:])/i.test(cleaned)) return;
+    const key = cleaned.toLowerCase().replace(/\s+/g, " ");
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(cleaned);
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const findingsMatch = FINDINGS_SECTION_HEADER_RE.exec(trimmed);
+    if (findingsMatch) {
+      inFindings = true;
+      subSeverity = null;
+      const inline = String(findingsMatch[1] ?? "").trim();
+      if (inline && /\bblocking\b/i.test(inline) && !/\bno\s+blocking\b/i.test(inline)) {
+        pushFinding(inline);
+      }
+      continue;
+    }
+    if (inFindings) {
+      if (ANY_NOTE_SECTION_HEADER_RE.test(trimmed)) {
+        // Allow sub-headings like "### BLOCKING" or "### Minor" inside Findings.
+        if (/^#{2,4}\s*blocking\b/i.test(trimmed)) {
+          subSeverity = "blocking";
+          continue;
+        }
+        if (/^#{2,4}\s*(?:minor|notes?|nits?)\b/i.test(trimmed)) {
+          subSeverity = "minor";
+          continue;
+        }
+        inFindings = false;
+        subSeverity = null;
+        continue;
+      }
+      if (!trimmed) continue;
+      if (/^(?:\*\*)?blocking(?:\*\*)?\s*[-—–:]?\s*$/i.test(trimmed)) {
+        subSeverity = "blocking";
+        continue;
+      }
+      if (/^(?:\*\*)?(?:minor|notes?|nits?)(?:\*\*)?\s*[-—–:]?\s*$/i.test(trimmed)) {
+        subSeverity = "minor";
+        continue;
+      }
+      const unbulleted = trimmed.replace(/^[-*•]\s+/, "").trim();
+      if (/\bblocking\b/i.test(unbulleted) && !/\bno\s+blocking\b/i.test(unbulleted)) {
+        pushFinding(unbulleted);
+      } else if (subSeverity === "blocking") {
+        pushFinding(unbulleted);
+      }
+    }
+  }
+  return out;
+}
+
+function extractCoverageTableRows(reportText) {
+  if (!reportText) return [];
+  const rows = [];
+  for (const rawLine of String(reportText).split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || !line.includes("|")) continue;
+    // Skip markdown table separator rows like | --- | --- | --- |
+    if (/^\|?[\s:-]+(?:\|[\s:-]+)+\|?$/.test(line)) continue;
+    const cells = line.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim().toLowerCase().replace(/\s+/g, " "));
+    if (cells.length < 2 || cells.every((c) => !c)) continue;
+    if (cells[0] === "requirement" && (cells[1].includes("covering") || cells[1].includes("task") || cells[1].includes("plan"))) continue;
+    rows.push(cells.join(" | "));
+  }
+  return rows;
+}
+
+function coverageTableGrew(prevReport, currReport) {
+  const currRows = extractCoverageTableRows(currReport);
+  if (!currRows.length) return false;
+  const prevSet = new Set(extractCoverageTableRows(prevReport));
+  for (const row of currRows) {
+    if (!prevSet.has(row)) return true;
+  }
+  return false;
+}
+
+// Backlog s15 #9: extract file/command tokens from orchestrator fallback
+// sections appended to a review hand-off note after a backstop cut.
+export const REVIEW_FALLBACK_SECTION_HEADING = "## Orchestrator fallback";
+
+function extractReviewFallbackSectionsText(noteText) {
+  if (!noteText) return "";
+  const lines = String(noteText).split(/\r?\n/);
+  let inFallback = false;
+  const kept = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^##\s+orchestrator\s+fallback\b/i.test(trimmed)) {
+      inFallback = true;
+      continue;
+    }
+    if (inFallback && /^##\s+\S/.test(trimmed)) {
+      inFallback = false;
+      continue;
+    }
+    if (inFallback && trimmed) kept.push(trimmed);
+  }
+  return kept.join("\n");
+}
+
+function reviewFallbackSectionGrew(prevNote, currNote, prevChecked) {
+  const currFallback = extractReviewFallbackSectionsText(currNote);
+  if (!currFallback) return false;
+  const prevFallback = extractReviewFallbackSectionsText(prevNote);
+  const prevKnown = new Set([
+    ...extractLineRangeTokens(prevChecked?.raw || ""),
+    ...extractLineRangeTokens(prevFallback),
+  ]);
+  for (const tok of extractLineRangeTokens(currFallback)) {
+    if (!prevKnown.has(tok)) return true;
+  }
+  // Also check new commands recorded under "- Commands run:"
+  const extractCommands = (txt) => {
+    const out = new Set();
+    for (const line of String(txt || "").split(/\r?\n/)) {
+      const m = line.match(/^-?\s*commands\s+run\s*:\s*(.+)$/i);
+      if (!m) continue;
+      for (const part of m[1].split(/\s*;\s*/)) {
+        const clean = part.trim().toLowerCase();
+        if (clean && !EMPTY_PLACEHOLDER_RE.test(clean)) out.add(clean);
+      }
+    }
+    return out;
+  };
+  const prevCmds = extractCommands(prevFallback);
+  for (const cmd of extractCommands(currFallback)) {
+    if (!prevCmds.has(cmd)) return true;
+  }
+  return false;
+}
+
+export function reviewSessionProgress(prev, current) {
+  if (!prev) return true;
+  if (!current) return false;
+
+  const prevReport = String(prev.reportText ?? "");
+  const currReport = String(current.reportText ?? "");
+  const prevNote = String(prev.noteText ?? "");
+  const currNote = String(current.noteText ?? "");
+
+  // Backlog #4 + #6 + s15 #9: when the review note has a "Checked and clear"
+  // section, progress is whether "Checked and clear" grew, OR an appended
+  // backstop orchestrator fallback section added newly read files/commands,
+  // OR coverage table rows were added over the previous capped session.
+  const prevChecked = extractCheckedAndClearSection(prevNote);
+  const currChecked = extractCheckedAndClearSection(currNote);
+  if (prevChecked.present || currChecked.present) {
+    return checkedAndClearGrew(prevChecked, currChecked)
+      || reviewFallbackSectionGrew(prevNote, currNote, prevChecked)
+      || coverageTableGrew(prevReport, currReport);
+  }
+
+  // Fallback (legacy notes without a "Checked and clear" section):
+  // 1. Newly checked files: paths from carried scratch report / hand-off note
+  // not in the previous set
+  const prevFiles = extractFilesFromText(prevReport + "\n" + prevNote);
+  const currFiles = extractFilesFromText(currReport + "\n" + currNote);
+  for (const file of currFiles) {
+    if (!prevFiles.has(file)) {
+      return true;
+    }
+  }
+
+  // 2. Carried scratch report gained new non-empty lines (normalised)
+  // (Do NOT use the hand-off note's Found/Done/Next prose as findings at all: it is status text)
+  const prevReportLines = extractNormalisedReportLines(prevReport);
+  const currReportLines = extractNormalisedReportLines(currReport);
+
+  for (const currLine of currReportLines) {
+    const isOld = prevReportLines.some((prevLine) => isRewordedIdenticalFinding(currLine, prevLine));
+    if (!isOld) {
+      return true;
+    }
+  }
+
   return false;
 }
 
@@ -2372,6 +2953,128 @@ export function buildOrchestratorFallbackNote(taskRef, events, adapterId, repoRo
   ].join("\n").slice(0, bound);
 }
 
+// Backlog s15 #9: append an orchestrator fallback section (files read, commands
+// run, last message) to a review role's hand-off note when a backstop/raw-context
+// cut happens without the model updating its note. Preserves the existing note
+// so Checked and clear + earlier findings stay intact and the next session does
+// not redo the cut session's ground.
+export function appendReviewBackstopFallbackSection(previousNoteText, {
+  taskRef = "review",
+  events = [],
+  adapterId = "",
+  repoRoot = "",
+  capBreach = null,
+  lastMessage = "",
+  maxChars = HANDOFF_NOTE_MAX_CHARS_DEFAULT,
+} = {}) {
+  const bound = Number.isInteger(maxChars) && maxChars > 0 ? maxChars : HANDOFF_NOTE_MAX_CHARS_DEFAULT;
+  const ref = String(taskRef || "review").trim() || "review";
+  const digest = sessionWorkDigest(adapterId, events, { maxChars: Math.min(2000, bound), repoRoot: String(repoRoot ?? "") }) || "";
+
+  // Extract files read and commands run from the decoded session work digest
+  // plus direct scan of common event shapes.
+  const filesRead = [];
+  const filesSeen = new Set();
+  const addFile = (p) => {
+    const clean = String(p || "").trim().replace(/^['"`]|['"`]$/g, "");
+    if (!clean || filesSeen.has(clean)) return;
+    filesSeen.add(clean);
+    filesRead.push(clean);
+  };
+  const commandsRun = [];
+  const cmdsSeen = new Set();
+  const addCmd = (c) => {
+    const clean = String(c || "").replace(/\s+/g, " ").trim().slice(0, 140);
+    if (!clean || cmdsSeen.has(clean)) return;
+    cmdsSeen.add(clean);
+    commandsRun.push(clean);
+  };
+
+  for (const line of digest.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const readMatch = trimmed.match(/^-?\s*(?:read|inspected|viewed|opened)\s*:?\s*(.+)$/i);
+    if (readMatch) {
+      for (const tok of readMatch[1].split(/[,\s]+/)) {
+        if (/[A-Za-z0-9_./-]+\.[A-Za-z0-9]{1,8}/.test(tok)) addFile(tok);
+      }
+      continue;
+    }
+    const cmdMatch = trimmed.match(/^-?\s*(?:ran|cmd|command|bash|shell)\s*:?\s*(.+)$/i);
+    if (cmdMatch) {
+      addCmd(cmdMatch[1]);
+    }
+  }
+
+  let extractedLastMsg = String(lastMessage || "").replace(/\s+/g, " ").trim();
+  for (const ev of Array.isArray(events) ? events : []) {
+    if (!ev || typeof ev !== "object") continue;
+    // Tool use / read / bash patterns across adapters (claude, codex, opencode, gemini, agy)
+    const contentList = Array.isArray(ev.message?.content) ? ev.message.content : (Array.isArray(ev.content) ? ev.content : []);
+    for (const block of contentList) {
+      if (!block || typeof block !== "object") continue;
+      if (block.type === "tool_use" || block.type === "tool-call") {
+        const name = String(block.name || "").toLowerCase();
+        const inp = block.input || block.args || {};
+        if (/read|view|open|cat/.test(name) && (inp.file_path || inp.path || inp.Path)) {
+          addFile(inp.file_path || inp.path || inp.Path);
+        } else if (/bash|shell|exec|command|run/.test(name) && (inp.command || inp.CommandLine || inp.cmd)) {
+          addCmd(inp.command || inp.CommandLine || inp.cmd);
+        }
+      } else if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
+        extractedLastMsg = block.text.replace(/\s+/g, " ").trim();
+      }
+    }
+    if (ev.type === "tool_use" && ev.part) {
+      const tool = String(ev.part.tool || "").toLowerCase();
+      const inp = ev.part.state?.input || {};
+      if (/read|view/.test(tool) && (inp.filePath || inp.file_path || inp.path)) {
+        addFile(inp.filePath || inp.file_path || inp.path);
+      } else if (/bash|shell|exec/.test(tool) && inp.command) {
+        addCmd(inp.command);
+      }
+    }
+    if (ev.type === "text" && typeof ev.part?.text === "string" && ev.part.text.trim()) {
+      extractedLastMsg = ev.part.text.replace(/\s+/g, " ").trim();
+    }
+    if (ev.type === "item.completed" && ev.item) {
+      if (ev.item.type === "agent_message" && typeof ev.item.text === "string" && ev.item.text.trim()) {
+        extractedLastMsg = ev.item.text.replace(/\s+/g, " ").trim();
+      } else if (ev.item.type === "command_execution" && ev.item.command) {
+        addCmd(ev.item.command);
+      }
+    }
+  }
+
+  const cutLabel = capBreach
+    ? `${capBreach.type || "backstop"} ${capBreach.used ?? "?"}/${capBreach.limit ?? "?"}`
+    : "backstop";
+  const filesLine = filesRead.length ? filesRead.slice(0, 25).join(", ") : "(none)";
+  const cmdsLine = commandsRun.length ? commandsRun.slice(0, 12).join("; ") : "(none)";
+  const msgExcerpt = extractedLastMsg
+    ? (extractedLastMsg.length > 400 ? `${extractedLastMsg.slice(0, 397)}...` : extractedLastMsg)
+    : "(none)";
+
+  const fallbackSection = [
+    `${REVIEW_FALLBACK_SECTION_HEADING} (session cut: ${cutLabel})`,
+    `- Files read: ${filesLine}`,
+    `- Commands run: ${cmdsLine}`,
+    `- Last message: ${msgExcerpt}`,
+  ].join("\n");
+
+  const prev = String(previousNoteText || "").trim();
+  if (!prev) {
+    const fresh = `# Handoff Note — ${ref} (orchestrator fallback)\n\n${fallbackSection}\n`;
+    return fresh.length > bound ? fresh.slice(0, bound) : fresh;
+  }
+
+  const combined = `${prev}\n\n${fallbackSection}\n`;
+  if (combined.length <= bound) return combined;
+  // Keep the new fallback section intact; trim the tail of the previous note if needed.
+  const roomForPrev = Math.max(0, bound - fallbackSection.length - 16);
+  if (roomForPrev <= 0) return fallbackSection.slice(0, bound);
+  return `${prev.slice(0, roomForPrev).trimEnd()}\n…(trimmed)\n\n${fallbackSection}\n`;
+}
+
 // Backlog #15 part 4: the two budget-checkpoint turns (85% and 95% of the
 // per-task turn cap) at which a capped role is told to stop and refresh its
 // hand-off note. Pure. Null for any `maxTurns` that is not a positive
@@ -2387,11 +3090,13 @@ export function handoffReminderTurns(maxTurns) {
 // milestone text for a capped role, or "" when no cap figure is available.
 // Rendered from handoffReminderTurns so the two checkpoints and N can never
 // drift apart.
-export function handoffBudgetReminder(maxTurns) {
+export function handoffBudgetReminder(maxTurns, options = {}) {
   const turns = handoffReminderTurns(maxTurns);
   if (!turns) return "";
   const n = Number(maxTurns);
-  return `Budget checkpoints: at turn ${turns.a} and again at turn ${turns.b} of ${n}, stop and overwrite the hand-off note (Done / Found / Next / Dead ends) before anything else — your session ends at turn ${n} and anything not in the note is lost.`;
+  const useReviewFormat = Boolean(options?.review || isReviewHandoffRole(options?.role));
+  const sections = useReviewFormat ? REVIEW_HANDOFF_NOTE_SHORT : "Done / Found / Next / Dead ends";
+  return `Budget checkpoints: at turn ${turns.a} and again at turn ${turns.b} of ${n}, stop and overwrite the hand-off note (${sections}) before anything else — your session ends at turn ${n} and anything not in the note is lost.`;
 }
 
 // Backlog #15 part 2 / Backlog #4: the orchestrator fallback note must
@@ -2711,4 +3416,65 @@ export function handleRoleBackstopFiring(state, scope, relayResult = {}) {
   });
   const decision = evaluateBackstopEscalation(firings);
   return {escalate: decision.escalate, firings, last: firings[firings.length - 1] || {}};
+}
+
+// Backlog #8: wrap-up turn. When a role is capped (turns cap or
+// wrap_up_at_tokens / backstop) and its hand-off note is stale, the
+// orchestrator RESUMES THE SAME CLI SESSION for one short turn whose only job
+// is to write the note (the session still holds the full context). The prompt
+// is buildWrapUpPrompt() above.
+
+// Pure orchestration of the wrap-up turn so every branch is unit-testable.
+// `resumable` - a session id was captured and the adapter can resume it.
+// `spawnTurn` - async; runs the resumed turn, returns {status, usage?} or throws.
+// `noteIsFresh` - sync; true when a fresh hand-off note now exists.
+// Returns {wrote:true,...} when the resumed turn produced a fresh note, else
+// {wrote:false, reason} - the caller then falls back to the orchestrator
+// fallback note exactly as before. Never throws.
+export async function runModelWrapUpTurn({ resumable, spawnTurn, noteIsFresh }) {
+  if (!resumable) return { wrote: false, reason: "not_resumable" };
+  let turn = null;
+  try {
+    turn = await spawnTurn();
+  } catch (error) {
+    return { wrote: false, reason: `turn_error:${String(error?.message || error).slice(0, 160)}` };
+  }
+  const usage = turn?.usage ?? null;
+  let fresh = false;
+  try { fresh = Boolean(noteIsFresh()); } catch { fresh = false; }
+  if (fresh) return { wrote: true, reason: "resumed_session", turnStatus: turn?.status ?? null, usage };
+  const failed = turn?.status && turn.status !== "completed";
+  return { wrote: false, reason: failed ? `turn_${turn.status}` : "note_still_stale", turnStatus: turn?.status ?? null, usage };
+}
+
+// Copy a capped run's adapter session store directory into the wrap-up run's
+// home before resuming the session. Best-effort: never throws.
+// Skips `.credentials.json` for claude because bwrap --ro-binds the host's
+// credentials file on top of that path (leaving a 0-byte mountpoint in the
+// capped run's scratch dir).
+export function copyWrapUpSessionStore({ fromDir, toDir, adapterId } = {}) {
+  if (!fromDir || !toDir || fromDir === toDir) return false;
+  try {
+    if (!fs.existsSync(fromDir)) return false;
+    const copyTree = (src, dst) => {
+      const stat = fs.lstatSync(src);
+      if (stat.isSymbolicLink()) return;
+      if (stat.isDirectory()) {
+        fs.mkdirSync(dst, { recursive: true });
+        for (const entry of fs.readdirSync(src)) {
+          if (adapterId === "claude" && entry === ".credentials.json") continue;
+          copyTree(path.join(src, entry), path.join(dst, entry));
+        }
+        return;
+      }
+      if (stat.isFile()) {
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.copyFileSync(src, dst);
+      }
+    };
+    copyTree(fromDir, toDir);
+    return true;
+  } catch {
+    return false;
+  }
 }

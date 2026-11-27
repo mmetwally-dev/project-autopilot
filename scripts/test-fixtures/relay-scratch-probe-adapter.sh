@@ -132,6 +132,30 @@ console.log("AUTOPILOT_REVIEW=" + JSON.stringify({ decision: "PASS", findings: [
 NODE
   RELAY_PROBE_SCENARIO="$SCENARIO" node "$NODE_PROBE"
 else
+  if [ "$ROLE" = "code_reviewer" ]; then
+    _PREV_JSON=$(printf '%s\n' "$PROMPT" | awk '
+      /^(FEEDBACK TO ADDRESS|Unconfirmed earlier findings):$/ { in_fb=1; out=""; next }
+      in_fb && /^[[:space:]]*$/ { in_fb=0; next }
+      in_fb {
+        line=$0
+        sub(/^[[:space:]]*[0-9]+\.[[:space:]]*/, "", line)
+        sub(/^[[:space:]]+/, "", line)
+        sub(/[[:space:]]+$/, "", line)
+        if (line != "") {
+          gsub(/\\/, "\\\\", line)
+          gsub(/"/, "\\\"", line)
+          gsub(/\t/, "\\t", line)
+          entry = "{\"finding\":\"" line "\",\"status\":\"fixed\"}"
+          out = (out == "" ? entry : out "," entry)
+        }
+      }
+      END { print out }
+    ')
+    if [ -n "$_PREV_JSON" ]; then
+      printf 'AUTOPILOT_REVIEW={"decision":"PASS","findings":[],"previous":[%s]}\n' "$_PREV_JSON"
+      exit 0
+    fi
+  fi
   printf 'AUTOPILOT_REVIEW={"decision":"PASS","findings":[]}\n'
 fi
 exit 0

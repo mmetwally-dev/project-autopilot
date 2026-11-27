@@ -23,6 +23,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { NETWORK_GATED_TEST_LINE } from "./task-requirements.mjs";
+import { BROWSER_WRAPPER_COMMAND } from "./verifier-browser.mjs";
 
 function playwrightGuidanceLines(playwrightRuntime) {
   const mod = playwrightRuntime?.module;
@@ -47,14 +48,23 @@ function playwrightGuidanceLines(playwrightRuntime) {
   ];
 }
 
-export function verifierTask(task, cwd = null, scratchDir = null, config = null, playwrightRuntime = null) {
+export function verifierTask(task, cwd = null, scratchDir = null, config = null, playwrightRuntime = null, appServerUp = false) {
   const gateCommands = Array.isArray(config?.gates?.commands) ? config.gates.commands.filter(Boolean) : [];
+  const pwReady = playwrightRuntime?.module?.status === "discovered" && playwrightRuntime?.browser?.status === "discovered";
+  // Backlog #5 correction: ap-browser-check joins the app server's network
+  // namespace and needs APP_BASE_URL from a live server session. It is only
+  // an approved command when a server is actually up for THIS verifier run —
+  // a discovered Playwright runtime alone is not enough.
+  const browserCommandApproved = pwReady && appServerUp === true;
+  const approvedCommands = browserCommandApproved
+    ? [...gateCommands, `${BROWSER_WRAPPER_COMMAND} <script.mjs>`]
+    : gateCommands;
   const lines = [
     "You are the verification/QA role.",
     "Verify independently. Do not modify repository files and never commit or push.",
     "Report through stdout only; the trusted relay writes the central result.json.",
-    gateCommands.length
-      ? ["Trusted orchestration has approved only these exact verification commands:", ...gateCommands.map(command => `  - ${command}`)].join("\n")
+    approvedCommands.length
+      ? ["Trusted orchestration has approved only these exact verification commands:", ...approvedCommands.map(command => `  - ${command}`)].join("\n")
       : "No verifier command is approved. Do not invent or run commands.",
     "If a permission denial prevents the required work, report the process limitation; do not turn it into an implementation verdict.",
     "Use your normal browser/UI tools when required. The application server must already be running — server startup belongs to trusted orchestration.",

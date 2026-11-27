@@ -10,11 +10,13 @@ import * as speckit from "../adapters/speckit.mjs";
 import * as gsd from "../adapters/gsd.mjs";
 import * as standalone from "../adapters/standalone.mjs";
 import { specKitState, gsdState } from "../adapters/planning-state.mjs";
-import { createGitMutationGuard, appendGuardScopeRoot, writeGuardBeforeSnapshot, guardedEnv, gitSnapshot, assertSupportedTopology, touchedFilesBetween, sessionFromOutput, roleSession, saveRoleSession, clearRoleSession, readGuardLog, describeGitStateChange, redactedGitSnapshot, formatRelayPolicyViolation, parsePorcelainV1ZEntries, keepEntryAfterEolFilter, classifyGitBlocks, looseObjectGrowthHasCommit } from "./relay-guards.mjs";
+import { createGitMutationGuard, appendGuardScopeRoot, writeGuardBeforeSnapshot, guardedEnv, gitSnapshot, assertSupportedTopology, touchedFilesBetween, TOOL_MARKUP_DEBRIS_LABEL, detectToolMarkupDebrisFiles, sessionFromOutput, roleSession, saveRoleSession, clearRoleSession, readGuardLog, describeGitStateChange, redactedGitSnapshot, formatRelayPolicyViolation, parsePorcelainV1ZEntries, keepEntryAfterEolFilter, classifyGitBlocks, looseObjectGrowthHasCommit } from "./relay-guards.mjs";
 import { collectSnapshotGuards, decideSnapshotReuse, getCachedSnapshot, getSnapshotCacheKey, setCachedSnapshot, clearSnapshotReuseCache, makeCacheEntry } from "./snapshot-reuse-cache.mjs";
 import { logShellDecision, networkIsolationPrefix } from "./shell-guard.mjs";
 import { runGuardedCommand } from "./guarded-command.mjs";
 import { createGateShell } from "./gate-shell.mjs";
+import { appServerConfig, stopAllAppServersSync } from "./app-server.mjs";
+import { startAppSession, verifierAppNote } from "./app-net.mjs";
 import { withAutopilotExclude } from "./gate-autopilot-exclude.mjs";
 import { appendNotRunInMissionsToReport, formatNotRunInMissions } from "./command-probe.mjs";
 import {loadAndMigrateConfig} from "./config-migration.mjs";
@@ -22,6 +24,7 @@ import {diffConfigPaths, applyConfigReload} from "./config-reload.mjs";
 import {planApprovalRequired, beginPlanApprovalPause, resumePlanApproval, isPlanApprovalPaused, planApprovalPauseLines} from "./plan-approval.mjs";
 import {validateNewConfig} from "./config-validation.mjs";
 import {verifyDenylistFindings, effectiveVerifyDenylist, speckitTaskDenylistFindings, verifyLengthFindings, speckitTaskVerifyLengthFindings, verifyShardFindings, speckitTaskVerifyShardFindings, phaseTaskCountFindings, unrecognizedAnnotationFindings, specContentFindings, specCoverageFindings} from "./verify-denylist.mjs";
+import {taskTextFullSuiteFindings, speckitTaskTextFullSuiteFindings, fullSuiteTaskEntries} from "./verify-denylist.mjs";
 import {atomicWriteFileSync} from "./atomic-state-write.mjs";
 import {readResetRequests,enqueueResetRequest,removeResetRequest,removeAllResetRequests} from "./reset-request-queue.mjs";
 import {PLAN_REVISION_RESET_SCOPE,PLAN_REVISION_RESET_KEY,clearPlanRevisionCounter,planRevisionResetRequest,applyPendingPlanRevisionReset} from "./reset-plan-revision.mjs";
@@ -32,14 +35,28 @@ export {ownerPidPath, writeOwnerPid, readOwnerPid, verifyOwnerPid, removeOwnerPi
 // the real builder (buildRelayArgs -> resolveAdapterTransport call shape) and
 // assert the stdin stream-json flags reach every agy child, not just the ones
 // spawned through a mode-driven buildInvocation.
-export {buildRelayArgs as buildRelayArgsForTests, gates as gatesForTests};
+export {buildRelayArgs as buildRelayArgsForTests, gates as gatesForTests, relayVerifierWithApp as relayVerifierWithAppForTests, phaseAppForTests};
 export {stopIfBriefExceedsCap};
+export {
+  handleCappedPlanReviewerWithoutVerdict,
+  handleCappedPlanReviewerWithoutVerdict as handleCappedPlanReviewerWithoutVerdictForTests,
+  handleCodeReviewerUnchangedNote,
+  handleCodeReviewerUnchangedNote as handleCodeReviewerUnchangedNoteForTests,
+  readOnlyContinuationNote,
+  readOnlyContinuationNote as readOnlyContinuationNoteForTests,
+  withPlanReviewVerdictOnlyCap,
+  withPlanReviewVerdictOnlyCap as withPlanReviewVerdictOnlyCapForTests,
+  withFirstRoundReasoning,
+  withFirstRoundReasoning as withFirstRoundReasoningForTests,
+  resolveFirstRoundReasoning,
+  resolveFirstRoundReasoning as resolveFirstRoundReasoningForTests,
+};
 // Exported for offline tests: backlog #1(a) warn-only preflight for OpenCode
 // models that vanished from the live list.
 export {openCodeSandboxModelWarnings as openCodeSandboxModelWarningsForTests};
 // Exported for offline tests of the live reset-request application path, which
 // otherwise only runs inside a live mission.
-export {applyPendingBudgetReset as applyPendingBudgetResetForTests, noteBudgetEscalationTrigger as noteBudgetEscalationTriggerForTests};
+export {applyPendingBudgetReset as applyPendingBudgetResetForTests, noteBudgetEscalationTrigger as noteBudgetEscalationTriggerForTests, maybeSwitchFromUnavailableEscalation as maybeSwitchFromUnavailableEscalationForTests, enforceAttemptFailure as enforceAttemptFailureForTests, resetAdapterRetryBudget as resetAdapterRetryBudgetForTests};
 export { stageFilesChangedSinceReview, stageFilesChangedLine, recordReviewFailSnapshot, clearReviewFailSnapshot, speckitStageFilePaths, speckitGateNote, standalonePlanFeedbackNote, standaloneSpecFeedbackNote } from "./revision-files-changed.mjs";
 // F2b #23b: test-callable handler that records an orchestrator_exit event
 // without re-raising the signal. Accepts (signal, repo, state) or an options
@@ -53,7 +70,8 @@ export function appendOrchestratorExitEvent(missionDir, signal) {
 
 import {skillRoot} from "./paths.mjs";
 import {recordSkillCopy, recordCommand, resumeStageFor} from "./skill-copy.mjs";
-import {cleanMissionScratch} from "./mission-scratch-cleanup.mjs";
+import { cleanMissionScratch, cleanAllMissionsBrowserArtifacts } from "./mission-scratch-cleanup.mjs";
+import { installVerifierBrowserWrapper, finalizeVerifierBrowserArtifacts, startVerifierBrowserBroker, verifierBrowserBrief, evaluateVerifierBrowserOutcome, verifyBrowserProof, shouldRefuseVerifierPassForBrowserCheck } from "./verifier-browser.mjs";
 import {planningArtifactDigest,canSkipPlanningStateReview} from "./planning-artifact-digest.mjs";
 import {resumeTarget} from "./resume-target.mjs";
 import {planUninstall, executeUninstall} from "./uninstall.mjs";
@@ -61,7 +79,7 @@ import { applyAgentSelections, verifyAgentInvocation } from "./agent-invocation.
 import { validateAdapterContract, buildInvocationRecord, buildRuntimeResult } from "./agent-contract.mjs";
 import { verifierTask, remapRepositoryPaths, formatLinkedTestDurations, formatHeavySuiteNoParallelNote } from "./verifier-brief.mjs";
 import { discoverPlaywrightRuntime } from "./playwright-runtime.mjs";
-import {parseReviewContract, classifyObservedFailure, reclassifySilentOpenCodeFailure, verdictFailure, failure, recordFailureBudget, selectAttemptFailure, clearStaleStandaloneBudgets, shouldRefusePassForEvidence, linkedVerifyCommandsForPhase, reviewerLinkedToolResults} from "./failure-contract.mjs";
+import {parseReviewContract, classifyObservedFailure, reclassifySilentOpenCodeFailure, verdictFailure, failure, recordFailureBudget, selectAttemptFailure, clearStaleStandaloneBudgets, resetAdapterRetryBudget, shouldRefusePassForEvidence, linkedVerifyCommandsForPhase, reviewerLinkedToolResults} from "./failure-contract.mjs";
 import {isPlanningReviewRetryFramework} from "./planning-review-decision.mjs";
 import {decideEscalationName} from "./escalation-naming.mjs";
 import {envelopeDenialFailure,envelopeDenialDetail,recordEnvelopeDenial} from "./envelope-denial.mjs";
@@ -75,26 +93,47 @@ import {evaluateStandaloneReview, createStandaloneCheckpoint, artifactDigest as 
 import {preflightConfig, preflightPrimaryModels, primaryModelPreflightMessage, opencodeCliDefaultWarnings, opencodeCliDefaultWarningMessage} from "./preflight.mjs";
 import {spawnRelayChild} from "./subprocess-relay.mjs";
 import {adapterDriver, finalAgentText, sessionIdFromEvents, accumulateUsage, recordRunModel, runModelPatch, applyClaudeReadOnlyScratchAllow, finalVerdictPrinted} from "./adapter-drivers.mjs";
-import {agyRelayExtraArgs} from "./agy-events.mjs";
+import {agyRelayExtraArgs, isOutOfRepoWritePermissionDenied, decideDeniedWriteRetry, agyPathInstruction, resolveHandoffPathsInBrief} from "./agy-events.mjs";
 import {listAgyHubs, runHubsToStop, stopRunHubs} from "./agy-hub-cleanup.mjs";
 import {mergeTaskFacts,mergeTaskLineFacts,browserVerifierNote,browserCheckNotes,CODE_REVIEWER_BROWSER_LINE,isBrowserCheckFinding,splitBrowserFindings,NETWORK_GATED_TEST_LINE,splitNetworkTestFindings,networkCheckNotes,moveManualCheckFindings,verifierVerdictAfterManualMove,filterUnrecordedManualChecks} from "./task-requirements.mjs";
 import {appendManualChecks} from "./manual-checks.mjs";
+import {extractRequiredTools, probeTools, envToolsPromptNote, planReviewEnvToolsRule, plannerEnvToolsRule, isManualTask, splitManualTasks, recordManualTasks, formatManualTasksLines, MANUAL_TASK_NOTE} from "./env-tool-probe.mjs";
 import {buildRoleRequirements, requirementFailure} from "./role-requirements.mjs";
 import { classifyPlanningRequest } from "./planning-request.mjs";
 import { appendWatchEvent } from "./watch-events.mjs";
-import { listSpecKitFeatureDirNames, evaluatePlanningWriteBoundary, splitGitIgnoredTouched, normalizeRel, CLAUDE_MD_MARKER_BEGIN, CLAUDE_MD_MARKER_END } from "./planning-boundary.mjs";
+import { listSpecKitFeatureDirNames, evaluatePlanningWriteBoundary, isPlanFeatureArtifact, splitGitIgnoredTouched, normalizeRel, CLAUDE_MD_MARKER_BEGIN, CLAUDE_MD_MARKER_END } from "./planning-boundary.mjs";
 import { validatePlanningStagePostcondition, formatPostconditionError } from "./speckit-planning-postconditions.mjs";
 import { initRun, observe, finalizeRun, formatDuration, updateRunUsage, updateRunModel, updateRunSnapshots, setRunPreparing, prepareRun } from "./run-observability.mjs";
 import { changedFilesStat } from "./changed-files-stat.mjs";
 import { guardRelay, relayGuardEnabled } from "./relay-guard.mjs";
 import { nextRunSeq, writeWatchReportFile, noE2eReportNote, appendNoE2eNoteToReport, listRunsOldestNewest, watchRunsDir, staleRunningNote } from "./run-history.mjs";
+import { parseVitestGateLog, parseGateLogProgress } from "./watch-report.mjs";
 import { updateSummary, updateSummaryForRunDir, scopeForRunDir } from "./watch-summary.mjs";
 import { recoverStaleRuns, markInterrupted } from "./run-recovery.mjs";
-import { recordCodeReviewRound, clearCodeReviewHistory, codeReviewerRoundLines, implementerEarlierRoundsText, codeReviewScopeKey } from "./code-review-rounds.mjs";
-import { normalizeEscalationModel, scheduleEscalation, pendingEscalationModel, consumeEscalationFor, formatEscalationLog, recordVerifierRound, clearVerifierHistory, verifierRoundLines, scheduleNoProgressEscalation, formatNoProgressEscalationLog, noProgressDecision, endNoProgressRound, budgetEscalationDecision, formatBudgetEscalationLog, budgetEscalationModel, implementerModelFor, clearBudgetEscalation } from "./escalation-model.mjs";
-import { recordPlanReviewRound, seedPlanReviewHistory, clearPlanReviewHistory, planReviewPassNeedsConfirmation, planReviewConfirmationPending, markPlanReviewConfirmationPending, clearPlanReviewConfirmation, planReviewRevisionCount, recordPlanReviewRevision, clearPlanReviewRevisions, planReviewerRoundLines, planReviewerConfirmationLines, plannerEarlierRoundsText, recordPlanReviewNotes, planReviewNotesText, recordPlanPassNotes, planPassNotesText, allPlanPassNotes, firstTaskPassNotes, firstGsdUnitPassNotes, planPassNoteEntries, applyPlanPassNoteMarks, phaseCodeReviewPassNotesText, finalReviewPassNotesText, formatPlanPassNotesLines, PLAN_REVIEW_FULL_LINE, PLAN_REVIEW_SEVERITY_LINE, demoteLowSeverityFindings, STANDALONE_SPEC_ANALYZE_LINE, isFullPlanReviewRound, REVIEW_CONTINUATION_LINE, formatReviewBriefForContinuation, hasReviewContinuationSignal, parseTaskBlocks, changedTaskIds, taskSizeConfirmationLine, demoteUnchangedTaskSizeFindings, recordPlanReviewTaskHashes, getPlanReviewTaskHashes } from "./plan-review-rounds.mjs";
-import { saveReviewFeedback, loadReviewFeedback, clearReviewFeedback, clearReviewFeedbackByPrefix, feedbackText } from "./review-feedback.mjs";
-import { taskLabel, recordFindingTasks, loadFindingTasks, carryDecision, findingsForTask, renderHandledFindings, fixPassBriefExcerpts, clearFindingTasks, clearFindingTasksByPrefix, FINDING_TASKS_STATE_KEY, recordTaskOwnership, loadTaskOwnership, clearTaskOwnership, TASK_OWNERSHIP_STATE_KEY, executePendingCrossPhaseRepairs, rebuildTaskOwnership } from "./finding-task-locality.mjs";
+import { recordCodeReviewRound, clearCodeReviewHistory, codeReviewerRoundLines, implementerEarlierRoundsText, codeReviewScopeKey, normalizePreviousStatuses, evaluateRereviewPreviousStatuses, buildRereviewPreviousRetryPrompt } from "./code-review-rounds.mjs";
+import { normalizeEscalationModel, scheduleEscalation, pendingEscalationModel, consumeEscalationFor, formatEscalationLog, recordVerifierRound, clearVerifierHistory, verifierRoundLines, scheduleNoProgressEscalation, formatNoProgressEscalationLog, formatNoProgressStopMessage, noProgressDecision, endNoProgressRound, budgetEscalationDecision, formatBudgetEscalationLog, budgetEscalationModel, implementerModelFor, clearBudgetEscalation, markEscalationUnavailable, formatEscalationUnavailableLog } from "./escalation-model.mjs";
+export { formatNoProgressStopMessage };
+import { OPERATOR_DECISIONS_STATE_KEY, OPERATOR_DECISIONS_HEADER, withOperatorDecisions, operatorDecisionsBlock, addOperatorDecision, clearOperatorDecisions, enqueueOperatorDecisionOp, applyOperatorDecisionQueue, removeOperatorDecisionQueue, operatorDecisionList } from "./operator-decisions.mjs";
+import { recordPlanReviewRound, seedPlanReviewHistory, clearPlanReviewHistory, planReviewPassNeedsConfirmation, planReviewConfirmationPending, planReviewConfirmationFailed, markPlanReviewConfirmationPending, markPlanReviewConfirmationFailed, clearPlanReviewConfirmation, planReviewRevisionCount, recordPlanReviewRevision, clearPlanReviewRevisions, planReviewerRoundLines, planReviewerConfirmationLines, plannerEarlierRoundsText, recordPlanReviewNotes, planReviewNotesText, recordPlanPassNotes, planPassNotesText, allPlanPassNotes, firstTaskPassNotes, firstGsdUnitPassNotes, planPassNoteEntries, applyPlanPassNoteMarks, phaseCodeReviewPassNotesText, finalReviewPassNotesText, formatPlanPassNotesLines, PLAN_REVIEW_FULL_LINE, PLAN_REVIEW_SEVERITY_LINE, demoteLowSeverityFindings, STANDALONE_SPEC_ANALYZE_LINE, isFullPlanReviewRound, isFirstPlanReviewRound, coverageTableInstruction, REVIEW_CONTINUATION_LINE, formatReviewBriefForContinuation, hasReviewContinuationSignal, parseTaskBlocks, changedTaskIds, taskSizeConfirmationLine, demoteUnchangedTaskSizeFindings, recordPlanReviewTaskHashes, getPlanReviewTaskHashes, extractSectionIds, sameSectionRedesignLine, PLAN_REVIEW_DEFECT_PATTERN_INSTRUCTION, PLAN_REVIEW_ROOT_FLAW_INSTRUCTION, DEFECT_PATTERN_PLAN_REVIEW_INSTRUCTION, PLAN_REVIEW_DEFECT_PATTERN_FIX_INSTRUCTION, PLAN_DEFECT_PATTERN_FIX_INSTRUCTION, PLAN_REVIEW_ROOT_FLAW_FIX_INSTRUCTION, PLANNER_DEFECT_PATTERN_FIX_INSTRUCTION, PLANNER_ROOT_FLAW_FIX_INSTRUCTION, previousSpeckitStage, nextSpeckitStage, recordSpeckitGateFindingCount, clearSpeckitGateFindingCounts, canCarryForwardSpeckitGate, evaluateSpeckitGateExhaustion, recordSpeckitCarriedFindings, getSpeckitCarriedFindings, clearSpeckitCarriedFindings, speckitCarriedFindingsPlannerNote, speckitCarriedFindingsReviewerNote, resolveSpeckitResumeFindings, formatSpeckitGateFailLabel, formatSpeckitGateNoVerdictMessage, buildSpeckitVerdictOnlyRetryPrompt } from "./plan-review-rounds.mjs";
+import { saveReviewFeedback, loadReviewFeedback, clearReviewFeedback, clearReviewFeedbackByPrefix, feedbackText, DEFECT_PATTERN_REVIEW_INSTRUCTION, DEFECT_PATTERN_FIX_INSTRUCTION, loadReviewOpenFindings, saveReviewOpenFindings, clearReviewOpenFindings, clearReviewOpenFindingsByPrefix, updateReviewOpenFindings, formatReviewOpenFindingsBrief, matchFinding } from "./review-feedback.mjs";
+export {
+  DEFECT_PATTERN_REVIEW_INSTRUCTION,
+  DEFECT_PATTERN_FIX_INSTRUCTION,
+  PLAN_REVIEW_DEFECT_PATTERN_INSTRUCTION,
+  PLAN_REVIEW_ROOT_FLAW_INSTRUCTION,
+  DEFECT_PATTERN_PLAN_REVIEW_INSTRUCTION,
+  PLAN_REVIEW_DEFECT_PATTERN_FIX_INSTRUCTION,
+  PLAN_DEFECT_PATTERN_FIX_INSTRUCTION,
+  PLAN_REVIEW_ROOT_FLAW_FIX_INSTRUCTION,
+  PLANNER_DEFECT_PATTERN_FIX_INSTRUCTION,
+  PLANNER_ROOT_FLAW_FIX_INSTRUCTION,
+  extractSectionIds,
+  sameSectionRedesignLine,
+};
+
+export const IMPLEMENTER_RETRY_FEEDBACK_HEADING =
+  `Reviewer feedback from the previous attempt that MUST be addressed — fix every finding or rebut it with evidence, ${DEFECT_PATTERN_FIX_INSTRUCTION}, do not declare the work complete while any finding stands:`;
+import { taskLabel, recordFindingTasks, loadFindingTasks, carryDecision, findingsForTask, renderHandledFindings, fixPassBriefExcerpts, clearFindingTasks, clearFindingTasksByPrefix, FINDING_TASKS_STATE_KEY, recordTaskOwnership, loadTaskOwnership, clearTaskOwnership, TASK_OWNERSHIP_STATE_KEY, executePendingCrossPhaseRepairs, rebuildTaskOwnership, collectOverlapReverifyBatch, buildCombinedOverlapReverifyBrief, runCombinedOverlapReverify } from "./finding-task-locality.mjs";
 import { runFinalReviewFixRounds, finalReviewNextStep, runCappedFixSessions, parseGateGreenFiles, isNoWorkPerformed, isReviewerFeedbackFixPass, buildNoWorkAnswerSection } from "./final-review-fix-rounds.mjs";
 import { classifyGateFailures, parseGateFailures, taskLinkedTestFiles, formatGateFailureEscalation } from "./gate-failure-locality.mjs";
 import { importsDeltaFile } from "./gate-locality-imports.mjs";
@@ -114,11 +153,12 @@ import {buildTaskPrompt, taskDisplayRef, reviewTaskRef, allPhaseTaskRef, readOnl
 import {stableTaskIds} from "./role-progress-ids.mjs";
 import {prepareTaskInvocation, commitTaskResult, evaluateCrashResume} from "./role-progress-commit.mjs";
 import {attributionMap, changedPaths as attributedChangedPaths, detectWorkAhead} from "./task-attribution.mjs";
+import { canReuseFailedReviewOnResume } from "./review-resume-reuse.mjs";
 import { stageFilesChangedSinceReview, stageFilesChangedLine, recordReviewFailSnapshot, clearReviewFailSnapshot, speckitStageFilePaths, speckitGateNote, standalonePlanFeedbackNote, standaloneSpecFeedbackNote, gsdStageFiles } from "./revision-files-changed.mjs";
 import {parseTaskResultContract} from "./task-result-contract.mjs";
-import {taskSizingRuleText, taskSizeReviewText, resolveTaskSizeTargetTurns, resolveMaxPhaseTasks, resolveMinPhaseTasks, resolvePerTaskLimits, resolvePerRoleLimits, checkCapBreach, capUnitLabel, growingTerm, evaluateCapGraceWindow, checkWrapupTrigger, sessionStoreRelDir, sessionStoreSandboxSubpath, consumeContinuation, clearContinuationRound, clearTaskContinuation, recordRolloverDeadEnd, readRolloverDeadEnds, clearRolloverDeadEnds, deadEndTail, sessionWorkDigest, resolveHandoffMaxChars, resolveHandoffNoteMaxChars, resolveHandoffWrapupTokens, handoffNoteRelPath, continuationBudgetKey, CONTINUATION_BUDGET_KEY_PREFIX, resolveContinuationAllowance, RELAY_TIMEOUT_DEFAULT_MS, HANDOFF_WRAPUP_TOKENS_DEFAULT, PER_ROLE_WRAPUP_TOKENS_DEFAULT, WRAPUP_MAX_TURNS, WRAPUP_TIMEOUT_MS, SESSION_STORE_WARN_BYTES, recordGenerationProgress, resolveNoProgressGenerations, clearNoProgress, noProgressDisplayLabel, handoffNoteCitedExcerpts, resolveIdleHangMs, resolveFirstOutputMs, resolveMaxSilenceMs, isHandoffNoteFresh, buildOrchestratorFallbackNote, scratchHandoffNotePath, SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, pickFresherHandoffNote, handoffBudgetReminder, mergeFallbackWithPreviousNote, resolveBackstopRawTokens, evaluateBackstopBreach, recordBackstopFiring, readBackstopFirings, clearBackstopFirings, backstopLedgerKey, evaluateBackstopEscalation, handleRoleBackstopFiring, resolveSessionNumber, carriedScratchDir, copyCarriedScratch, seedPreviousScratch, deleteCarriedScratch, noteSaysOnlyGateLeft, noteSaysRevisionDone} from "./per-task-budget.mjs";
-import {createIdleWatch, noteIdleOutput, noteIdleStdoutChunk, noteIdleStderrText, evaluateIdleWatch, formatIdleHangMessage, formatRateLimitedMessage, adapterMarkerFor, extractSessionIdFromChunk, noteIdleSessionId, IDLE_HANG_KILL_GRACE_MS, FREE_QUOTA_REASON, PROVIDER_BALANCE_REASON} from "./idle-hang-watchdog.mjs";
-import {deriveRoleDeadline, collectRoleSamples, ROLE_DEADLINE_FLOOR_MS} from "./role-deadline.mjs";
+import {taskSizingRuleText, taskSizeReviewText, SAME_FILE_SPLIT_RULE, resolveTaskSizeTargetTurns, resolveMaxPhaseTasks, resolveMinPhaseTasks, resolvePerTaskLimits, resolvePerRoleLimits, resolveFinalReviewMaxTurns, checkCapBreach, capUnitLabel, growingTerm, evaluateCapGraceWindow, checkWrapupTrigger, sessionStoreRelDir, sessionStoreSandboxSubpath, wrapUpSessionStoreSubpath, copyWrapUpSessionStore, consumeContinuation, clearContinuationRound, clearTaskContinuation, recordRolloverDeadEnd, readRolloverDeadEnds, clearRolloverDeadEnds, deadEndTail, sessionWorkDigest, resolveHandoffMaxChars, resolveHandoffNoteMaxChars, resolveHandoffWrapupTokens, handoffNoteRelPath, continuationBudgetKey, CONTINUATION_BUDGET_KEY_PREFIX, resolveContinuationAllowance, RELAY_TIMEOUT_DEFAULT_MS, HANDOFF_WRAPUP_TOKENS_DEFAULT, PER_ROLE_WRAPUP_TOKENS_DEFAULT, WRAPUP_MAX_TURNS, WRAPUP_TIMEOUT_MS, SESSION_STORE_WARN_BYTES, recordGenerationProgress, resolveNoProgressGenerations, clearNoProgress, noProgressDisplayLabel, handoffNoteCitedExcerpts, resolveIdleHangMs, resolveFirstOutputMs, resolveMaxSilenceMs, isHandoffNoteFresh, buildOrchestratorFallbackNote, scratchHandoffNotePath, SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, pickFresherHandoffNote, handoffBudgetReminder, mergeFallbackWithPreviousNote, resolveBackstopRawTokens, evaluateBackstopBreach, recordBackstopFiring, readBackstopFirings, clearBackstopFirings, backstopLedgerKey, evaluateBackstopEscalation, handleRoleBackstopFiring, resolveSessionNumber, carriedScratchDir, copyCarriedScratch, seedPreviousScratch, deleteCarriedScratch, noteSaysOnlyGateLeft, noteSaysRevisionDone, noteSaysReviewComplete, buildWrapUpPrompt, runModelWrapUpTurn, readCarriedScratchReportText, reviewSessionProgress, extractBlockingFindingsFromReviewNote, isReviewHandoffRole, appendReviewBackstopFallbackSection} from "./per-task-budget.mjs";
+import {createIdleWatch, noteIdleOutput, noteIdleStdoutChunk, noteIdleStderrText, evaluateIdleWatch, formatIdleHangMessage, formatRateLimitedMessage, adapterMarkerFor, extractSessionIdFromChunk, noteIdleSessionId, killStuckPagers, IDLE_HANG_KILL_GRACE_MS, FREE_QUOTA_REASON, PROVIDER_BALANCE_REASON} from "./idle-hang-watchdog.mjs";
+import {deriveRoleDeadline, deriveFinalReviewDeadline, collectRoleSamples, ROLE_DEADLINE_FLOOR_MS} from "./role-deadline.mjs";
 import {assembleAdapterLaunchPlan} from "./launch-plan.mjs";
 import {ensureOpenCodeCacheSeeded, acquireOpenCodeCachePin, releaseOpenCodeCachePin, defaultOpenCodeCacheRoot, openCodeSandboxCatalog} from "./opencode-cache.mjs";
 import {cleanStaleOpencodeLibs} from "./tmp-so-cleanup.mjs";
@@ -136,7 +176,7 @@ import {
 } from "./opencode-credentials.mjs";
 import {runFailedBeforeFirstStep, isSessionNotFound, storedSessionMatches} from "./session-reset.mjs";
 import {failedRunDidWork, appendFailureHandoff} from "./failure-handoff.mjs";
-import {decideRoleFallback, resolveEffectiveRoleModel, formatRoleFallbackLog, decideRoleFallbackRetry, stampStickyFallback, staleStickyFallback, markExhausted, isExhausted, skipExhaustedRoleModel, canonicalModelId} from "./role-fallback.mjs";
+import {decideRoleFallback, resolveEffectiveRoleModel, formatRoleFallbackLog, decideRoleFallbackRetry, stampStickyFallback, staleStickyFallback, markExhausted, isExhausted, pruneExhausted, skipExhaustedRoleModel, canonicalModelId, extractExhaustedUntilIso} from "./role-fallback.mjs";
 import {detectModelNotFoundFailure, formatPrimaryModelFallbackLine, primaryModelFallbackEntries} from "./primary-model-fallback.mjs";
 import {setTaskCheckboxes, applyTaskCheckboxStates} from "./speckit-task-state.mjs";
 import {CHECKPOINT_STATE_KEY, createCheckpoint, validateCheckpoint, isCheckpointForPhase, resumeStage, isApprovalReuseStage, phaseTaskDigest, deltaDigest, evaluatePlanningGate, decideTransition, emptyRoleProgress, retryPauseStageOf, shouldRetryPause, getCachedGateResult, setCachedGateResult, recordContinuationGateResult, takeContinuationGateResult, clearContinuationGateResult, getLastGateResult, recordLastGateResult, skipCheckpointStage} from "./phase-stage-checkpoint.mjs";
@@ -149,10 +189,18 @@ import {opencodeRuntimeConfigOverride} from "./opencode-runtime-config.mjs";
 import {sanitizeMissionName, missionOverride, parseRunArgs, PLACEHOLDER_REQUEST, hasUsableRequest, stripSpecNumber, missionSeqOf, stripSeqPrefix, nextMissionSeq, existingMissionSeqForName, nameFromRequest, missionFor, missionDirFor, migrationLog, resolveStandaloneMission, ensureStandaloneMigrated, ensureStandaloneSplit, validateStandaloneSnapshot} from "./mission-naming.mjs";
 import {guardStage} from "./stage-guards.mjs";
 import {findAnchoredTests, formatAnchoredTestsSection} from "./anchored-tests.mjs";
+import {shouldWaitRateLimitReset, __rateLimitWaitHooks, parseRateLimitResetMs} from "./rate-limit-wait.mjs";
+import {waitForNetworkRecovery, applyNetworkWaitExhaustedEvidence, __networkWaitHooks} from "./network-wait.mjs";
+
+export {__rateLimitWaitHooks, parseRateLimitResetMs, __networkWaitHooks};
 
 // Backlog #7 (c): mid-run note instruction for Codex review roles.
 export const CODEX_MID_RUN_NOTE_INSTRUCTION =
   "Update your hand-off note every ~10 commands with the files you checked and the findings so far.";
+
+// Backlog #4: every review-role brief tells the reviewer not to load ap.* skills or run ap.
+export const REVIEWER_NO_AP_SKILLS_LINE =
+  "You are the reviewer: do not load .agents/skills/ap.* skills and do not run `ap` (not available here).";
 
 export function assembleReviewBriefForTests({roleName = "plan_reviewer", adapter = "codex", task = "", repoRoot = "/workspace/repository"} = {}) {
   const role = {adapter};
@@ -168,11 +216,12 @@ export function assembleReviewBriefForTests({roleName = "plan_reviewer", adapter
     "Run every command in the foreground and wait for its output in the same turn. Never start background jobs (&, nohup, setsid, run_in_background), never poll with sleep/ps/pgrep loops: your session ends when you end your turn.",
     "If a git diff shows whole-file churn, re-run it EOL-normalized (git diff --ignore-cr-at-eol or git -c core.autocrlf=input diff) and trust the normalized stat.",
     `This is a READ-ONLY review. Do not modify any file in the repository. You may write only inside the sanctioned scratch directory: /tmp/scratch (temporary test artifacts, browser checks, reports, browser profiles, and Playwright specs/screenshots/traces go there; the orchestrator keeps them for audit).`,
+    REVIEWER_NO_AP_SKILLS_LINE,
     (readOnly && review && role?.adapter === "codex")
       ? "Update your hand-off note every ~10 commands with the files you checked and the findings so far."
       : null,
     "", "TASK:", relayTask,
-    '\nThis is a SINGLE-SHOT invocation: the process exits when your turn ends, and there is no later turn — nothing can notify you afterwards. Never end your turn waiting for a background task, a job, or a notification. Collect the result of any check you start in this same turn, or skip it and state that in your findings: a turn that ends while waiting produces no verdict at all, and the mission halts.\nEnd with exactly one line: AUTOPILOT_REVIEW={"decision":"PASS","findings":[]} or FAIL or INCOMPLETE. Use INCOMPLETE when you cannot finish checking everything in this turn — list what remains unchecked in your findings and the orchestrator will continue the review.\nEach finding must be self-contained and actionable WITHOUT reading this review again: give it as {"tasks":["T1"],"location":"<file, or artifact/section>","problem":"<what is wrong>","correction":"<what must change>"}. When your instructions show [Tn] task labels, every finding MUST include "tasks": the [Tn] labels of the tasks this finding concerns (for example ["T1"]), or [] only when the finding genuinely concerns the whole phase (for example, cross-task wiring) — prefer naming a task whenever one is responsible. When your instructions show no [Tn] task labels at all, omit "tasks". Keep each field to one or two sentences. Plain strings are still accepted, but then the string itself must carry all three.'
+    `\nThis is a SINGLE-SHOT invocation: the process exits when your turn ends, and there is no later turn — nothing can notify you afterwards. Never end your turn waiting for a background task, a job, or a notification. Collect the result of any check you start in this same turn, or skip it and state that in your findings: a turn that ends while waiting produces no verdict at all, and the mission halts.\nEnd with exactly one line: AUTOPILOT_REVIEW={"decision":"PASS","findings":[]} or FAIL or INCOMPLETE. Use INCOMPLETE when you cannot finish checking everything in this turn — list what remains unchecked in your findings and the orchestrator will continue the review.\nEach finding must be self-contained and actionable WITHOUT reading this review again: give it as {"tasks":["T1"],"location":"<file, or artifact/section>","problem":"<what is wrong>","correction":"<what must change>"}. When your instructions show [Tn] task labels, every finding MUST include "tasks": the [Tn] labels of the tasks this finding concerns (for example ["T1"]), or [] only when the finding genuinely concerns the whole phase (for example, cross-task wiring) — prefer naming a task whenever one is responsible. When your instructions show no [Tn] task labels at all, omit "tasks". ${DEFECT_PATTERN_REVIEW_INSTRUCTION}. Keep each field to one or two sentences. Plain strings are still accepted, but then the string itself must carry all three.`
   ].filter(Boolean).join("\n");
   return reviewBriefLines;
 }
@@ -223,7 +272,7 @@ let refreshHook=()=>{}; // no-op refresh hook, assigned to refreshWatchReport on
 for(const [id,a] of Object.entries(agents)){ const contract=validateAdapterContract(id,a); if(!contract.ok) die(`Invalid adapter contract:\n${contract.errors.map(e=>` - ${e}`).join("\n")}`); }
 
 let activeRelayState=null; // track state during a relay for refresh hooks
-const die=m=>{if(activeRelayState) refreshHook(activeRelayState,"die");console.error("ERROR:",m);process.exit(2)};
+const die=m=>{try{stopAllAppServersSync();}catch{}if(activeRelayState) refreshHook(activeRelayState,"die");console.error("ERROR:",m);process.exit(2)};
 const read=p=>fs.readFileSync(p,"utf8");
 const write=(p,s)=>{fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,s)};
 const exists=p=>fs.existsSync(path.join(repo,p));
@@ -275,6 +324,7 @@ const saveState=s=>{
 // Returns null when no mission is active. Watch writes must never break a run,
 // so callers should wrap in try/catch (see refreshWatchReport at :919 pattern).
 function getMissionWatchDir(s){
+  if(s?.missionDir) return s.missionDir;
   const mission = missionDirFor(repo, s);
   return mission ? path.join(repo, ".autopilot", "missions", mission) : null;
 }
@@ -328,6 +378,47 @@ export function reportPlanPassNotes(s, { reportFile = null, repoRoot = repo } = 
     }
   }catch{}
 }
+export function reportManualTasks(s, { reportFile = null, repoRoot = repo } = {}){
+  try{
+    const lines=formatManualTasksLines(s?.manualTasks);
+    if(!lines.length) return;
+    const text=`Manual tasks (for the operator):\n${lines.join("\n")}`;
+    console.log(`\n${text}`);
+    const mission=missionDirFor(repoRoot,s);
+    const targetFile=reportFile || (mission ? path.join(repoRoot,".autopilot","missions",mission,"REPORT.md") : null);
+    if(!targetFile) return;
+    if(fs.existsSync(targetFile)){
+      const cur=fs.readFileSync(targetFile,"utf8");
+      const sectionRegex=/(?:^|\n\n)(?:Manual tasks \(for the operator\):|=== Manual tasks \(for the operator\) ===)\n[\s\S]*?(?=(?:\r?\n\r?\n[^\n]|$))/;
+      const match=cur.match(sectionRegex);
+      if(match){
+        const isAtStart=match.index===0;
+        const replacement=isAtStart?text:`\n\n${text}`;
+        fs.writeFileSync(targetFile,cur.replace(sectionRegex,replacement));
+      }else{
+        fs.writeFileSync(targetFile,`${cur.replace(/\n+$/,"")}\n\n${text}\n`);
+      }
+    }else if(reportFile){
+      fs.writeFileSync(targetFile,`${text}\n`);
+    }
+  }catch{}
+}
+export function skipManualTasksInPhase(phaseTasks, s, { phaseName = "", phaseIndex = null, markCheckboxes = setTaskCheckboxes, save = saveState, refresh = refreshWatchReport, log = console.log } = {}){
+  const {manual, automated}=splitManualTasks(phaseTasks);
+  if(!manual.length) return {manual, automated};
+  try{
+    const fileTasks=manual.filter(t=>t&&t.file&&Number.isInteger(t.line));
+    if(fileTasks.length && typeof markCheckboxes==="function") markCheckboxes(fileTasks,true);
+  }catch{}
+  for(const t of manual){
+    t.done=true;
+    if(typeof log==="function") log(`  ⊘ Skipping manual task (${MANUAL_TASK_NOTE}): ${t.text}`);
+  }
+  recordManualTasks(s,manual,{phaseName,phaseIndex,at:now()});
+  try{ if(typeof save==="function") save(s); }catch{}
+  try{ if(typeof refresh==="function") refresh(s); }catch{}
+  return {manual, automated};
+}
 function finalizeMissionComplete(s){
   delete s.currentTask;
   delete s.currentPhase;
@@ -342,6 +433,9 @@ function finalizeMissionComplete(s){
   delete s.conflict;
   delete s.pendingCheckboxSnapshot;
   delete s.speckitPlanningCheckpoint;
+  delete s.speckitCarriedFindings;
+  delete s.speckitGateFindingCounts;
+  delete s.speckitGateOutcomes;
   // TASK-14 Phase 7 task 24: the two planning-review resume-position
   // checkpoints are cleared here too, so a mission that completes by any path
   // — including one whose stale checkpoint was superseded by a later planning
@@ -369,6 +463,7 @@ function finalizeMissionComplete(s){
   for(const entry of primaryModelFallbackEntries(s)) console.warn(formatPrimaryModelFallbackLine(entry));
   reportNotRunInMissions(s);
   reportPlanPassNotes(s);
+  reportManualTasks(s);
   s.phase="complete";s.step="human_commit";
   saveState(s);
   // Success-only: free this mission's per-run scratch dirs. Never fails the mission.
@@ -416,10 +511,13 @@ function missionControlLiveRun(){
 // start by clearInheritedFailureCounters (the helper prints the run's single
 // clear line), not by the debris drops that reuse this list.
 const MISSION_SCOPED_STATE_KEYS=Object.freeze([
+  // Backlog #11: `ap note` operator decisions belong to THIS mission only.
+  OPERATOR_DECISIONS_STATE_KEY,
   "phaseExecutionCheckpoint","checkpoint","phaseCheckpointError",
   "currentPhase","currentTask","feedback","pendingCheckboxSnapshot",
   "lastFailure","lastFailureBudget","relayPolicyViolation",
   "standalonePlanningReviewCheckpoint","speckitGateReviewCheckpoint",
+  "speckitCarriedFindings","speckitGateFindingCounts","speckitGateOutcomes",
   // The awaiting-approval record is THIS mission's planning outcome: a new
   // request must not inherit a pause the operator never approved.
   "planApproval",
@@ -453,9 +551,11 @@ const MISSION_SCOPED_STATE_KEYS=Object.freeze([
   // Backlog #9: mission-final review started for THIS mission only.
   "finalReviewStarted",
   // Pending #22: one-round escalation model bookkeeping + verifier round history.
-  "escalationSwitches","escalationPending","verifierHistory","noProgressEscalations","budgetEscalations",
+  "escalationSwitches","escalationPending","verifierHistory","noProgressEscalations","budgetEscalations","escalationUnavailable",
   // Backlog #8: manual check notes already recorded this run (per phase)
   "recordedManualCheckNotes",
+  // Backlog #8 (2026-11-19): out-of-repo write denied retries per task
+  "outOfRepoDeniedRetries",
   // Backlog #95: free models already rate-limited this mission (per role).
   "triedFreeModels",
   // Backlog #18: mission-wide models already found RATE_LIMITED by any role,
@@ -470,7 +570,15 @@ const MISSION_SCOPED_STATE_KEYS=Object.freeze([
   // mission or cancel must drop them with the checkpoint they annotate.
   "operatorPhaseEdits",
   // Backlog #6: single verdict-only review turns run on cap when only gate left.
-  "verdictOnlyTurns"
+  "verdictOnlyTurns",
+  // Backlog #9(d): consecutive capped plan_reviewer sessions without a verdict
+  // on the same scope. THIS mission's stop decision; never inherited.
+  "planReviewCappedNoVerdict",
+  // Backlog #10: consecutive capped code_reviewer sessions with an unchanged
+  // fallback note on the same scope.
+  "codeReviewUnchangedNoteStreak",
+  // Backlog #3: `[manual]` tasks skipped for the operator in this mission.
+  "manualTasks"
 ]);
 // F9: settle the INTENT before either crash-recovery reconcile validates a dead
 // mission's debris.
@@ -508,6 +616,7 @@ function dropAbandonedMissionDebris(c,s){
   const hadDebris=MISSION_SCOPED_STATE_KEYS.some(key=>key in s)||hasSpentPlanningContinuations(s);
   if(!hadDebris) return false;
   for(const key of MISSION_SCOPED_STATE_KEYS) delete s[key];
+  removeOperatorDecisionQueue(repo);
   clearPlanningContinuations(s);
   saveState(s);
   console.log("New request detected — the previous mission's crash-recovery debris is dropped, not validated against the new mission.");
@@ -722,6 +831,7 @@ function cancelCommand(args=[]){
   }
 
   for(const key of MISSION_SCOPED_STATE_KEYS) delete s[key];
+  removeOperatorDecisionQueue(repo);
   // Mission 055 Phase 1 task 1.2: a cancelled mission must not hand spent
   // planner continuations to the next mission — clear them with the rest.
   // Implementer keys and failureBudgets survive inside the helper.
@@ -1384,6 +1494,57 @@ function currentFindingEntries(s,scope){
   }
   return out;
 }
+// Backlog #11: `ap note "<decision>" [--yes] [--repo <path>]` / `ap note --clear`
+// records a mission-level operator decision every role brief (planning
+// included) carries. No live run: written to state directly. Live run: queued
+// (its next saveState would overwrite state.json); the run drains the queue
+// when it builds its next brief.
+function noteCommand(args=[]){
+  const usage="usage: ap note \"<decision>\" [--yes] [--repo <path>]   |   ap note --clear [--yes]";
+  let yes=false,clear=false;const words=[];
+  for(let i=0;i<args.length;i++){
+    const a=args[i];
+    if(a==="--yes"){ yes=true; continue; }
+    if(a==="--clear"){ clear=true; continue; }
+    if(a==="--repo"){ i++; continue; }
+    if(a.startsWith("--repo=")) continue;
+    if(a.startsWith("--")){ console.error(`ap note: unknown option '${a}'`); console.error(usage); return 2; }
+    words.push(a);
+  }
+  const text=words.join(" ").trim();
+  if(clear===Boolean(text)){ console.error(usage); return 2; }
+  const s=loadState();
+  const found=stopLivePid();
+  if(found.ambiguous){
+    console.error(`ap note: ${found.ambiguous.length} live runs match this repository (pids ${found.ambiguous.join(", ")}). Stop them by hand, then re-run.`);
+    return 1;
+  }
+  if(!s.mission&&!found.pid){ console.error("ap note: no active mission to attach a decision to. State was NOT touched."); return 1; }
+  if(clear){
+    console.log("ap note --clear — removes every operator decision from this mission.");
+  }else{
+    console.log("ap note — records a binding operator decision for the rest of this mission (planner, reviewers, implementer, verifier):");
+    console.log(`  decision: ${text}`);
+  }
+  if(!yes){
+    if(!stdinIsInteractive()){ console.error("ap note: refusing to act without confirmation and stdin is not interactive. Re-run with --yes."); return 1; }
+    process.stdout.write(`\n${clear?"Clear the decisions":"Record this decision"}? [y/N] `);
+    if(!/^y(es)?$/i.test(readAnswerSync())){ console.log("aborted — nothing was changed."); return 1; }
+  }
+  const at=now();
+  if(found.pid){
+    enqueueOperatorDecisionOp(repo,clear?{op:"clear",at}:{op:"add",text,at});
+    console.log(`${clear?"Clear":"Decision"} queued for the live run (pid ${found.pid}); it applies at the run's next brief.`);
+  }else{
+    // Apply anything an earlier live run left queued first, so order holds.
+    applyOperatorDecisionQueue(s,repo);
+    if(clear) clearOperatorDecisions(s); else addOperatorDecision(s,text,at);
+    saveState(s);
+    console.log(clear?"Operator decisions cleared.":"Decision recorded; the next planner/reviewer/implementer brief carries it.");
+  }
+  try{ const missionDir=getMissionWatchDir(s); if(missionDir) appendWatchEvent(missionDir,{type:"operator",reason:"note",note:clear?"(cleared)":text}); }catch{}
+  return 0;
+}
 function findingCommand(args=[]){
   const usage="usage: ap finding list|drop <n> [--scope <review-feedback-key>] [--note \"<why>\"] [--yes]";
   let sub=null,index=null,scope=null,note="",yes=false;
@@ -1611,6 +1772,7 @@ function clearAllSpentCounters(s){
   // Backlog #18: the mission-wide exhausted-model list is spent state too.
   for(const k of Object.keys(s.exhaustedModels||{})) cleared.push(`exhaustedModels:${k}`);
   if(s.exhaustedModels) s.exhaustedModels={};
+  if(s.outOfRepoDeniedRetries) s.outOfRepoDeniedRetries={};
   return cleared;
 }
 function applyPendingGlobalReset(s){
@@ -1748,6 +1910,35 @@ function resetFallbackCommand(s,role){
   if(dryRun) console.log("dry run — nothing changed");
   return 0;
 }
+// Backlog sk #4: `ap reset --scope speckit-stage:<stage>` (or any key in
+// `planReviewRevisions`) clears ONLY that single gate's revision counter.
+// Other revision counters, reviewFeedback, finding history, stage position,
+// checkpoints and every other field are left untouched.
+function resetPlanReviewRevisionsScopeCommand(s, scopeArg, {dryRun = false} = {}){
+  const found=stopLivePid();
+  if(found.pid||(Array.isArray(found.ambiguous)&&found.ambiguous.length)){
+    console.error(`ap reset: a run is alive — stop it first (\`ap stop\`), then \`ap reset --scope ${scopeArg}\` (or a bare \`ap reset\`, which a live run applies itself).`);
+    return 1;
+  }
+  const hasEntry=Boolean(s.planReviewRevisions && typeof s.planReviewRevisions==="object" && Object.prototype.hasOwnProperty.call(s.planReviewRevisions,scopeArg));
+  const before=hasEntry ? s.planReviewRevisions[scopeArg] : undefined;
+  if(!hasEntry){
+    console.error(`ap reset: '${scopeArg}' has no recorded plan-review revision counter. Nothing to clear (see \`planReviewRevisions\` in state.json).`);
+    return 1;
+  }
+  if(!dryRun){
+    clearPlanReviewRevisions(s,scopeArg);
+    s.lastReset={at:now(),scope:scopeArg,clearedUsed:Number(before)||0,clearedLimit:null,failure:null,role:null,adapter:null,appliedLive:false};
+    saveState(s);
+    const missionDir = getMissionWatchDir(s);
+    try{ if (missionDir) appendWatchEvent(missionDir, { type: "operator", reason: "reset", scope: scopeArg, live: false }); }catch{}
+  }
+  console.log(`Reset '${scopeArg}': ${dryRun ? "would clear" : "cleared"} planReviewRevisions:${scopeArg}=${before}.`);
+  console.log("  revision counter only — other counters, findings, reviewFeedback, stage position, checkpoints and every other field are untouched.");
+  console.log("  `ap run` (no message) now resumes the same mission at the same position.");
+  if(dryRun) console.log("dry run — nothing changed");
+  return 0;
+}
 function resetCommand(scopeArg, {dryRun = false} = {}){
   const s=loadState();
   if(!scopeArg) return resetGlobalCommand(s, {dryRun});
@@ -1756,6 +1947,10 @@ function resetCommand(scopeArg, {dryRun = false} = {}){
   // checked before the continuation/failure resolution below so the
   // colon-free scope is never mistaken for a failure-budget key.
   if(scopeArg===PLAN_REVISION_RESET_SCOPE||scopeArg===PLAN_REVISION_RESET_KEY) return resetPlanRevisionCommand(s, {dryRun});
+  // Backlog sk #4: per-gate SpecKit/GSD planReviewRevisions counter reset.
+  if(scopeArg.startsWith("speckit-stage:") || scopeArg.startsWith("gsd-plan-review:") || (s.planReviewRevisions && Object.prototype.hasOwnProperty.call(s.planReviewRevisions,scopeArg))){
+    return resetPlanReviewRevisionsScopeCommand(s,scopeArg,{dryRun});
+  }
   // Backlog #27: an explicit continuation target (full key, scope without the
   // prefix, or bare task id) takes the continuation path. Failure budgets keep
   // their existing resolution untouched below.
@@ -1781,6 +1976,7 @@ function resetCommand(scopeArg, {dryRun = false} = {}){
   console.error("  - a failure budget: the full budget key, or the scope `lastFailureBudget.budget`/`.scope` name in state.json;");
   console.error("  - a task's continuation (session allowance + dead-ends): `continuationAllowance:task:…`, `task:<framework>:phase-N:<taskId>`, or the bare task id (keys under `continuationBudgets` in state.json).");
   console.error("  - the standalone plan revision counter: `standalone-plan-revision` (standalonePlanReview.revision in state.json).");
+  console.error("  - a SpecKit/GSD gate plan revision counter: `speckit-stage:<stage>` (planReviewRevisions in state.json).");
   console.error("  - a role's sticky model fallback: `fallback:<role>` (activeRoleModels in the state file).");
   return 1;
 }
@@ -1955,6 +2151,10 @@ function resetFailureCommand(s,recorded,key,scope, {dryRun = false} = {}){
 // current at handoffNoteRelPath(mission, taskDisplayRef(...)); the next
 // generation of the same task reads it at prompt build. Best-effort file IO
 // only — a missing/unreadable note renders nothing, never a failure.
+function roleHandoffRef(ref, role){
+  if(!ref) return null;
+  return role ? `${ref}:${role}` : ref;
+}
 function readHandoffNote(missionName, taskRef){
   try{
     if(!missionName || !taskRef) return "";
@@ -2057,8 +2257,8 @@ Resume: ap reset --scope ${contScope} then ap run`);
   // already carry the prefix (role fallbacks) are used directly.
   const noProgLabel=noProgressDisplayLabel({taskId,taskRef,framework});
   const noProgSubject=/^tasks?\s/i.test(noProgLabel)?`${framework==="speckit"?"SpecKit":"Standalone"} ${noProgLabel}`:noProgLabel;
-  die(`${noProgSubject} changed no file in ${consecutive} consecutive sessions (policy.no_progress_generations=${limit}). STOP — human intervention required: read the task hand-off note, then
-Resume: ap reset --scope ${contScope} then ap run`);
+  const escalation=isTaskSite && contScope ? (s?.noProgressEscalations?.[contScope] ?? null) : null;
+  die(formatNoProgressStopMessage({subject:noProgSubject,consecutive,limit,contScope,escalation}));
 }
 function clearHandoffNote(missionName, taskRef){
   try{
@@ -2300,10 +2500,17 @@ function maybeApplyPendingContinuationReset(s,contScope){
     const deadList=s.rolloverDeadEnds?.[fullKey];
     const deadCount=Array.isArray(deadList)?deadList.length:0;
     const hadNoProg=Boolean(s.noProgressEscalations && s.noProgressEscalations[contScope]);
-    if(used===undefined && deadCount===0 && !hadNoProg) continue;
+    // Backlog #9(d): an operator reset must also clear the consecutive
+    // capped-without-verdict streak, or the recovered mission would stop on
+    // its very next cap as if the reset never happened.
+    const hadCappedStreak=Boolean(s.planReviewCappedNoVerdict && typeof s.planReviewCappedNoVerdict==="object" && contScope in s.planReviewCappedNoVerdict);
+    const hadUnchangedNoteStreak=Boolean(s.codeReviewUnchangedNoteStreak && typeof s.codeReviewUnchangedNoteStreak==="object" && contScope in s.codeReviewUnchangedNoteStreak);
+    if(used===undefined && deadCount===0 && !hadNoProg && !hadCappedStreak && !hadUnchangedNoteStreak) continue;
     if(s.continuationBudgets && used!==undefined) delete s.continuationBudgets[fullKey];
     if(s.rolloverDeadEnds && deadList!==undefined) delete s.rolloverDeadEnds[fullKey];
     if(s.noProgressGenerations) delete s.noProgressGenerations[fullKey];
+    if(hadCappedStreak) delete s.planReviewCappedNoVerdict[contScope];
+    if(hadUnchangedNoteStreak) delete s.codeReviewUnchangedNoteStreak[contScope];
     if(hadNoProg && s.noProgressEscalations){
       delete s.noProgressEscalations[contScope];
       if(!Object.keys(s.noProgressEscalations).length) delete s.noProgressEscalations;
@@ -2380,6 +2587,7 @@ let shuttingDown=false;
 // throughout — a handler must never throw. Windows uses taskkill /T (/F
 // for the escalation), which kills the child tree.
 function killActiveProcessGroupSync(pid){
+  try{ stopAllAppServersSync(); }catch{}
   if(!(typeof pid==="number"&&pid>0)) return;
   if(process.platform==="win32"){
     try{ spawnSync("taskkill",["/PID",String(pid),"/T"],{stdio:"ignore",timeout:5000,shell:false}); }catch{}
@@ -2512,6 +2720,34 @@ function recordAttemptFailure(c,s,taskScope,results,gate,{persist=true}={}){
 function enforceAttemptFailure(c,s,taskScope,results,gate,{returnEscalation=false}={}){
   const recorded=recordAttemptFailure(c,s,taskScope,results,gate);
   if(recorded.budget.allowed) return recorded;
+  // Backlog #11: when an adapter/infrastructure error exhausts retry budget on an
+  // escalation model, do not die — the implementation loop switches back to the normal model.
+  const sourceResult = results?.find(r => r?.failure === recorded.failure) || results?.[results.length - 1] || null;
+  const observedEscalated = Boolean(
+    sourceResult?.escalated ||
+    results?.some(r => r?.escalated) ||
+    ((sourceResult?.role === "implementer" || !sourceResult?.role) && (
+      pendingEscalationModel(s,c,"implementer") ||
+      budgetEscalationModel(s,c,taskScope) ||
+      (c?.roles?.implementer?.escalation_model && sourceResult?.model && (
+        sourceResult.model === c.roles.implementer.escalation_model.model ||
+        String(sourceResult.model).endsWith("/" + c.roles.implementer.escalation_model.model)
+      ))
+    ))
+  );
+  if(observedEscalated && (recorded.failure?.domain === "adapter" || recorded.failure?.domain === "infrastructure")){
+    const switched = maybeSwitchFromUnavailableEscalation(s, c, taskScope, sourceResult, sourceResult?.role || "implementer");
+    if(switched){
+      return {
+        ...recorded,
+        budget: {
+          ...recorded.budget,
+          allowed: true,
+          escalationUnavailable: true,
+        },
+      };
+    }
+  }
   const naming=decideEscalationName({failureClass:recorded.failure.class,retryable:recorded.failure.retryable,used:recorded.budget.used,limit:recorded.budget.limit,budget:recorded.budget.budget,evidence:recorded.failure.evidence});
   const message=`${recorded.failure.domain}/${recorded.failure.class} (${recorded.scope}): ${naming.detail}; human intervention required.`;
   if(returnEscalation) return {...recorded,escalate:{step:naming.step,message}};
@@ -3091,6 +3327,7 @@ function makeRelayResult({roleName,role,a,p,args,invocationVerification,output,s
   try{ guardEvents=readGuardLog(guard.logFile); }
   catch{ guardEvents=[]; guardLogReadable=false; }
   const touchedFiles=touchedFilesBetween(before,after,cwd);
+  const toolMarkupDebrisFiles=(roleName==="implementer"&&!readOnly)?detectToolMarkupDebrisFiles(touchedFiles,before?.files):[];
   const readOnlyViolation=!!(readOnly && before.fingerprint!==after.fingerprint && touchedFiles.length>0);
   // Refs are the primary mutation signal: a commit, tag, branch move, or
   // any ref update always changes the for-each-ref output.  HEAD alone
@@ -3164,10 +3401,14 @@ function makeRelayResult({roleName,role,a,p,args,invocationVerification,output,s
   // run so the fallback choke point can tell a vanished model apart from an
   // ordinary rate limit. stderr / structured observations only, never prose.
   const modelNotFound=detectModelNotFoundFailure({stderr:classifyStderr,observations});
-  const observedFailure=reclassifySilentOpenCodeFailure(classifyObservedFailure({exitCode:p.status,stdout:p.stdout,stderr:classifyStderr,startError:p.error,timedOut:p.timedOut,policyViolation,evidence:policyEvidence,driverless:!adapterDriver(role.adapter),adapter:role.adapter}),{adapter:role.adapter,output,stderr:classifyStderr});
+  const hasValidSentinel=reviewContract?.contract?.status==="valid"||parseTaskResultContract(output).ok;
+  const observedFailure=reclassifySilentOpenCodeFailure(classifyObservedFailure({exitCode:p.status,stdout:p.stdout,stderr:classifyStderr,output,hasValidSentinel,startError:p.error,timedOut:p.timedOut,policyViolation,evidence:policyEvidence,driverless:!adapterDriver(role.adapter),adapter:role.adapter}),{adapter:role.adapter,output,stderr:classifyStderr});
   const contract=reviewContract?.contract||{status:"not_required",error:null};
   const verdict=reviewContract?.verdict||{status:"not_applicable",decision:null,findings:[]};
-  const relayFailure=observedFailure||reviewContract?.failure||verdictFailure(roleName,verdict);
+  const debrisFailure=toolMarkupDebrisFiles.length>0
+    ? failure("IMPLEMENTATION_REJECTED","implementation",true,toolMarkupDebrisFiles.map((file)=>({source:"touched_files",type:"tool_markup_debris_file_name",file,message:`${TOOL_MARKUP_DEBRIS_LABEL}: ${JSON.stringify(file)}`})))
+    : null;
+  const relayFailure=observedFailure||reviewContract?.failure||verdictFailure(roleName,verdict)||debrisFailure;
   const invocation = buildInvocationRecord({ role, adapterId: role.adapter, adapter: a, args, verification: invocationVerification, resolvedBinary });
   const result={
     ...buildRuntimeResult({
@@ -3176,6 +3417,7 @@ function makeRelayResult({roleName,role,a,p,args,invocationVerification,output,s
       touchedFiles, policy: { violation: policyViolation, warning: gitGuardWarning, gitMutationAttempted, commitDetected, readOnlyViolation, guardLogUnavailable, fixtureGitBlocksOnlyUnproven: fixtureGitBlocksOnlyUnproven, blockedNoMutation },
       contract,verdict,failure:relayFailure,observations,usage
     }),
+    ...(toolMarkupDebrisFiles.length?{toolMarkupDebrisFiles}:{}),
     model:role.model||null,
     reasoning:role.reasoning||null,
     variant:role.variant||null,
@@ -3251,6 +3493,7 @@ function makeRelayResult({roleName,role,a,p,args,invocationVerification,output,s
     result.gitObjectObservation={loose:{before:looseBefore,after:looseAfter},types:looseCheck.counts,reason:looseCheck.reason||"blob/tree only"};
   }
   if(contract.status==="invalid")result.status="failed";
+  if(debrisFailure)result.status="failed";
   if(p.error)result.status="failed";
   if(roleName) result.role=roleName;
   return result;
@@ -3375,14 +3618,37 @@ export function resolveRuntimeFiles(binaryPath,siblings){
 // tried again. The single entry point for every effective-model resolution.
 function syncStickyFallback(s,c,roleName){
   try{
+    let stateChanged=false;
+    const nowMs=Date.now();
+    if(s.exhaustedModels){
+      const pruned=pruneExhausted(s.exhaustedModels,c.policy,nowMs);
+      if(Object.keys(pruned).length!==Object.keys(s.exhaustedModels).length){
+        s.exhaustedModels=pruned;
+        stateChanged=true;
+      }
+    }
     let configMtimeMs=null;
     try{ configMtimeMs=fs.statSync(cfgPath).mtimeMs; }catch{}
-    const stale=staleStickyFallback({role:roleName,roleConfig:c.roles?.[roleName]??null,activeModel:s.activeRoleModels?.[roleName]??null,policy:c.policy,configMtimeMs});
-    if(!stale) return false;
-    const {[roleName]:_a,...restActive}=s.activeRoleModels||{}; s.activeRoleModels=restActive;
-    if(s.triedFreeModels&&roleName in s.triedFreeModels){ const {[roleName]:_t,...restTried}=s.triedFreeModels; s.triedFreeModels=restTried; }
-    console.log(stale.message);
-    return true;
+    const stale=staleStickyFallback({role:roleName,roleConfig:c.roles?.[roleName]??null,activeModel:s.activeRoleModels?.[roleName]??null,policy:c.policy,nowMs,configMtimeMs});
+    if(stale){
+      const {[roleName]:_a,...restActive}=s.activeRoleModels||{}; s.activeRoleModels=restActive;
+      if(s.triedFreeModels&&roleName in s.triedFreeModels){ const {[roleName]:_t,...restTried}=s.triedFreeModels; s.triedFreeModels=restTried; }
+      console.log(stale.message);
+      stateChanged=true;
+    }
+    if(s.activeRoleModels){
+      for(const [r,act] of Object.entries(s.activeRoleModels)){
+        if(r===roleName) continue;
+        const otherStale=staleStickyFallback({role:r,roleConfig:c.roles?.[r]??null,activeModel:act,policy:c.policy,nowMs,configMtimeMs});
+        if(otherStale){
+          delete s.activeRoleModels[r];
+          if(s.triedFreeModels&&r in s.triedFreeModels) delete s.triedFreeModels[r];
+          console.log(otherStale.message);
+          stateChanged=true;
+        }
+      }
+    }
+    return stateChanged;
   }catch{ return false; }
 }
 function effectiveRoleModelFor(s,c,roleName){
@@ -3444,7 +3710,7 @@ export function combineOwnNoteWithFallbackDigest(ownNote, fallbackNote, maxChars
   return combined.length > bound ? combined.slice(0, bound) : combined;
 }
 
-async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,review=false,persistState=true,alwaysSave=false,fatal,includeError=true,requirements=[],taskFacts={},timeoutMs=null,taskRef=null,isWrapUp=false,runNote=null,capEnabled=false,contScope=null,planRevision=null,carriedForwardTasks=null,resultExtra=null,__fallbackDepth=0,__sessionRetry=false,__testCapBreach=null,__testEvents=null}={}){
+async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,review=false,persistState=true,alwaysSave=false,fatal,includeError=true,requirements=[],taskFacts={},timeoutMs=null,taskRef=null,isWrapUp=false,runNote=null,capEnabled=false,contScope=null,planRevision=null,carriedForwardTasks=null,resultExtra=null,wrapUpScratchCopyTo=null,__fallbackDepth=0,__sessionRetry=false,__testCapBreach=null,__testEvents=null,__networkWaitState=null,wrapUpSessionStoreDir=null}={}){
   reloadConfigIfChanged(c);
   const fail=(m)=>{ if(fatal) return fatal(m); throw new Error(m); };
   // Task 042-1.5: refuse new role runs once SIGTERM/SIGINT arrived. Must stay
@@ -3474,11 +3740,11 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       if(effective&&isExhausted(s.exhaustedModels,effective,c.policy,nowMs)){
         let decision=skipExhaustedRoleModel({role:roleName,roleConfig:rawRole,activeModel:s.activeRoleModels?.[roleName]??null,exhausted:s.exhaustedModels,policy:c.policy,nowMs});
         if(decision?.action!=="switch"){
-          decision=await extendFallbackWithFree({decision:{action:"escalate",reason:`${roleName}: exhausted model; no configured fallback`},role:roleName,roleConfig:rawRole,activeModel:s.activeRoleModels?.[roleName]??null,failureClass:"RATE_LIMITED",tried:s.triedFreeModels?.[roleName]??[],enabled:c.freeModelAutoFallback!==false,adapters:agents,discover:(a)=>agents[a]?discoverModelCatalog(agents[a]):[],exhausted:s.exhaustedModels,policy:c.policy,nowMs});
+          decision=await extendFallbackWithFree({decision:{action:"escalate",reason:`${roleName}: exhausted model; no configured fallback`},role:roleName,roleConfig:rawRole,activeModel:s.activeRoleModels?.[roleName]??null,failureClass:"RATE_LIMITED",tried:s.triedFreeModels?.[roleName]??[],enabled:c.freeModelAutoFallback!==false,adapters:agents,discover:(a)=>agents[a]?discoverModelCatalog(agents[a]):[],exhausted:s.exhaustedModels,policy:c.policy,exclude:c.freeModelExclude??[],nowMs});
         }
         if(decision?.action==="switch"&&decision.next){
           s.activeRoleModels={...(s.activeRoleModels||{}),[roleName]:stampStickyFallback(decision.next,rawRole,now())};
-          const spent=s.exhaustedModels?.[`${effective.adapter}/${effective.model}`];
+          const spent=s.exhaustedModels?.[canonicalModelId(effective)];
           const at=Date.parse(spent?.at);
           const ago=Number.isFinite(at)?Math.max(0,Math.floor((nowMs-at)/60000)):0;
           console.log(`${formatRoleFallbackLog({role:roleName,from:effective,to:decision.next,reason:decision.autoDiscovered?"RATE_LIMITED, auto-discovered free model":"RATE_LIMITED"})} — skipped, exhausted by ${spent?.by??"unknown"} ${ago} min ago`);
@@ -3632,6 +3898,12 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     try{ opencodeCredentialProvision.cleanup(); }catch{}
     opencodeCredentialProvision=null;
   };
+  let verifierBrowserBroker=null;
+  const cleanupVerifierBrowserBroker=()=>{
+    if(!verifierBrowserBroker) return;
+    try{ verifierBrowserBroker.close(); }catch{}
+    verifierBrowserBroker=null;
+  };
   const cleanupDisposableWorkspace=()=>{
     if(!disposableWorkspace||workspaceCleaned||workspaceCleanupError) return;
     try{ disposableWorkspace.cleanup(); workspaceCleaned=true; }
@@ -3646,6 +3918,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // cleanup failure are preserved when both exist.
   const failClosingWorkspace=(m)=>{
     recordPreLaunchFailure(m);
+    cleanupVerifierBrowserBroker();
     cleanupCredentialProvision();
     cleanupDisposableWorkspace();
     if(workspaceCleanupError){
@@ -3671,7 +3944,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // stays purely a no-op placeholder for that case.
   const effectiveScratchDir=disposableWorkspace?disposableWorkspace.scratchDirectory:scratchDir;
   let previousScratchSeeded=false;
-  if(readOnly && (roleName==="code_reviewer"||roleName==="verifier") && effectiveScratchDir && (mission||s.mission) && taskRef){
+  if(readOnly && (roleName==="code_reviewer"||roleName==="verifier"||roleName==="plan_reviewer") && effectiveScratchDir && (mission||s.mission) && taskRef){
     try{
       const wrapM=mission||s.mission;
       const carriedPath=carriedScratchDir(repo,wrapM,taskRef);
@@ -3825,13 +4098,28 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   if(windowsVerifierPlaywrightBridge.applicable && !windowsVerifierPlaywrightBridge.valid){
     return failClosingWorkspace(`${roleName}: playwright_runtime_invalid: a previously discovered external Playwright runtime is no longer valid immediately before Verifier launch (${windowsVerifierPlaywrightBridge.invalidReason}); refusing to launch with a partial runtime environment.`);
   }
-  let relayTask = roleName === "verifier" ? verifierTask(task,promptRepository,promptScratch,c,playwrightRuntimeForVerifier) : task;
+  let relayTask = (roleName === "verifier" && !isWrapUp) ? verifierTask(task,promptRepository,promptScratch,c,playwrightRuntimeForVerifier,Boolean(phaseApp)) : task;
+  // Backlog #11: every role brief carries the binding operator decisions.
+  // A live run drains what `ap note` queued (the CLI never writes state.json
+  // under a live run) before the block is built.
+  if(!isWrapUp){
+    try{
+      if(applyOperatorDecisionQueue(s,repo)&&persistState) saveState(s);
+      relayTask=withOperatorDecisions(relayTask,s);
+    }catch{ /* best-effort: a decision block must never break a run */ }
+  }
   if(readOnly && review && typeof relayTask === "string" && hasReviewContinuationSignal(relayTask)){
     relayTask = formatReviewBriefForContinuation(relayTask);
+  }
+  if(typeof relayTask === "string"){
+    relayTask = resolveHandoffPathsInBrief(relayTask, {repoRoot: promptRepository, scratchDir: promptScratch, useSandboxPaths: Boolean(attemptEnvelope)});
   }
   const rawRelayTaskText=[
     `ROLE=${roleName}`,`REPOSITORY=${promptRepository}`,
     mission?`MISSION=${mission}`:null,
+    (role?.adapter === "antigravity" && !(typeof relayTask === "string" && relayTask.includes("never build paths relative to your own brain/")))
+      ? (typeof agyPathInstruction === "function" ? agyPathInstruction(promptRepository) : `Write files only with absolute paths inside ${promptRepository}; never build paths relative to your own brain/ or app-data directory.`)
+      : null,
     (typeof modelBriefLines === "function" ? modelBriefLines({ model: role?.model, roleName }) : []).join("\n") || null,
     "You are a delegated worker. The orchestrator owns Git history: never run git commit or git push, and never create git worktrees, branches, stashes or tags — the git guard blocks them and the mission stops. To see a committed version use `git show HEAD:<path>` or `git diff`.",
     "Run every command in the foreground and wait for its output in the same turn. Never start background jobs (&, nohup, setsid, run_in_background), never poll with sleep/ps/pgrep loops: your session ends when you end your turn.",
@@ -3842,8 +4130,17 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     readOnly
       ? `This is a READ-ONLY review. Do not modify any file in the repository. You may write only inside the sanctioned scratch directory: ${promptScratch} (temporary test artifacts, browser checks, reports, browser profiles, and Playwright specs/screenshots/traces go there; ${disposableWorkspace ? "this scratch directory is temporary and is deleted once this review finishes — nothing written here is retained for audit" : "the orchestrator keeps them for audit"}).`
       : "You may modify only files required by the brief.",
+    readOnly
+      ? REVIEWER_NO_AP_SKILLS_LINE
+      : null,
     (readOnly && review && role?.adapter === "codex")
       ? "Update your hand-off note every ~10 commands with the files you checked and the findings so far."
+      : null,
+    // Backlog #9(c): the carried scratch dir also preserves any PowerShell
+    // runtime the previous session downloaded for the SpecKit .ps1 scripts.
+    // Only stated when a carry actually seeded this session.
+    previousScratchSeeded
+      ? "A PowerShell runtime from the previous session is already in /workspace/scratch/previous-session/ — reuse it, do not download again."
       : null,
     "", "TASK:", relayTask,
     // Each finding must stand on its own. The role that receives it is a
@@ -3852,7 +4149,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     // hunting through runs/ logs for the detail — one observed planner
     // burned 22 tool calls and 3.16M cached tokens doing exactly that.
     // Bounded on purpose: location + problem + correction, not an essay.
-    review ? '\nThis is a SINGLE-SHOT invocation: the process exits when your turn ends, and there is no later turn — nothing can notify you afterwards. Never end your turn waiting for a background task, a job, or a notification. Collect the result of any check you start in this same turn, or skip it and state that in your findings: a turn that ends while waiting produces no verdict at all, and the mission halts.\nEnd with exactly one line: AUTOPILOT_REVIEW={"decision":"PASS","findings":[]} or FAIL or INCOMPLETE. Use INCOMPLETE when you cannot finish checking everything in this turn — list what remains unchecked in your findings and the orchestrator will continue the review.\nEach finding must be self-contained and actionable WITHOUT reading this review again: give it as {"tasks":["T1"],"location":"<file, or artifact/section>","problem":"<what is wrong>","correction":"<what must change>"}. When your instructions show [Tn] task labels, every finding MUST include "tasks": the [Tn] labels of the tasks this finding concerns (for example ["T1"]), or [] only when the finding genuinely concerns the whole phase (for example, cross-task wiring) — prefer naming a task whenever one is responsible. When your instructions show no [Tn] task labels at all, omit "tasks". Keep each field to one or two sentences. Plain strings are still accepted, but then the string itself must carry all three.' : ""
+    review ? `\nThis is a SINGLE-SHOT invocation: the process exits when your turn ends, and there is no later turn — nothing can notify you afterwards. Never end your turn waiting for a background task, a job, or a notification. Collect the result of any check you start in this same turn, or skip it and state that in your findings: a turn that ends while waiting produces no verdict at all, and the mission halts.\nEnd with exactly one line: AUTOPILOT_REVIEW={"decision":"PASS","findings":[]} or FAIL or INCOMPLETE. Use INCOMPLETE when you cannot finish checking everything in this turn — list what remains unchecked in your findings and the orchestrator will continue the review.\nEach finding must be self-contained and actionable WITHOUT reading this review again: give it as {"tasks":["T1"],"location":"<file, or artifact/section>","problem":"<what is wrong>","correction":"<what must change>"}. When your instructions show [Tn] task labels, every finding MUST include "tasks": the [Tn] labels of the tasks this finding concerns (for example ["T1"]), or [] only when the finding genuinely concerns the whole phase (for example, cross-task wiring) — prefer naming a task whenever one is responsible. When your instructions show no [Tn] task labels at all, omit "tasks". ${DEFECT_PATTERN_REVIEW_INSTRUCTION}. Keep each field to one or two sentences. Plain strings are still accepted, but then the string itself must carry all three.` : ""
   ].filter(Boolean).join("\n");
   // Task 15.4C2 correction, generalized: remap EVERY repository-root-
   // qualified path in the COMPLETE final prompt (not only the Verifier's
@@ -3970,6 +4267,14 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
         return failClosingWorkspace(`${roleName}: ${error?.message||error}`);
       }
     }
+    if(isWrapUp && wrapUpSessionStoreDir){
+      if(role.adapter==="opencode" && opencodeCredentialProvision?.dataDir){
+        copyWrapUpSessionStore({fromDir:wrapUpSessionStoreDir,toDir:opencodeCredentialProvision.dataDir,adapterId:role.adapter});
+      }else if(effectiveScratchDir){
+        const subpath=wrapUpSessionStoreSubpath(role.adapter);
+        if(subpath) copyWrapUpSessionStore({fromDir:wrapUpSessionStoreDir,toDir:path.join(effectiveScratchDir,".autopilot-home",subpath),adapterId:role.adapter});
+      }
+    }
     const permissionFiles=resolvePermissionFiles(effectiveCwd,a.permission_files);
     const runtimeFiles=resolveRuntimeFiles(missionTransportGate.invocation.binary,a.runtime_siblings);
     // Task 15.4C3B: forward the already-discovered, unmutated
@@ -3981,6 +4286,23 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     // /playwright/node_modules mount and AUTOPILOT_PLAYWRIGHT_MODULE_ROOT
     // stay Verifier-only (role scoping). Nothing is stored on `c` or in
     // mission state — this is a plain per-call argument.
+    if(roleName==="verifier" && !isWrapUp && phaseApp && Array.isArray(phaseApp.joinPrefix) && phaseApp.joinPrefix.length>0 && effectiveScratchDir){
+      try{
+        verifierBrowserBroker=await startVerifierBrowserBroker({
+          repo:cwd,
+          runDir:dir,
+          scratchDir:effectiveScratchDir,
+          getAppSession:()=>phaseApp,
+          ensureAppSession:()=>ensurePhaseApp(c,s,cwd),
+          appCfg:appServerConfig(c),
+          playwrightRuntime:playwrightRuntimeForVerifier,
+          config:c,
+          log:(m)=>console.log(m),
+        });
+      }catch(error){
+        return failClosingWorkspace(`${roleName}: could not start verifier browser-check broker: ${error?.message||error}`);
+      }
+    }
     missionLaunchPlan=assembleAdapterLaunchPlan({
       driver:adapterDriver(role.adapter),
       adapterProviderProfile:null,
@@ -3993,7 +4315,8 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       // pass none — unchanged). Only the adapter's data dir, never HOME.
       sessionStoreMounts: roleName==="implementer" ? sessionStoreMounts : [],
       // Backlog #14: the private OpenCode 2 provider-credential data dir.
-      credentialDataMounts
+      credentialDataMounts,
+      browserBrokerSocket: verifierBrowserBroker ? {host:verifierBrowserBroker.socketPath,sandbox:verifierBrowserBroker.sandboxSocketPath} : null
     });
     if(!missionLaunchPlan.available){
       // Task 15.4B1: on Native Windows for a SpecKit project, ALL three
@@ -4020,6 +4343,10 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       return failClosingWorkspace(`${roleName}: adapter transport unavailable (${missionLaunchPlan.reason})`);
     }
   } else {
+    if(isWrapUp && wrapUpSessionStoreDir && effectiveScratchDir){
+      const subpath=wrapUpSessionStoreSubpath(role.adapter);
+      if(subpath) copyWrapUpSessionStore({fromDir:wrapUpSessionStoreDir,toDir:path.join(effectiveScratchDir,".autopilot-home",subpath),adapterId:role.adapter});
+    }
     const transport=resolveAdapterTransport({driver:adapterDriver(role.adapter),profile:null,request:{binary:a.binary,args,stdin:relayStdinText}});
     if(!transport.available) return failClosingWorkspace(`Adapter transport unavailable for ${roleName}: ${transport.reason}.`);
     missionLaunchPlan={available:true,transport,invocation:transport.invocation,stdin:transport.stdin,envelope:{available:false,reason:disposableWorkspace?"windows_disposable_copy":"not_applicable_writable_role"}};
@@ -4070,6 +4397,21 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   }catch(error){
     return failClosingWorkspace(`${roleName}: failed to record the git guard before-snapshot: ${error?.message||error}`);
   }
+  if(roleName==="verifier"&&!isWrapUp&&guard?.guardDir){
+    try{
+      installVerifierBrowserWrapper({
+        guardDir:guard.guardDir,
+        runDir:dir,
+        scratchDir:effectiveScratchDir||dir,
+        repo:cwd,
+        appSession:phaseApp,
+        appCfg:appServerConfig(c),
+        playwrightRuntime:playwrightRuntimeForVerifier,
+        brokerSocket:verifierBrowserBroker?.sandboxSocketPath||null,
+        brokerToken:verifierBrowserBroker?.token||null,
+      });
+    }catch{}
+  }
   // Mission 084 Phase 2 task 2.1 — snapshot reuse cache: consult the cache
   // first (collectSnapshotGuards + decideSnapshotReuse against the previous
   // after-snapshot); reuse on allow, else a fresh gitSnapshot. Any doubt
@@ -4113,6 +4455,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   try{ prepareRun(dir,{action:"snapshot-before",detail:snapshotBeforeMode,durationMs:Date.parse(snapshotBeforeAt)-Date.parse(snapshotBeforeStartedAt)}); }catch{}
 
   const started=now();
+  const sessionStartedAtMs=Date.now();
   // Task 15.6K: the relay's effective repository is authoritative for
   // PWD/INIT_CWD on EVERY role invocation — not only for disposable
   // reviewers. OpenCode resolves relative tool paths against the PWD
@@ -4518,6 +4861,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   const evaluateIdle=()=>{
     if(capSettled||capBreach||idleBreach) return;
     if(!idleWatch) return;
+    try{ killStuckPagers(idleWatch); }catch{}
     let verdict=null;
     try{ verdict=evaluateIdleWatch(idleWatch); }catch{ return; }
     if(!verdict||verdict.status==="ok") return;
@@ -4623,7 +4967,11 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     // Backlog #14: the private credential data dir is launch-scoped. Remove
     // it after success, failure or a watchdog kill (the implementer's
     // session store is never removed here).
+    cleanupVerifierBrowserBroker();
     cleanupCredentialProvision();
+    if(roleName==="verifier"&&!isWrapUp){
+      try{ finalizeVerifierBrowserArtifacts({runDir:dir,scratchDir:effectiveScratchDir||dir,guardDir:guard?.guardDir}); }catch{}
+    }
   }
   if(role.adapter==="antigravity"){
     try{
@@ -4651,7 +4999,8 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // result as workDigest; finalMessage semantics are unchanged for every
   // other consumer.
   const workDigest=driver?sessionWorkDigest(role.adapter,events,{maxChars:resolveHandoffMaxChars(c.policy),repoRoot:cwd}):"";
-  const observations=driver?driver.observe(events,{readPath:"",productionWritePath:"",outsideWritePath:""}):[];
+  const observeHandoffDir=(mission||s.mission)?path.join(cwd||repo,".autopilot","missions",String(mission||s.mission),"handoff"):"";
+  const observations=driver?driver.observe(events,{readPath:"",productionWritePath:"",outsideWritePath:"",root:effectiveCwd||cwd||repo,scratchDir:effectiveScratchDir||path.join(dir,"scratch"),handoffDir:observeHandoffDir}):[];
   // Absent (not zero) when the adapter/event stream carries no per-turn
   // usage signal -- see accumulateUsage()'s own docblock.
   let usage=driver?accumulateUsage(role.adapter,events,openCodeUsageOptions):null;
@@ -4710,12 +5059,13 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // it; the same value rides result.json via makeRelayResult.
   const snapshotAfterAt=now();
   try{ updateRunSnapshots(dir,{snapshotAfterStartedAt,snapshotAfterAt}); }catch{}
-  const reviewContract=review?parseReviewContract(normalizedOutput):null;
+  const reviewContract=review?parseReviewContract(normalizedOutput||out):null;
   // Session id from the raw events first (precise, adapter-native); a
   // driver-less adapter has no structured events to scan, so its only
   // option is the regex fallback over the full raw output.
   const sessionId=sessionIdFromEvents(events)||(driver?null:sessionFromOutput(out));
   const result=makeRelayResult({roleName,role,a,p,args:missionTransport.invocation.args,invocationVerification,output:normalizedOutput,sessionId,before,after,guard,started,finished,reviewContract,cwd,readOnly,observations,envelopeApplied:executionEnvelope?.available===true,usage,resolvedBinary:missionTransport.invocation.binary,modelResolution,snapshotBeforeStartedAt,snapshotBeforeAt,snapshotAfterStartedAt,snapshotAfterAt,sessionNumber,planRevision:planRevisionValue,carriedForwardTasks:carriedForwardTasksValue});
+  result.workDigest=workDigest||null;
   // Mission 084 Phase 2 task 2.2 — snapshot reuse cache after-site: store
   // the fresh after-snapshot only on clean relays. A policy violation or
   // read-only breach clears the cache with a logged reason and stores
@@ -4796,7 +5146,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // fallbackSwitch marker; the at-once re-run below returns the retry's
   // result). Exhausted and
   // non-RATE_LIMITED decisions leave state and behavior exactly as before.
-  if(result?.failure?.class==="RATE_LIMITED"||result?.failure?.class==="AUTH_REQUIRED"||result?.failure?.class==="PROVIDER_ERROR"||(!readOnly&&result?.failure?.class==="PERMISSION_DENIED"&&result.failure.domain==="adapter")||(result?.failure?.class==="IDLE_HANG"&&result?.idleHang?.noOutput===true)){
+  if(result?.failure?.class==="RATE_LIMITED"||result?.failure?.class==="AUTH_REQUIRED"||result?.failure?.class==="PROVIDER_ERROR"||(!readOnly&&result?.failure?.class==="PERMISSION_DENIED"&&result.failure.domain==="adapter")||(!readOnly&&result?.failure?.class==="PATH_OUTSIDE_WORKSPACE"&&result.failure.domain==="model")||(result?.failure?.class==="IDLE_HANG"&&result?.idleHang?.noOutput===true)){
     if(escalated){
       // Pending #22: the escalation model itself failed. The normal fallback
       // chain is untouched (the normal model never failed): drop the pending
@@ -4822,30 +5172,64 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       const quotaLabel=balanceExhausted?", provider balance exhausted":freeQuotaExhausted?", free quota used up":"";
       // Backlog #18: record the RATE_LIMITED model mission-wide (same place
       // as the per-role tried list) so every other role skips it too.
-      if(result.failure.class==="RATE_LIMITED") s.exhaustedModels=markExhausted(s.exhaustedModels,from,roleName,now());
-      let decision=decideRoleFallback({role:roleName,roleConfig:c.roles?.[roleName]??null,activeModel:s.activeRoleModels?.[roleName]??null,failureClass:result.failure.class,noOutput:result?.idleHang?.noOutput===true,exhausted:s.exhaustedModels,policy:c.policy,nowMs:Date.now()});
-      s.triedFreeModels=markTriedFreeModel(s.triedFreeModels,roleName,from);
-      decision=await extendFallbackWithFree({decision,role:roleName,roleConfig:c.roles?.[roleName]??null,activeModel:s.activeRoleModels?.[roleName]??null,failureClass:result.failure.class,noOutput:result?.idleHang?.noOutput===true,tried:s.triedFreeModels?.[roleName]??[],enabled:c.freeModelAutoFallback!==false,adapters:agents,discover:(a)=>agents[a]?discoverModelCatalog(agents[a]):[],exhausted:s.exhaustedModels,policy:c.policy,nowMs:Date.now()});
-      if(decision?.action==="switch"&&decision.next){
-        const fromPrimary=from.adapter===rawRole.adapter&&from.model===rawRole.model;
-        const stickyReason=(fromPrimary&&freeQuotaExhausted)?FREE_QUOTA_REASON:undefined;
-        s.activeRoleModels={...(s.activeRoleModels||{}),[roleName]:stampStickyFallback(decision.next,c.roles?.[roleName]??null,now(),stickyReason)};
-        // Backlog #6(b): a PRIMARY model that vanished after mission start is
-        // still switched away from exactly as before, but the operator gets a
-        // loud, lasting record the WATCH-REPORT/final report prints. A missing
-        // fallback model is not mislabelled as the primary.
-        if(result.modelNotFound===true&&fromPrimary){
-          const record={role:roleName,primary:{adapter:from.adapter,model:from.model},fallback:{adapter:decision.next.adapter,model:decision.next.model},at:now()};
-          s.primaryModelFallbacks={...(s.primaryModelFallbacks||{}),[roleName]:record};
-          result.primaryModelMissing=record;
-          console.warn(formatPrimaryModelFallbackLine(record));
-        }
-        console.log(formatRoleFallbackLog({role:roleName,from,to:decision.next,reason:decision.autoDiscovered?`${result.failure.class}${quotaLabel}, auto-discovered free model`:`${result.failure.class}${quotaLabel}`}));
-        result.fallbackSwitch={from,to:decision.next,reason:decision.reason};
+      const taskKey = taskRef || contScope || roleName;
+      const scratch = effectiveScratchDir || path.join(dir, "scratch");
+      const noteMission = mission || s.mission || null;
+      const retryHandoffDir = noteMission ? path.join(cwd || repo, ".autopilot", "missions", String(noteMission), "handoff") : null;
+      const retryHandoffNotePath = (noteMission && taskRef) ? path.join(cwd || repo, handoffNoteRelPath(noteMission, taskRef)) : null;
+      const retryDecision = decideDeniedWriteRetry({
+        result,
+        repo: cwd || repo,
+        events,
+        retries: s.outOfRepoDeniedRetries,
+        taskKey,
+        scratch,
+        handoffNotePath: retryHandoffNotePath,
+        handoffDir: retryHandoffDir,
+        readOnly,
+      });
+      let outOfRepoRetry = retryDecision.retry;
+      if(outOfRepoRetry){
+        s.outOfRepoDeniedRetries = retryDecision.nextRetries;
+        try { fs.mkdirSync(scratch, { recursive: true }); } catch {}
+        result.sameModelRetry = {
+          role: roleName,
+          task: task.endsWith("\n") ? `${task}${retryDecision.note}\n` : `${task}\n\n${retryDecision.note}\n`,
+          scratch
+        };
         if(persistState){ try{ saveState(s); }catch{} }
-      }else if(decision?.action==="escalate"&&Array.isArray(result.failure.evidence)){
-        // Backlog #106: tell the escalation text that fallbacks were tried and are used up.
-        result.failure.evidence=[...result.failure.evidence,{source:"role-fallback",fallbacksExhausted:true}];
+      }
+      if(!outOfRepoRetry){
+        const nowMs = Date.now();
+        const exhaustedUntilIso = result.failure.class==="RATE_LIMITED" ? extractExhaustedUntilIso(evidence, nowMs) : null;
+        if(result.failure.class==="RATE_LIMITED") s.exhaustedModels=markExhausted(s.exhaustedModels,from,roleName,now(),{...(freeQuotaExhausted?{quota:"free"}:{}),...(exhaustedUntilIso?{until:exhaustedUntilIso}:{}),evidence});
+        const fallbackClass = result.failure.class==="PATH_OUTSIDE_WORKSPACE" ? "PERMISSION_DENIED" : result.failure.class;
+        let decision=decideRoleFallback({role:roleName,roleConfig:c.roles?.[roleName]??null,activeModel:s.activeRoleModels?.[roleName]??null,failureClass:fallbackClass,noOutput:result?.idleHang?.noOutput===true,exhausted:s.exhaustedModels,policy:c.policy,nowMs});
+        s.triedFreeModels=markTriedFreeModel(s.triedFreeModels,roleName,from);
+        decision=await extendFallbackWithFree({decision,role:roleName,roleConfig:c.roles?.[roleName]??null,activeModel:s.activeRoleModels?.[roleName]??null,failureClass:fallbackClass,noOutput:result?.idleHang?.noOutput===true,tried:s.triedFreeModels?.[roleName]??[],enabled:c.freeModelAutoFallback!==false,adapters:agents,discover:(a)=>agents[a]?discoverModelCatalog(agents[a]):[],exhausted:s.exhaustedModels,policy:c.policy,exclude:c.freeModelExclude??[],nowMs});
+        if(decision?.action==="switch"&&decision.next){
+          const fromPrimary=from.adapter===rawRole.adapter&&from.model===rawRole.model;
+          const stickyReason=(fromPrimary&&(freeQuotaExhausted||exhaustedUntilIso))
+            ? (exhaustedUntilIso ? {...(freeQuotaExhausted?{reason:FREE_QUOTA_REASON}:{}),until:exhaustedUntilIso} : FREE_QUOTA_REASON)
+            : undefined;
+          s.activeRoleModels={...(s.activeRoleModels||{}),[roleName]:stampStickyFallback(decision.next,c.roles?.[roleName]??null,now(),stickyReason)};
+          // Backlog #6(b): a PRIMARY model that vanished after mission start is
+          // still switched away from exactly as before, but the operator gets a
+          // loud, lasting record the WATCH-REPORT/final report prints. A missing
+          // fallback model is not mislabelled as the primary.
+          if(result.modelNotFound===true&&fromPrimary){
+            const record={role:roleName,primary:{adapter:from.adapter,model:from.model},fallback:{adapter:decision.next.adapter,model:decision.next.model},at:now()};
+            s.primaryModelFallbacks={...(s.primaryModelFallbacks||{}),[roleName]:record};
+            result.primaryModelMissing=record;
+            console.warn(formatPrimaryModelFallbackLine(record));
+          }
+          console.log(formatRoleFallbackLog({role:roleName,from,to:decision.next,reason:decision.autoDiscovered?`${result.failure.class}${quotaLabel}, auto-discovered free model`:`${result.failure.class}${quotaLabel}`}));
+          result.fallbackSwitch={from,to:decision.next,reason:decision.reason};
+          if(persistState){ try{ saveState(s); }catch{} }
+        }else if(decision?.action==="escalate"&&Array.isArray(result.failure.evidence)){
+          // Backlog #106: tell the escalation text that fallbacks were tried and are used up.
+          result.failure.evidence=[...result.failure.evidence,{source:"role-fallback",fallbacksExhausted:true}];
+        }
       }
     }catch{}
   }
@@ -4873,29 +5257,33 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     if(result.failure?.class==="PROCESS_EXIT_NONZERO") result.failure=null;
     try{ const __rawTokens=growingTerm(capBreach.usage); observe(dir,{stream:"stdout",bytes:0,minIntervalMs:0,last:`CAP_BREACH | TYPE=${capBreach.type} | USED=${capBreach.used} | LIMIT=${capBreach.limit}${capBreach.wrapUp?" | WRAP_UP=true":""} | RAW_TOKENS=${__rawTokens ?? "-"} (raw maxSingleTurnContext)`}); }catch{}
   }
-  // Backlog #26 Step B (TASK-34) + mission 045: orchestrator-forced hand-off
-  // note. The capped session is stopped above with `capped.wrapUp:true`; the
-  // orchestrator now writes the note ITSELF from the worktree diff and the
-  // session work digest — no wrap-up resume turn is spawned (a capped session
-  // that could not write its own note is exactly the session least likely to
-  // obey a second instruction). A fresh note (Backlog #34c) or an unknown
-  // note scope is still recorded as a skip and never retried; every other
-  // case (missing/stale/empty note) becomes the orchestrator fallback note.
+  // Backlog #26 Step B (TASK-34) + mission 045 + backlog #8: hand-off note at
+  // the cap. The capped session is stopped above with `capped.wrapUp:true`.
+  // A fresh note (Backlog #34c) or an unknown note scope is recorded as a skip
+  // and never retried. Otherwise the SAME CLI SESSION is resumed for one short
+  // wrap-up turn that writes the note (status model_wrote); when the session
+  // cannot be resumed, or the turn fails / times out / leaves the note stale,
+  // the orchestrator writes the fallback note itself from the worktree diff
+  // and the session work digest (orchestrator_fallback), as in mission 045.
   if(capEnabled && !isWrapUp && capBreach?.wrapUp && result.capped){
     const wrapMission=mission||s.mission||null;
     const noteRel=(wrapMission && taskRef)?handoffNoteRelPath(wrapMission,taskRef):null;
     const runWrapUp=async()=>{
-
       // Backlog #34c: fresh-note skip. A note overwritten at a milestone
       // after the last project edit already holds the resume context, so no
-      // fallback note is written (recorded, never retried) and rollover
-      // continues with the digest only. Stale/missing/empty notes fall
-      // through to the orchestrator fallback below. Checked BEFORE the
-      // fallback write so a fresh note is never overwritten.
-      try{
-        if(handoffNoteFreshnessForWrapUp(wrapMission,taskRef)?.fresh)
-          return {status:"skipped",reason:"note_fresh",trigger:capBreach.trigger||null};
-      }catch{}
+      // wrap-up turn is spawned and no fallback note is written (recorded,
+      // never retried) and rollover continues with the digest only.
+      // Stale/missing/empty notes go on to the wrap-up turn / fallback below.
+      // Checked BEFORE the turn is spawned and again AFTER it, so a fresh
+      // note is never overwritten. Returns true when a fresh note exists
+      // (repo note, or the role's scratch note — copied to the repo path).
+      const reviewMinMtimeMs=isReviewHandoffRole(roleName)?sessionStartedAtMs:null;
+      const noteIsFresh=()=>{
+      if(reviewMinMtimeMs===null){
+        try{
+          if(handoffNoteFreshnessForWrapUp(wrapMission,taskRef)?.fresh) return true;
+        }catch{}
+      }
       // Mission 049 Phase 1 task 1.2: scratch hand-off note (review/planner
       // roles write under /workspace/scratch, i.e. effectiveScratchDir on the
       // host). Read here — before the disposable workspace is cleaned up
@@ -4903,14 +5291,6 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       // orchestrator fallback, never a failure.
       try{
         if(effectiveScratchDir && wrapMission && taskRef){
-          const isReviewOrVerifier=(roleName==="code_reviewer"||roleName==="verifier");
-          const hasVerdict=Boolean((result.review&&["PASS","FAIL"].includes(result.review.decision))||(result.verdict&&["PASS","FAIL"].includes(result.verdict.decision)));
-          if(isReviewOrVerifier && result.capped && !hasVerdict){
-            try{
-              const carriedDest=carriedScratchDir(repo,wrapMission,taskRef);
-              copyCarriedScratch(effectiveScratchDir,carriedDest);
-            }catch{}
-          }
           let scratchText=null, scratchMtimeMs=null;
           try{
             const scratchAbs=scratchHandoffNotePath(effectiveScratchDir,taskRef);
@@ -4925,7 +5305,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
           }catch{ repoText=null; repoMtimeMs=null; }
           const picked=pickFresherHandoffNote({repoText,repoMtimeMs,scratchText,scratchMtimeMs});
           if(picked && picked.text){
-            const scratchFresh=isHandoffNoteFresh({noteText:picked.text,noteMtimeMs:picked.mtimeMs,lastProjectEditMtimeMs:lastProjectEditMtimeMs(repo),nowMs:Date.now()});
+            const scratchFresh=isHandoffNoteFresh({noteText:picked.text,noteMtimeMs:picked.mtimeMs,lastProjectEditMtimeMs:lastProjectEditMtimeMs(repo),nowMs:Date.now(),minMtimeMs:reviewMinMtimeMs});
             if(scratchFresh?.fresh){
               // The scratch dir lives inside the disposable workspace that
               // cleanupDisposableWorkspace() deletes below, and
@@ -4940,12 +5320,76 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
                   fs.writeFileSync(path.join(repo,noteRel),picked.text);
                 }
               }catch{}
-              return {status:"skipped",reason:"note_fresh",trigger:capBreach.trigger||null};
+              return true;
             }
           }
         }
       }catch{}
+      return false;
+      };
+      // Backlog #9(a): carry a capped read-only reviewer's scratch (its
+      // report, the PowerShell runtime it downloaded, test artifacts) into
+      // the mission handoff dir BEFORE any early return. This must happen for
+      // a fresh note too: in the live failure run 27 wrote a fresh note, the
+      // note_fresh skip returned immediately, and the next session lost the
+      // report that backed that note. plan_reviewer joins code_reviewer and
+      // verifier here — a capped reviewer without a verdict is exactly the
+      // session whose scratch the next one needs.
+      try{
+        if(effectiveScratchDir && wrapMission && taskRef){
+          const isReviewOrVerifier=(roleName==="code_reviewer"||roleName==="verifier"||roleName==="plan_reviewer");
+          const hasVerdict=Boolean((result.review&&["PASS","FAIL"].includes(result.review.decision))||(result.verdict&&["PASS","FAIL"].includes(result.verdict.decision)));
+          if(isReviewOrVerifier && result.capped && !hasVerdict){
+            const carriedDest=carriedScratchDir(repo,wrapMission,taskRef);
+            copyCarriedScratch(effectiveScratchDir,carriedDest);
+          }
+        }
+      }catch{}
+      if(noteIsFresh()) return {status:"skipped",reason:"note_fresh",trigger:capBreach.trigger||null};
       if(!noteRel) return {status:"skipped",reason:"note_scope_unknown",trigger:capBreach.trigger||null};
+      // Backlog #8: the note is stale or missing. RESUME THE SAME CLI SESSION
+      // for one short turn whose only job is to write the hand-off note (the
+      // session still has its full context, so this is cheap). Not resumable
+      // (no captured session id, adapter without resume_session, a failed-
+      // before-first-step run, a model switch) or a turn that fails / times
+      // out / exceeds WRAPUP_MAX_TURNS / leaves the note stale falls through
+      // to the orchestrator fallback note below, exactly as before. The turn
+      // is a nested runRelay with isWrapUp (cap-exempt, own ceiling, never
+      // triggers another wrap-up, no fallback re-runs); its usage lands in
+      // its own run dir like any other run. Read-only roles write the note
+      // under the scratch dir (same path their normal brief names); the nested
+      // relay copies it into this run's scratch dir before its disposable
+      // workspace is cleaned, and noteIsFresh() then copies it to the repo.
+      let resumeTurn=null;
+      try{
+        const isReadOnlyWrapRole=(roleName==="plan_reviewer"||roleName==="code_reviewer"||roleName==="verifier"||(readOnly&&roleName!=="planner"&&roleName!=="implementer"));
+        const resumable=Boolean(result.sessionId) && Boolean(a.resume_session?.length) && !result.fallbackSwitch && !runFailedBeforeFirstStep(role.adapter,result.status,events);
+        const parentScratchNote=(isReadOnlyWrapRole && effectiveScratchDir)?scratchHandoffNotePath(effectiveScratchDir,taskRef):null;
+        const wrapUpSubpath=wrapUpSessionStoreSubpath(role.adapter);
+        const parentSessionStoreDir=(role.adapter==="opencode" && opencodeCredentialProvision?.dataDir)
+          ? opencodeCredentialProvision.dataDir
+          : ((effectiveScratchDir && wrapUpSubpath)?path.join(effectiveScratchDir,".autopilot-home",wrapUpSubpath):null);
+        const promptNotePath=isReadOnlyWrapRole?scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR,taskRef):noteRel;
+        let turnUsage=null;
+        resumeTurn=await runModelWrapUpTurn({
+          resumable,
+          noteIsFresh,
+          spawnTurn:async()=>{
+            // The capped session's id is normally saved at the end of this
+            // relay; the resumed turn needs it now.
+            saveRoleSession(s,roleName,result.sessionId,{cli:a.binary,model:role.model||null});
+            const turn=await runRelay(roleName,buildWrapUpPrompt(promptNotePath,resolveHandoffNoteMaxChars(c?.policy),{review:isReadOnlyWrapRole}),c,s,{cwd,readOnly,resume:true,review:false,persistState,alwaysSave:false,fatal:(msg)=>{ throw new Error(String(msg)); },includeError:true,timeoutMs:WRAPUP_TIMEOUT_MS,taskRef,isWrapUp:true,runNote:"wrap-up",capEnabled:true,contScope,wrapUpScratchCopyTo:parentScratchNote,wrapUpSessionStoreDir:parentSessionStoreDir});
+            turnUsage=turn?.usage??null;
+            return {status:turn?.status,usage:turn?.usage??null};
+          }
+        });
+        if(resumeTurn.wrote){
+          const u=resumeTurn.usage||turnUsage||{};
+          return {status:"model_wrote",reason:resumeTurn.reason,trigger:capBreach.trigger||null,note:noteRel,resumedSession:true,turns:Number.isInteger(u.turns)?u.turns:null};
+        }
+      }catch(error){
+        resumeTurn={wrote:false,reason:`wrap_up_turn_error:${String(error?.message||error).slice(0,160)}`};
+      }
       // Backlog #15 part 3b: session-only changes. The before/after
       // snapshots bracket this relay, so touchedFilesBetween() names exactly
       // the files this session changed (including bash writes). Limit the
@@ -4967,8 +5411,21 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       // over once (never nested again). Bounded by the resolved note budget.
       // Best-effort: a read/merge failure leaves the bare fallback in place.
       const isReadOnlyRole=(roleName==="plan_reviewer"||roleName==="code_reviewer"||roleName==="verifier"||(readOnly&&roleName!=="planner"&&roleName!=="implementer"));
+      const isBackstopReviewCut=isReviewHandoffRole(roleName) && (capBreach?.backstop===true || capBreach?.type==="backstop");
       const ownScratchNote=isReadOnlyRole?readReadOnlyScratchNote(effectiveScratchDir,dir,taskRef):null;
-      if(ownScratchNote){
+      if(isBackstopReviewCut && !ownScratchNote){
+        let previousNoteText=null;
+        try{ previousNoteText=fs.readFileSync(path.join(repo,noteRel),"utf8"); }catch{ previousNoteText=null; }
+        fallbackNote=appendReviewBackstopFallbackSection(previousNoteText,{
+          taskRef,
+          events,
+          adapterId:role.adapter,
+          repoRoot:repo,
+          capBreach,
+          lastMessage:normalizedOutput||out||"",
+          maxChars:resolveHandoffNoteMaxChars(c?.policy),
+        });
+      }else if(ownScratchNote){
         fallbackNote=combineOwnNoteWithFallbackDigest(ownScratchNote,fallbackNote,resolveHandoffNoteMaxChars(c?.policy));
       }else{
         try{
@@ -4988,7 +5445,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       }catch(error){
         return {status:"failed",reason:`fallback_note_write_failed:${String(error?.message||error).slice(0,200)}`,trigger:capBreach.trigger||null};
       }
-      return {status:"orchestrator_fallback",reason:"note_missing_or_stale",trigger:capBreach.trigger||null,note:noteRel,fallbackNote:true};
+      return {status:"orchestrator_fallback",reason:"note_missing_or_stale",trigger:capBreach.trigger||null,note:noteRel,fallbackNote:true,...(resumeTurn?{resumeTurn:resumeTurn.reason}:{})};
     };
     try{
       result.wrapUp=await runWrapUp();
@@ -4999,7 +5456,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     // result (fresh-note skip, orchestrator fallback write, or anything else
     // — unknown scope, failed build/write, wrap_up_error — reported as "-").
     try{
-      const __wrapPath=result.wrapUp.reason==="note_fresh"?"note_fresh":(result.wrapUp.status==="orchestrator_fallback"?"orchestrator_fallback":"-");
+      const __wrapPath=result.wrapUp.reason==="note_fresh"?"note_fresh":(result.wrapUp.status==="orchestrator_fallback"?"orchestrator_fallback":(result.wrapUp.status==="model_wrote"?"model_wrote":"-"));
       observe(dir,{stream:"stdout",bytes:0,minIntervalMs:0,last:`WRAP_UP | STATUS=${result.wrapUp.status} | REASON=${result.wrapUp.reason||"-"} | PATH=${__wrapPath} | TRIGGER=${result.wrapUp.trigger||"-"} | RAW_TOKENS=${growingTerm(capBreach?.usage) ?? "-"} (raw maxSingleTurnContext)`});
     }catch{}
     try{ if(persistState) saveState(s); }catch{}
@@ -5081,6 +5538,14 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // discarded), but result.status is forced to "failed", no PASS is ever
   // persisted or acted on, and the role session is never cleared as if it
   // had completed successfully.
+  // Backlog #8: a read-only role's wrap-up turn wrote its note in THIS run's
+  // scratch dir; hand it to the capped run's scratch dir before cleanup.
+  if(isWrapUp && wrapUpScratchCopyTo && effectiveScratchDir && taskRef){
+    try{
+      const from=scratchHandoffNotePath(effectiveScratchDir,taskRef);
+      if(fs.existsSync(from)){ fs.mkdirSync(path.dirname(wrapUpScratchCopyTo),{recursive:true}); fs.copyFileSync(from,wrapUpScratchCopyTo); }
+    }catch{}
+  }
   cleanupDisposableWorkspace();
   if(workspaceCleanupError){
     result.status="failed";
@@ -5092,6 +5557,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   if(resultExtra&&typeof resultExtra==="object") Object.assign(result,resultExtra);
   result.mission=mission||null;
   result.scratchDir=effectiveScratchDir||null;
+  result.runDir=dir;
   result.run_id=id;
   // Backlog #110: same scope fields as status.json so result.json is self-describing.
   result.taskRef=meta.taskRef??null;
@@ -5101,6 +5567,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // null otherwise). The run record names it so the wrap-up resume and the
   // completion size guard agree on the path.
   result.sessionStore=sessionStoreRel||null;
+  result.escalated=Boolean(escalated);
   if(mission && mission!=="planning" && !s.mission) s.mission=mission;
   // Backlog #112: a model switch clears the role's resume session (the new
   // model must start fresh), and a run that died before its first completed
@@ -5148,22 +5615,30 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
   // they return today's RATE_LIMITED result unchanged (escalate-and-stop).
   // Backlog #112: opencode "Session not found" on a resume = the stored
   // session is gone; drop it and relaunch fresh once (no failure budget spent).
-  if(resume && !__sessionRetry && result.status!=="completed" && runFailedBeforeFirstStep(role.adapter,result.status,events) && isSessionNotFound(role.adapter,p?.stderr)){
+  if(!isWrapUp && resume && !__sessionRetry && result.status!=="completed" && runFailedBeforeFirstStep(role.adapter,result.status,events) && isSessionNotFound(role.adapter,p?.stderr)){
     try{
       clearRoleSession(s,roleName);
       if(persistState){ try{ saveState(s); }catch{} }
       console.log(`session: ${roleName} stored session not found; relaunching with a fresh session`);
-      return runRelay(roleName,appendFailureHandoff(task,failureHandoffText,failureHandoffQuotes),c,s,{cwd,readOnly,resume:false,review,persistState,alwaysSave,fatal,includeError,requirements,taskFacts,timeoutMs,taskRef,isWrapUp,runNote,capEnabled,contScope,planRevision,carriedForwardTasks,resultExtra,__fallbackDepth,__sessionRetry:true});
+      return runRelay(roleName,appendFailureHandoff(task,failureHandoffText,failureHandoffQuotes),c,s,{cwd,readOnly,resume:false,review,persistState,alwaysSave,fatal,includeError,requirements,taskFacts,timeoutMs,taskRef,isWrapUp,runNote,capEnabled,contScope,planRevision,carriedForwardTasks,resultExtra,wrapUpScratchCopyTo,__fallbackDepth,__sessionRetry:true,wrapUpSessionStoreDir});
     }catch{}
   }
-  if(result?.escalationFailed && Number(__fallbackDepth||0)<8){
+  if(!isWrapUp && result?.escalationFailed && Number(__fallbackDepth||0)<8){
     try{
       clearRoleSession(s,roleName);
       if(persistState){ try{ saveState(s); }catch{} }
       return runRelay(roleName,appendFailureHandoff(task,failureHandoffText,failureHandoffQuotes),c,s,{cwd,readOnly,resume:false,review,persistState,alwaysSave,fatal,includeError,requirements,taskFacts,timeoutMs,taskRef,isWrapUp,runNote,capEnabled,contScope,planRevision,carriedForwardTasks,resultExtra,__fallbackDepth:Number(__fallbackDepth||0)+1,__sessionRetry});
     }catch{}
   }
-  if(result?.fallbackSwitch?.to && Number(__fallbackDepth||0)<8){
+  if(!isWrapUp && result?.sameModelRetry && Number(__fallbackDepth||0)<8){
+    try{
+      clearRoleSession(s,roleName);
+      if(persistState){ try{ saveState(s); }catch{} }
+      console.log(`${roleName}: out-of-repo write denied; retrying same model with scratch note`);
+      return runRelay(roleName,result.sameModelRetry.task,c,s,{cwd,readOnly,resume:false,review,persistState,alwaysSave,fatal,includeError,requirements,taskFacts,timeoutMs,taskRef,isWrapUp,runNote,capEnabled,contScope,planRevision,carriedForwardTasks,resultExtra,wrapUpScratchCopyTo,__fallbackDepth:Number(__fallbackDepth||0)+1});
+    }catch{}
+  }
+  if(!isWrapUp && result?.fallbackSwitch?.to && Number(__fallbackDepth||0)<8){
     try{
       let retry=decideRoleFallbackRetry({from:result.fallbackSwitch.from,to:result.fallbackSwitch.to,resumeSupported:Boolean(agents[result.fallbackSwitch.to?.adapter]?.resume_session?.length)});
       if(retry?.resume===true && (!result.sessionId || result.fallbackSwitch)){
@@ -5178,10 +5653,121 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
       }
     }catch{}
   }
+  if (!isWrapUp && result?.failure?.class === "NETWORK_UNAVAILABLE" && !result?.networkWaitExhausted) {
+    const missionDirForWait = s?.mission ? path.join(repo, ".autopilot", "missions", String(s.mission)) : null;
+    const nw = await waitForNetworkRecovery({
+      result,
+      config: c,
+      state: s,
+      roleName,
+      adapter: role.adapter,
+      model: role.model || null,
+      waitState: __networkWaitState,
+      persistState,
+      saveState,
+      refreshWatchReport,
+      appendWatchEvent,
+      missionDir: missionDirForWait,
+    });
+    if (nw.action === "interrupted") {
+      return {
+        ...result,
+        status: "interrupted",
+        interrupted: true,
+      };
+    }
+    if (nw.action === "retry") {
+      return runRelay(roleName, appendFailureHandoff(task, failureHandoffText, failureHandoffQuotes), c, s, {
+        cwd,
+        readOnly,
+        resume: false,
+        review,
+        persistState,
+        alwaysSave,
+        fatal,
+        includeError,
+        requirements,
+        taskFacts,
+        timeoutMs,
+        taskRef,
+        isWrapUp,
+        runNote,
+        capEnabled,
+        contScope,
+        planRevision,
+        carriedForwardTasks,
+        resultExtra,
+        wrapUpScratchCopyTo,
+        __fallbackDepth,
+        __sessionRetry,
+        __networkWaitState: nw.waitState,
+        wrapUpSessionStoreDir
+      });
+    }
+    result = applyNetworkWaitExhaustedEvidence(result, nw.maxWaitMin, nw.evidence);
+  }
+  const waitDecision = shouldWaitRateLimitReset(result, events, c, __rateLimitWaitHooks.now());
+  if (!isWrapUp && waitDecision && Number(__fallbackDepth || 0) < 8) {
+    const { waitMs, timeStr, resetMs } = waitDecision;
+    console.log(`waiting for rate limit reset at ${timeStr}`);
+    s.rateLimitWait = { resetAt: new Date(resetMs).toISOString(), time: timeStr };
+    if (persistState) { try { saveState(s); } catch {} }
+    try { refreshWatchReport(s); } catch {}
+
+    let interrupted = false;
+    try {
+      if (typeof __rateLimitWaitHooks.sleep === "function") {
+        await __rateLimitWaitHooks.sleep(waitMs, { state: s, resetMs, timeStr });
+      }
+    } catch (err) {
+      interrupted = true;
+    } finally {
+      delete s.rateLimitWait;
+      if (persistState) { try { saveState(s); } catch {} }
+      try { refreshWatchReport(s); } catch {}
+    }
+
+    if (interrupted || s.phase === "stopped" || s.phase === "cancelled") {
+      return {
+        ...result,
+        status: "interrupted",
+        interrupted: true,
+      };
+    }
+
+    return runRelay(roleName, appendFailureHandoff(task, failureHandoffText, failureHandoffQuotes), c, s, {
+      cwd,
+      readOnly,
+      resume: Boolean(result.sessionId || resume),
+      review,
+      persistState,
+      alwaysSave,
+      fatal,
+      includeError,
+      requirements,
+      taskFacts,
+      timeoutMs,
+      taskRef,
+      isWrapUp,
+      runNote,
+      capEnabled,
+      contScope,
+      planRevision,
+      carriedForwardTasks,
+      resultExtra,
+      wrapUpScratchCopyTo,
+      __fallbackDepth: Number(__fallbackDepth || 0) + 1,
+      __sessionRetry,
+      wrapUpSessionStoreDir
+    });
+  }
   // Backlog #8: no fallback left (or none configured) for a denied write role:
   // stop here, before any reviewer runs on files this role never revised.
   if(!readOnly && result?.failure?.class==="PERMISSION_DENIED"){
     escalateIfRateLimited(c,s,`relay-${roleName}`,result,{fatal,saveState,escalatePrefix:`${roleName} (${role.adapter}/${role.model||"default"})`,writeRole:true});
+  }
+  if(!readOnly && result?.failure?.class==="PATH_OUTSIDE_WORKSPACE"){
+    escalateIfRateLimited(c,s,`relay-${roleName}`,{...result,failure:{...result.failure,class:"PERMISSION_DENIED",domain:"adapter"}},{fatal,saveState,escalatePrefix:`${roleName} (${role.adapter}/${role.model||"default"})`,writeRole:true});
   }
   return result;
   } catch(error){
@@ -5197,6 +5783,7 @@ async function runRelay(roleName,task,c,s,{cwd=repo,readOnly=false,resume=false,
     // into the propagated error, preserving both the original exception and
     // the cleanup failure rather than silently losing either.
     const alreadyAttempted=workspaceCleaned||!!workspaceCleanupError;
+    cleanupVerifierBrowserBroker();
     cleanupDisposableWorkspace();
     if(!alreadyAttempted && workspaceCleanupError){
       const augmented=error instanceof Error?error:new Error(String(error));
@@ -5313,7 +5900,7 @@ function gateWatchStart(repo,s){
   }
   return {missionDir,phase};
 }
-async function gates(c,s){
+async function gates(c,s,opts={}){
   // Mission 084 Phase 2 task 2.4 (fix round 2/2) — the standalone and
   // SpecKit loops run gates(c,s) right before the read-only verifier relay.
   // Gate commands may mutate tracked files (scenario a: ignored or
@@ -5327,13 +5914,134 @@ async function gates(c,s){
   }catch(error){
     console.log(`[snapshot-reuse] cache clear skipped (${error?.message||error})`);
   }
+  // Backlog #4: a session kept for an earlier verifier run is never reused
+  // across gate runs (the tree changed); release it first.
+  await releasePhaseApp();
   if(!(c.gates?.commands||[]).length) return {ok:true};
-  const {env,shellGuard}=guardedShell(repo,c.gates?.network_isolation!==false,c.gates?.env_allowlist||[]);
   const mission=missionDirFor(repo,s);
   const gatesDir=mission
     ? path.join(repo,".autopilot","missions",mission,"gates")
     : path.join(repo,".autopilot","runs",`gates-${randomUUID()}`);
   fs.mkdirSync(gatesDir,{recursive:true});
+  const appCfg=appServerConfig(c);
+  if(!appCfg) return gateCommandsRun(c,s,mission,gatesDir,null);
+  // Backlog #3/#4: start the configured app server inside the phase's
+  // isolated network namespace, run the gate commands in that same namespace
+  // with APP_BASE_URL/PORT. A passing gate that is followed by the verifier
+  // (opts.keepForVerifier) leaves the session up for that run; every other
+  // outcome stops it here.
+  const t0=Date.now();
+  const startLog=path.join(gatesDir,`phase-${s?.phaseIndex!=null?s.phaseIndex+1:"na"}-${t0}-app-server.log`);
+  const started=await startAppSession({cfg:appCfg,repo,baseEnv:process.env,log:(m)=>console.log(m),networkIsolation:c.gates?.network_isolation!==false});
+  if(!started.ok){
+    try{ fs.writeFileSync(startLog,started.tail+"\n"); }catch{}
+    const {missionDir:md,phase:ph}=gateWatchStart(repo,s);
+    const durationMs=Date.now()-t0;
+    const result={ok:false,command:"app_server.start_command",shellBlocked:false,reason:"app-server-start-failed",exitCode:1,durationMs,logFile:startLog,tail:started.tail,results:[{command:"app_server.start_command",ok:false,exitCode:1,durationMs,logFile:startLog,tail:started.tail,shellBlocked:false}]};
+    if(md){ try{ appendWatchEvent(md,{type:"gate_result",phase:ph,command:null,durationMs,ok:false}); }catch{} }
+    console.log(`[app-server] gate failed: ${started.message}`);
+    return result;
+  }
+  let keep=false;
+  try{
+    const result=await gateCommandsRun(c,s,mission,gatesDir,started.session);
+    keep=opts.keepForVerifier===true&&result?.ok===true;
+    return result;
+  }finally{
+    if(keep) phaseApp=started.session;
+    else await stopAppSession(started.session);
+  }
+}
+// Backlog #4: the app session (server + network namespace) kept between the
+// gate and the verifier run of one phase. At most one exists.
+let phaseApp=null;
+const phaseAppForTests=()=>phaseApp;
+async function stopAppSession(session){
+  const stopped=await session.stop();
+  console.log(`[app-server] stopped (port ${session.port} ${stopped.portFree?"free":"STILL BUSY"}${session.holderPid?`, namespace holder ${session.holderPid} gone`:""})`);
+}
+async function releasePhaseApp(){
+  const session=phaseApp;
+  phaseApp=null;
+  if(session) await stopAppSession(session);
+}
+// The verifier run needs the server: reuse the session the gate left up, or
+// start one when the gate result was reused. Returns the session or null.
+async function ensurePhaseApp(c,s,targetRepo=repo){
+  if(phaseApp){
+    if(phaseApp.alive?.()!==false) return phaseApp;
+    console.log("[app-server] retained verifier session is stale; starting a fresh app session");
+    await releasePhaseApp();
+  }
+  const appCfg=appServerConfig(c);
+  if(!appCfg) return null;
+  const started=await startAppSession({cfg:appCfg,repo:targetRepo,baseEnv:process.env,log:(m)=>console.log(m),networkIsolation:c.gates?.network_isolation!==false});
+  if(!started.ok){ console.log(`[app-server] not available for the verifier: ${started.message}`); return null; }
+  phaseApp=started.session;
+  return phaseApp;
+}
+async function relayVerifierWithApp(task,c,s,options={},relayFn=relayAsync){
+  const targetRepo=options?.cwd||repo;
+  try{ await ensurePhaseApp(c,s,targetRepo); }catch(e){ console.log(`[app-server] not available for the verifier: ${e?.message||e}`); }
+  let pwRuntime=options?.playwrightRuntime||null;
+  if(phaseApp&&!pwRuntime){
+    try{ pwRuntime=discoverPlaywrightRuntime({repository:targetRepo,skillRoot}); }catch{ pwRuntime=null; }
+  }
+  const appNote=verifierAppNote(phaseApp);
+  const browserNote=phaseApp?verifierBrowserBrief({session:phaseApp,playwrightRuntime:pwRuntime,appCfg:appServerConfig(c),repo:targetRepo}):"";
+  const note=[appNote,browserNote].filter(Boolean).join("\n\n");
+  const fullPrompt=note?`${task}\n\n${note}`:task;
+  const pwReady=Boolean(pwRuntime?.readyForLaunchProbe===true||(pwRuntime?.module?.status==="discovered"&&pwRuntime?.browser?.status==="discovered"));
+  try{
+    let vv=await relayFn("verifier",fullPrompt,c,s,options);
+    // Backlog s15 #6: when the phase delta touches UI routes and the app server
+    // is up with Playwright available, refuse a PASS that made no ap-browser-check
+    // attempt ONCE with a retry brief naming the routes from the delta.
+    const browserRefusal=shouldRefuseVerifierPassForBrowserCheck({
+      vv,
+      runDir:vv?.runDir||null,
+      deltaPaths:Array.isArray(options?.deltaPaths)?options.deltaPaths:[],
+      appServerStarted:Boolean(phaseApp),
+      playwrightAvailable:pwReady,
+      alreadyRetried:false,
+    });
+    if(browserRefusal.refuse){
+      console.log(`Verifier PASS refused (no ap-browser-check run on UI route(s): ${browserRefusal.routes.join(", ")}); retrying verifier once while app server is up.`);
+      try{ await ensurePhaseApp(c,s,targetRepo); }catch(e){ console.log(`[app-server] not available for verifier retry: ${e?.message||e}`); }
+      vv=await relayFn("verifier",`${fullPrompt}\n\n${browserRefusal.retryBrief}`,c,s,options);
+    }
+    if(vv&&typeof vv==="object"){
+      const phaseName=s?.phaseIndex!=null?`Phase ${s.phaseIndex+1}`:"phase";
+      evaluateVerifierBrowserOutcome({vv,runDir:vv.runDir||null,taskFacts:options?.taskFacts||{},phaseName});
+      if(vv.runDir){
+        try{
+          const resFile=path.join(vv.runDir,"result.json");
+          if(fs.existsSync(resFile)){
+            const disk=JSON.parse(fs.readFileSync(resFile,"utf8"));
+            if(vv.browserProof!==undefined) disk.browserProof=vv.browserProof;
+            if(vv.browserProofAccepted!==undefined) disk.browserProofAccepted=vv.browserProofAccepted;
+            if(vv.review?.notes) disk.review={...(disk.review||{}),notes:vv.review.notes};
+            if(vv.verdict?.notes) disk.verdict={...(disk.verdict||{}),notes:vv.verdict.notes};
+            fs.writeFileSync(resFile,JSON.stringify(disk,null,2));
+          }
+        }catch{}
+      }
+    }
+    return vv;
+  }finally{
+    await releasePhaseApp();
+  }
+}
+async function gateCommandsRun(c,s,mission,gatesDir,appServer){
+  const {env:baseGateEnv,shellGuard}=guardedShell(repo,c.gates?.network_isolation!==false,c.gates?.env_allowlist||[]);
+  let env=baseGateEnv;
+  if(appServer){
+    env={...baseGateEnv,...appServer.env};
+    // Backlog #4: gate commands join the namespace the server runs in, so
+    // network isolation stays ON and 127.0.0.1:<port> is the server. Only when
+    // isolation is off by config (mode "host") is there nothing to join.
+    if(appServer.joinPrefix) shellGuard.netnsJoinPrefix=appServer.joinPrefix;
+  }
   const {missionDir,phase}=gateWatchStart(repo,s);
   const results=[];
   for(const command of c.gates.commands){
@@ -5351,8 +6059,36 @@ async function gates(c,s){
       try { appendWatchEvent(missionDir, { type: "gate_progress", phase, command, durationMs, ok }); } catch {}
     }
     if(p.status!==0){ recordGateDurations(s,results); recordGateGreenFiles(s,results,mission); 
+      let __gateCounts = null;
+      try {
+        let vf = null, vt = null, anyProgress = false, ap = 0, af = 0, at = 0;
+        let vitestSeen = false;
+        for (const r of results) {
+          let text = "";
+          try { if (r?.logFile) text = fs.readFileSync(r.logFile, "utf8"); } catch { text = ""; }
+          if (!text && r?.tail) text = r.tail;
+          const v = parseVitestGateLog(text);
+          if (v && v.summary) {
+            vitestSeen = true;
+            if (!vf) { vf = {passed:0,failed:0,skipped:0,total:0}; vt = {passed:0,failed:0,skipped:0,total:0}; }
+            vf.passed += v.summary.files.passed || 0;
+            vf.failed += v.summary.files.failed || 0;
+            vf.skipped += v.summary.files.skipped || 0;
+            vf.total += v.summary.files.total || 0;
+            vt.passed += v.summary.tests.passed || 0;
+            vt.failed += v.summary.tests.failed || 0;
+            vt.skipped += v.summary.tests.skipped || 0;
+            vt.total += v.summary.tests.total || 0;
+          } else {
+            const pg = parseGateLogProgress(text);
+            if (pg) { anyProgress = true; ap += pg.passed || 0; af += pg.failed || 0; at = Math.max(at, pg.total || 0); }
+          }
+        }
+        if (vitestSeen && vf) __gateCounts = { files: vf, tests: vt };
+        else if (anyProgress) __gateCounts = { passed: ap, failed: af, total: at, skipped: 0 };
+      } catch {}
       if (missionDir) {
-        try { appendWatchEvent(missionDir, { type: "gate_result", phase, command: null, durationMs: results.reduce((sum, r) => sum + (r.durationMs || 0), 0), ok: false }); } catch {}
+        try { appendWatchEvent(missionDir, { type: "gate_result", phase, command: null, durationMs: results.reduce((sum, r) => sum + (r.durationMs || 0), 0), ok: false, ...(__gateCounts ? { counts: __gateCounts, files: __gateCounts.files, tests: __gateCounts.tests } : {}) }); } catch {}
         // Mission 093 Part 1 task 3.4: capture git diff --stat at phase gate (failure)
         let diffStat = null;
         try { diffStat = changedFilesStat(repo); } catch { diffStat = null; }
@@ -5366,8 +6102,36 @@ async function gates(c,s){
   recordGateDurations(s,results);
   recordGateGreenFiles(s,results,mission);
   const totalDurationMs = results.reduce((sum, r) => sum + (r.durationMs || 0), 0);
+  let __gateCounts2 = null;
+  try {
+    let vf = null, vt = null, anyProgress = false, ap = 0, af = 0, at = 0;
+    let vitestSeen = false;
+    for (const r of results) {
+      let text = "";
+      try { if (r?.logFile) text = fs.readFileSync(r.logFile, "utf8"); } catch { text = ""; }
+      if (!text && r?.tail) text = r.tail;
+      const v = parseVitestGateLog(text);
+      if (v && v.summary) {
+        vitestSeen = true;
+        if (!vf) { vf = {passed:0,failed:0,skipped:0,total:0}; vt = {passed:0,failed:0,skipped:0,total:0}; }
+        vf.passed += v.summary.files.passed || 0;
+        vf.failed += v.summary.files.failed || 0;
+        vf.skipped += v.summary.files.skipped || 0;
+        vf.total += v.summary.files.total || 0;
+        vt.passed += v.summary.tests.passed || 0;
+        vt.failed += v.summary.tests.failed || 0;
+        vt.skipped += v.summary.tests.skipped || 0;
+        vt.total += v.summary.tests.total || 0;
+      } else {
+        const pg = parseGateLogProgress(text);
+        if (pg) { anyProgress = true; ap += pg.passed || 0; af += pg.failed || 0; at = Math.max(at, pg.total || 0); }
+      }
+    }
+    if (vitestSeen && vf) __gateCounts2 = { files: vf, tests: vt };
+    else if (anyProgress) __gateCounts2 = { passed: ap, failed: af, total: at, skipped: 0 };
+  } catch {}
   if (missionDir) {
-    try { appendWatchEvent(missionDir, { type: "gate_result", phase, command: null, durationMs: totalDurationMs, ok: true }); } catch {}
+    try { appendWatchEvent(missionDir, { type: "gate_result", phase, command: null, durationMs: totalDurationMs, ok: true, ...(__gateCounts2 ? { counts: __gateCounts2, files: __gateCounts2.files, tests: __gateCounts2.tests } : {}) }); } catch {}
     // Mission 093 Part 1 task 3.4: capture git diff --stat at phase gate
     let diffStat = null;
     try { diffStat = changedFilesStat(repo); } catch { diffStat = null; }
@@ -5380,7 +6144,7 @@ async function gates(c,s){
 // Backlog #105: the recorded-gate key adds every gate execution setting beyond
 // the commands (already in the digest key): env allowlist and network isolation.
 function lastGateKeyOf(baseKey,c){
-  return baseKey+"|"+deltaDigest(JSON.stringify({env:c.gates?.env_allowlist||[],net:c.gates?.network_isolation!==false}));
+  return baseKey+"|"+deltaDigest(JSON.stringify({env:c.gates?.env_allowlist||[],net:c.gates?.network_isolation!==false,...(appServerConfig(c)?{app:c.gates.app_server}:{})}));
 }
 // Keep the WATCH-REPORT gate data complete when a recorded/cached gate result is reused.
 function noteGateReused(s,g){
@@ -5389,7 +6153,29 @@ function noteGateReused(s,g){
     if(!missionDir) return;
     const phase=s?.phaseIndex!=null?s.phaseIndex+1:null;
     appendWatchEvent(missionDir,{type:"gate_start",phase,command:null,durationMs:null,ok:null,reused:true});
-    appendWatchEvent(missionDir,{type:"gate_result",phase,command:null,durationMs:0,ok:g?.ok===true,reused:true});
+    let counts=null;
+    try{
+      const results=Array.isArray(g?.results)?g.results:[];
+      let vf=null,vt=null,vitestSeen=false,anyProgress=false,ap=0,af=0,at=0;
+      for(const r of results){
+        let text="";
+        try{ if(r?.logFile) text=fs.readFileSync(r.logFile,"utf8"); }catch{text="";}
+        if(!text && r?.tail) text=r.tail;
+        const v=parseVitestGateLog(text);
+        if(v && v.summary){
+          vitestSeen=true;
+          if(!vf){vf={passed:0,failed:0,skipped:0,total:0};vt={passed:0,failed:0,skipped:0,total:0};}
+          vf.passed+=v.summary.files.passed||0;vf.failed+=v.summary.files.failed||0;vf.skipped+=v.summary.files.skipped||0;vf.total+=v.summary.files.total||0;
+          vt.passed+=v.summary.tests.passed||0;vt.failed+=v.summary.tests.failed||0;vt.skipped+=v.summary.tests.skipped||0;vt.total+=v.summary.tests.total||0;
+        }else{
+          const pg=parseGateLogProgress(text);
+          if(pg){anyProgress=true;ap+=pg.passed||0;af+=pg.failed||0;at=Math.max(at,pg.total||0);}
+        }
+      }
+      if(vitestSeen && vf) counts={files:vf,tests:vt};
+      else if(anyProgress) counts={passed:ap,failed:af,total:at,skipped:0};
+    }catch{}
+    appendWatchEvent(missionDir,{type:"gate_result",phase,command:null,durationMs:0,ok:g?.ok===true,reused:true,...(counts?{counts,files:counts.files,tests:counts.tests}:{})});
   }catch{}
 }
 // Pending #22: after a FAIL round was recorded, schedule the one-round
@@ -5400,7 +6186,7 @@ function noteEscalationTrigger(s,c,fixer,scopeKey,source,previous){
     const histKey=source==="plan_reviewer"?"planReviewHistory":source==="verifier"?"verifierHistory":"codeReviewHistory";
     const history=Array.isArray(s?.[histKey]?.[scopeKey])?s[histKey][scopeKey]:[];
     const round=history.length;
-    const minConsecutiveNotFixed=Number.isInteger(c?.policy?.escalate_after_not_fixed)?c.policy.escalate_after_not_fixed:2;
+    const minConsecutiveNotFixed=Number.isInteger(c?.policy?.escalate_after_not_fixed)?c.policy.escalate_after_not_fixed:3;
     const r=scheduleEscalation(s,c,{role:fixer,scopeKey,source,previous,history,round,effectiveFrom:from,minConsecutiveNotFixed});
     if(!r) return null;
     console.log(formatEscalationLog(r));
@@ -5442,18 +6228,81 @@ function noteBudgetEscalationTrigger(s,c,scope,budget){
         adapter:to.adapter,
         source:"failure_budget",
         scope,
-        phase:s?.phaseIndex!=null?s.phaseIndex+1:null
+        phase:s?.phaseIndex!=null?s.phaseIndex+1:null,
+        budget:budget.budget,
+        used:budget.used,
+        limit:budget.limit,
+        remaining:Number.isFinite(budget.limit-budget.used)?budget.limit-budget.used:null,
+        at
       });
     }
     try{ saveState(s); }catch{}
     return entry;
   }catch{ return null; }
 }
+// Backlog #11: when an escalated run fails on adapter or infrastructure errors
+// (not a functional rejection), switch the role back to its normal model/fallbacks
+// for the next try of the fix round instead of stopping.
+function maybeSwitchFromUnavailableEscalation(s,c,scope,impl,roleName="implementer"){
+  try{
+    if(s?.escalationUnavailable?.[scope] || (scope && s?.budgetEscalations?.[scope]?.unavailable)){
+      return false;
+    }
+    const escConfig=normalizeEscalationModel(c?.roles?.[roleName]?.escalation_model);
+    if(!escConfig) return false;
+    const wasEscalated=Boolean(
+      impl?.escalated ||
+      (impl?.adapter===escConfig.adapter && (impl?.model===escConfig.model || String(impl?.model).endsWith("/"+escConfig.model) || String(impl?.model).includes(escConfig.model))) ||
+      pendingEscalationModel(s,c,roleName) ||
+      (roleName==="implementer" && budgetEscalationModel(s,c,scope))
+    );
+    if(!wasEscalated) return false;
+    const isAdapterOrInfra=!impl?.review && !impl?.verdict && (
+      impl?.failure?.domain==="adapter" ||
+      impl?.failure?.domain==="infrastructure" ||
+      impl?.status!=="completed"
+    );
+    if(!isAdapterOrInfra) return false;
+
+    const rawRole=c?.roles?.[roleName];
+    const normal=resolveEffectiveRoleModel(rawRole??null,s?.activeRoleModels?.[roleName]??null);
+    const normalDisplay=normal?(normal.adapter&&normal.model?(String(normal.model).startsWith(`${normal.adapter}/`)?normal.model:`${normal.adapter}/${normal.model}`):(normal.model||"configured model")):"normal model";
+    console.log(formatEscalationUnavailableLog(normal));
+    markEscalationUnavailable(s,roleName,scope);
+    const fromModel=impl?.model||escConfig.model||null;
+    s.escalationUnavailable={
+      ...(s.escalationUnavailable||{}),
+      [scope]:{
+        role:roleName,
+        from:fromModel,
+        to:normalDisplay,
+        at:now()
+      }
+    };
+    const missionDir=getMissionWatchDir(s);
+    if(missionDir){
+      appendWatchEvent(missionDir,{
+        type:"model_escalation",
+        role:roleName,
+        from:fromModel,
+        to:normalDisplay,
+        adapter:normal?.adapter||null,
+        source:"escalation_unavailable",
+        unavailable:true,
+        scope,
+        phase:s?.phaseIndex!=null?s.phaseIndex+1:null,
+        at:now()
+      });
+    }
+    return true;
+  }catch{ return false; }
+}
 function review(reviewer,task,c,s,feedback="",requirements=[],taskRef=null,timeoutMs=null,capEnabled=false,roundKey=null,resultExtra=null){
   // Backlog #118: code-review round lines (exhaustive round 1 / verify previous findings).
-  if(roundKey) task+=`\n\n${codeReviewerRoundLines(s,roundKey).join("\n")}`;
+  if(roundKey) task+=`\n\n${codeReviewerRoundLines(s,roundKey,{hasFeedback:Boolean(feedback&&String(feedback).trim())}).join("\n")}`;
   if(reviewer==="code_reviewer") task+=`\n\n${CODE_REVIEW_REAL_TESTS_RULE}`;
-  return relay(reviewer,task+(feedback?`\n\nFEEDBACK TO ADDRESS:\n${feedback}`:""),c,s,{readOnly:true,review:true,resume:false,requirements,taskRef,timeoutMs,capEnabled,resultExtra}).then((result)=>{
+  const runNote=resultExtra?.runNote||null;
+  return relay(reviewer,task+(feedback?`\n\nFEEDBACK TO ADDRESS:\n${feedback}`:""),c,s,{readOnly:true,review:true,resume:false,requirements,taskRef,timeoutMs,capEnabled,runNote,resultExtra}).then((result)=>{
     if(reviewer==="code_reviewer" && result?.review?.decision==="FAIL"){
       try{
         const {browser, rest: afterBrowser} = splitBrowserFindings(result.review);
@@ -5480,16 +6329,155 @@ function review(reviewer,task,c,s,feedback="",requirements=[],taskRef=null,timeo
     return result;
   });
 }
+function mergePreviousStatuses(firstRaw,retryRaw){
+  const first=normalizePreviousStatuses(firstRaw);
+  const retry=normalizePreviousStatuses(retryRaw);
+  if(!first.length) return retry;
+  if(!retry.length) return first;
+  const norm=(t)=>String(t||"").toLowerCase().replace(/\s+/g," ").replace(/[.。]+$/g,"").trim();
+  const merged=first.map((entry)=>({...entry}));
+  for(const r of retry){
+    const rk=norm(r.finding);
+    const idx=merged.findIndex((m)=>{ const mk=norm(m.finding); return mk===rk||mk.includes(rk)||rk.includes(mk); });
+    if(idx!==-1) merged[idx]=r;
+    else merged.push(r);
+  }
+  return merged;
+}
+async function enforceRereviewPreviousOnPass({rv,listedFindings,c,s,requirements=[],reviewRef=null,reviewFn=review}={}){
+  if(!Array.isArray(listedFindings)||!listedFindings.length) return {action:"accept",rv};
+  let evalResult=evaluateRereviewPreviousStatuses(listedFindings,rv?.review?.previous);
+  if(evalResult.ok){
+    if(evalResult.needsRun.length) console.log(`Code review PASS passed ${evalResult.needsRun.length} finding(s) as needs_run for gate/verifier.`);
+    return {action:"accept",rv};
+  }
+  if(evalResult.notFixed.length){
+    const unconfirmed=evalResult.missing.map((f)=>`Previous finding unconfirmed ("previous" status missing): ${f}`);
+    return {action:"fail",rv,failFindings:[...evalResult.notFixed,...unconfirmed],previous:evalResult.previous};
+  }
+  const cRetry={
+    ...c,
+    policy:{
+      ...c?.policy,
+      free_model_turns_cap:5,
+      caps:{
+        ...c?.policy?.caps,
+        code_reviewer:{...c?.policy?.caps?.code_reviewer,max_turns:5},
+      },
+    },
+  };
+  const retryPrompt=buildRereviewPreviousRetryPrompt(evalResult.missing,listedFindings);
+  const retryBudget=roleDeadline(cRetry,s,"code_reviewer");
+  console.log(`Code review PASS omitted "previous" status for ${evalResult.missing.length} listed finding(s); running one verdict-only retry (max 5 turns).`);
+  const rvRetry=await reviewFn("code_reviewer",retryPrompt,cRetry,s,"",requirements,reviewRef,retryBudget.timeoutMs,true,null);
+  noteRoleDeadlineOutcome(s,"code_reviewer",rvRetry,retryBudget.derived);
+  if(rvRetry?.policyViolation) return {action:"policy_violation",rv:rvRetry};
+  if(rvRetry?.capped) acceptCappedFinalVerdict("Code review",rvRetry);
+  if(rvRetry?.status==="completed"&&rvRetry?.review?.decision==="FAIL"){
+    const retryPrev=mergePreviousStatuses(rv?.review?.previous,rvRetry.review?.previous);
+    const retryFindings=(Array.isArray(rvRetry.review?.findings)&&rvRetry.review.findings.length)?rvRetry.review.findings:evalResult.missing.map((f)=>`Previous finding unconfirmed in re-review retry: ${f}`);
+    return {action:"fail",rv:rvRetry,failFindings:retryFindings,previous:retryPrev};
+  }
+  if(rvRetry?.status==="completed"&&rvRetry?.review?.decision==="PASS"){
+    const mergedPrev=mergePreviousStatuses(rv?.review?.previous,rvRetry.review?.previous);
+    const evalRetry=evaluateRereviewPreviousStatuses(listedFindings,mergedPrev);
+    if(evalRetry.ok){
+      if(evalRetry.needsRun.length) console.log(`Code review PASS passed ${evalRetry.needsRun.length} finding(s) as needs_run for gate/verifier.`);
+      return {action:"accept",rv:{...rv,review:{...rv.review,previous:evalRetry.previous}}};
+    }
+    const unconfirmed=evalRetry.missing.map((f)=>`Previous finding unconfirmed ("previous" status missing): ${f}`);
+    return {action:"fail",rv:rvRetry,failFindings:[...evalRetry.notFixed,...unconfirmed],previous:evalRetry.previous};
+  }
+  const unconfirmed=evalResult.missing.map((f)=>`Previous finding unconfirmed ("previous" status missing): ${f}`);
+  return {action:"fail",rv,failFindings:unconfirmed,previous:evalResult.previous};
+}
+export { enforceRereviewPreviousOnPass as enforceRereviewPreviousOnPassForTests, review as reviewForTests };
 function planningScopeParts(framework,role){
   return {taskRef:`${framework}-planning-${role}`,contScope:`task:${framework}:planning:${role}`};
+}
+// Backlog #9(b): a capped plan_reviewer whose fresh hand-off note already
+// reports a decided verdict continues for ONE short verdict-only turn — read
+// the carried report/note and print the sentinel — instead of re-reading the
+// plan and re-running setup (the live run 27/28 loop). The marker lives in
+// the existing state.verdictOnlyTurns map (same mechanism the final review
+// and code review use) keyed by the planning continuation scope.
+const PLAN_REVIEW_VERDICT_ONLY_TURNS=5;
+const PLAN_REVIEW_VERDICT_ONLY_LINE="VERDICT-ONLY TURN: the previous session finished this review; its report is in /workspace/scratch (carried) and in the hand-off note. Do not re-read the plan or re-run setup; read the carried report and print the final AUTOPILOT_REVIEW sentinel with its findings now.";
+function planReviewVerdictOnlyText(s,contScope){
+  const value=s?.verdictOnlyTurns?.[contScope];
+  return (typeof value==="string"&&value.trim())?value:null;
+}
+function withPlanReviewVerdictOnlyCap(c,enabled){
+  if(!enabled) return c;
+  return {...c,policy:{...(c.policy||{}),free_model_turns_cap:PLAN_REVIEW_VERDICT_ONLY_TURNS,caps:{...(c.policy?.caps||{}),plan_reviewer:{...(c.policy?.caps?.plan_reviewer||{}),max_turns:PLAN_REVIEW_VERDICT_ONLY_TURNS}}}};
+}
+function resolveFirstRoundReasoning(c){
+  const raw=c?.policy?.caps?.plan_reviewer?.first_round_reasoning ?? c?.caps?.plan_reviewer?.first_round_reasoning;
+  return typeof raw==="string" && raw.trim() ? raw.trim() : null;
+}
+function withFirstRoundReasoning(c,isFirstRound){
+  if(!isFirstRound) return c;
+  const reasoning=resolveFirstRoundReasoning(c);
+  if(!reasoning || !c?.roles?.plan_reviewer) return c;
+  return {...c,roles:{...c.roles,plan_reviewer:{...c.roles.plan_reviewer,reasoning}}};
+}
+function clearPlanReviewVerdictOnly(s,contScope){
+  try{
+    if(s?.verdictOnlyTurns && typeof s.verdictOnlyTurns==="object" && contScope in s.verdictOnlyTurns){
+      delete s.verdictOnlyTurns[contScope];
+      return true;
+    }
+  }catch{}
+  return false;
+}
+// Backlog #9(d): consecutive capped plan_reviewer sessions on one scope that
+// produced no verdict. The first review-complete cap arms the verdict-only
+// continuation AND counts as the first session (streak 1); a later verdict
+// clears the streak in the caller. Two in a row without a verdict stop the
+// mission instead of launching another identical review.
+function planReviewCappedStreak(s,contScope){
+  const n=s?.planReviewCappedNoVerdict?.[contScope];
+  return Number.isInteger(n)&&n>0?n:0;
+}
+function recordPlanReviewCappedNoVerdict(s,contScope){
+  s.planReviewCappedNoVerdict=s.planReviewCappedNoVerdict&&typeof s.planReviewCappedNoVerdict==="object"?s.planReviewCappedNoVerdict:{};
+  const next=planReviewCappedStreak(s,contScope)+1;
+  s.planReviewCappedNoVerdict[contScope]=next;
+  return next;
+}
+function clearPlanReviewCappedNoVerdict(s,contScope){
+  try{
+    if(s?.planReviewCappedArtifacts && typeof s.planReviewCappedArtifacts==="object" && contScope in s.planReviewCappedArtifacts){
+      delete s.planReviewCappedArtifacts[contScope];
+      if(!Object.keys(s.planReviewCappedArtifacts).length) delete s.planReviewCappedArtifacts;
+    }
+    if(s?.planReviewCappedNoVerdict && typeof s.planReviewCappedNoVerdict==="object" && contScope in s.planReviewCappedNoVerdict){
+      delete s.planReviewCappedNoVerdict[contScope];
+      return true;
+    }
+  }catch{}
+  return false;
 }
 function readOnlyContinuationNote(note, repoPath, missionName, ref, roleLabel="reviewer"){
   const line="The previous session's scratch files (logs, configs, copies) are in /workspace/scratch/previous-session/ — reuse what the note cites instead of redoing it.";
   const seeded=Boolean(ref && missionName && fs.existsSync(carriedScratchDir(repoPath,missionName,ref)));
+  const isReviewRole=roleLabel!=="planner";
+  const carriedNotePath=isReviewRole&&ref
+    ? scratchHandoffNotePath(`${SCRATCH_HANDOFF_NOTE_DEFAULT_DIR}/previous-session`, ref)
+    : null;
+  const reviewRuleLine=isReviewRole
+    ? "This session continues a review that was stopped by the turn cap: do not reopen files/sections listed under Checked and clear; carry the Findings without re-verifying them; review only Remaining."
+    : "";
+  const coverageContLine=(isReviewRole && String(ref||"").includes("plan_reviewer"))
+    ? "If a coverage table exists in /workspace/scratch/previous-session/ (coverage-*.md), continue that same table in /workspace/scratch/ from its first unfinished row — do not re-check done rows."
+    : "";
+  const header=carriedNotePath
+    ? `Prior ${roleLabel} handoff note (continuation context — continue from where it stopped; read this one note path: ${carriedNotePath}):`
+    : `Prior ${roleLabel} handoff note (continuation context — continue from where it stopped):`;
   if(note){
-    return `Prior ${roleLabel} handoff note (continuation context — continue from where it stopped):\n${note}${seeded?`\n${line}`:""}`;
+    return [header, note, reviewRuleLine, coverageContLine, seeded?line:""].filter(Boolean).join("\n");
   }
-  return seeded?`Prior ${roleLabel} handoff note (continuation context — continue from where it stopped):\n${line}`:"";
+  return seeded?[header, reviewRuleLine, coverageContLine, line].filter(Boolean).join("\n"):"";
 }
 function planningContinuationText(s,framework,role){
   const {taskRef,contScope}=planningScopeParts(framework,role);
@@ -5502,7 +6490,7 @@ function planningContinuationText(s,framework,role){
 function planningBudgetReminderFor(s,c,role){
   const eff=effectiveRoleModelFor(s,c,role);
   const pat=eff?(agents[eff.adapter]?.free_model_pattern??null):null;
-  return handoffBudgetReminder(resolvePerRoleLimits(role,c.policy,eff?{adapter:eff.adapter,model:eff.model,free_model_pattern:pat}:{}).perTaskMaxTurns);
+  return handoffBudgetReminder(resolvePerRoleLimits(role,c.policy,eff?{adapter:eff.adapter,model:eff.model,free_model_pattern:pat}:{}).perTaskMaxTurns,{review:isReviewHandoffRole(role)});
 }
 // A capped READ-ONLY review that already emitted its complete AUTOPILOT_REVIEW
 // verdict has done its job — the cap only stopped the process from exiting
@@ -5619,6 +6607,169 @@ function stopIfBriefExceedsCap({result, subject, role, contScope = null, s = nul
   dieFn(msg);
   return true;
 }
+// Backlog #9(b)/(d): shared decision for one capped plan_reviewer generation
+// that produced no verdict (acceptCappedFinalVerdict already handled the
+// verdict-before-cap case). Either arm a single verdict-only continuation
+// when the fresh note says the review is complete with a decision, or count
+// the no-verdict cap and stop after two in a row on this scope. Used by both
+// handleCappedPlanningResult (SpecKit/GSD/reviewExistingPlanning) and the
+// standalone planning/spec loops, which handle caps themselves.
+function handleCappedPlanReviewerWithoutVerdict({s,framework,result,subject,contScope,taskRef,mission,fatal=null,noteText:explicitNote=null,reportText:explicitReport=null}){
+  if(!s||!contScope||!result?.capped) return;
+  const dieFn = fatal ?? die;
+  const missionName=mission||s.mission||null;
+  let noteText=explicitNote ?? result?.noteText ?? "";
+  if(!noteText && missionName && taskRef){
+    try{ noteText=readHandoffNote(missionName,taskRef)||""; }catch{ noteText=""; }
+  }
+  let noteFresh=false;
+  try{ noteFresh=Boolean(missionName&&taskRef)&&handoffNoteFreshnessForWrapUp(missionName,taskRef)?.fresh===true; }catch{ noteFresh=false; }
+  const reviewComplete=noteFresh&&noteSaysReviewComplete(noteText);
+  const streakBefore=planReviewCappedStreak(s,contScope);
+
+  const carriedDest=(repo&&missionName&&taskRef)?carriedScratchDir(repo,missionName,taskRef):null;
+  const currentArtifacts={
+    reportText: explicitReport ?? result?.reportText ?? (carriedDest ? readCarriedScratchReportText(carriedDest) : ""),
+    noteText: String(noteText || "").trim(),
+    workDigest: String(result?.workDigest || "").trim(),
+  };
+  s.planReviewCappedArtifacts=s.planReviewCappedArtifacts&&typeof s.planReviewCappedArtifacts==="object"?s.planReviewCappedArtifacts:{};
+  const prevArtifacts=s.planReviewCappedArtifacts[contScope]||null;
+
+  // Arm the single verdict-only continuation only on the FIRST capped
+  // no-verdict session whose note says the review is complete. Record that
+  // session as streak 1: if the verdict-only session also ends without a
+  // verdict, the next cap is the second in a row and stops the mission
+  // instead of re-arming forever.
+  if(reviewComplete && streakBefore===0 && !planReviewVerdictOnlyText(s,contScope)){
+    s.planReviewCappedArtifacts[contScope]=currentArtifacts;
+    recordPlanReviewCappedNoVerdict(s,contScope);
+    s.verdictOnlyTurns=s.verdictOnlyTurns&&typeof s.verdictOnlyTurns==="object"?s.verdictOnlyTurns:{};
+    s.verdictOnlyTurns[contScope]=PLAN_REVIEW_VERDICT_ONLY_LINE;
+    saveState(s);
+    console.log(`${subject} capped after its hand-off note reported a decided verdict; continuing for one ${PLAN_REVIEW_VERDICT_ONLY_TURNS}-turn verdict-only session.`);
+    return;
+  }
+
+  // Backlog #8: progress-aware stop. If the reviewer made progress over the
+  // previous session (updated carried scratch report, new findings or files in note,
+  // or different workDigest), allow the next session (still bounded by extra_sessions).
+  if(streakBefore>0 && prevArtifacts){
+    const madeProgress=reviewSessionProgress(prevArtifacts,currentArtifacts);
+    if(madeProgress){
+      s.planReviewCappedArtifacts[contScope]=currentArtifacts;
+      s.planReviewCappedNoVerdict[contScope]=1;
+      saveState(s);
+      console.log(`${subject} capped without a verdict but made progress over the previous session; continuing.`);
+      return;
+    }
+  }
+
+  s.planReviewCappedArtifacts[contScope]=currentArtifacts;
+  const streak=recordPlanReviewCappedNoVerdict(s,contScope);
+  if(streak>=2){
+    const blockingFindings=extractBlockingFindingsFromReviewNote(currentArtifacts.noteText);
+    if(blockingFindings.length>0){
+      clearPlanReviewCappedNoVerdict(s,contScope);
+      clearPlanReviewVerdictOnly(s,contScope);
+      result.status="completed";
+      result.cappedFailFromNote=true;
+      result.review={decision:"FAIL",findings:blockingFindings,notes:[]};
+      result.failure=verdictFailure("plan_reviewer",{status:"available",decision:"FAIL",findings:blockingFindings});
+      delete result.capped;
+      saveState(s);
+      console.log(`${subject} stopped without progress in ${streak} capped sessions; returning FAIL with ${blockingFindings.length} BLOCKING finding(s) from the hand-off note.`);
+      return {convertedToFail:true,findings:blockingFindings};
+    }
+    const step=`${framework||s.framework||"plan"}_planning_not_converging`;
+    s.phase="escalated";
+    s.step=step;
+    s.phaseCheckpointError={code:"PLAN_REVIEW_CAPPED_TWICE",evidence:{role:"plan_reviewer",scope:contScope,sessions:streak,breach:result.capped.type,used:result.capped.used,limit:result.capped.limit}};
+    saveState(s);
+    dieFn(`${subject} ended capped in ${streak} sessions in a row without a verdict and without a review-complete hand-off note, so another identical review would repeat the same work. STOP — human intervention required. Raise caps.plan_reviewer.max_turns or shrink this review stage, then resume.\nResume: ap reset --scope ${contScope} then ap run`);
+  }
+  return {convertedToFail:false};
+}
+const unchangedReviewWorkDigests=new Map();
+function clearCodeReviewUnchangedNoteState(s,contScope){
+  unchangedReviewWorkDigests.delete(contScope);
+  if(s?.codeReviewCappedArtifacts && typeof s.codeReviewCappedArtifacts==="object" && contScope in s.codeReviewCappedArtifacts){
+    delete s.codeReviewCappedArtifacts[contScope];
+    if(!Object.keys(s.codeReviewCappedArtifacts).length) delete s.codeReviewCappedArtifacts;
+  }
+  if(s?.codeReviewUnchangedNoteStreak && typeof s.codeReviewUnchangedNoteStreak==="object" && contScope in s.codeReviewUnchangedNoteStreak){
+    delete s.codeReviewUnchangedNoteStreak[contScope];
+    if(!Object.keys(s.codeReviewUnchangedNoteStreak).length) delete s.codeReviewUnchangedNoteStreak;
+  }
+}
+function handleCodeReviewerUnchangedNote({s,rv,prevNote,nextNote,contScope,subject,step,checkpoint=null,capHint="caps.code_reviewer.max_turns",mission=null,taskRef=null,fatal=null,reportText:explicitReport=null}){
+  if(!s||!contScope||!rv?.capped) return;
+  const dieFn = fatal ?? die;
+  const missionName=mission||s.mission||null;
+  const ref=taskRef||contScope;
+  const carriedDest=(repo&&missionName&&ref)?carriedScratchDir(repo,missionName,ref):null;
+  const currentArtifacts={
+    reportText: explicitReport ?? rv?.reportText ?? (carriedDest ? readCarriedScratchReportText(carriedDest) : ""),
+    noteText: String(nextNote??"").trim(),
+    workDigest: String(rv?.workDigest??"").trim(),
+  };
+
+  s.codeReviewCappedArtifacts=s.codeReviewCappedArtifacts&&typeof s.codeReviewCappedArtifacts==="object"?s.codeReviewCappedArtifacts:{};
+  const prevArtifacts=s.codeReviewCappedArtifacts[contScope]||(prevNote?{reportText:"",noteText:String(prevNote).trim(),workDigest:unchangedReviewWorkDigests.get(contScope)||""}:null);
+
+  s.codeReviewUnchangedNoteStreak=s.codeReviewUnchangedNoteStreak&&typeof s.codeReviewUnchangedNoteStreak==="object"?s.codeReviewUnchangedNoteStreak:{};
+  const prevStreak=Number(s.codeReviewUnchangedNoteStreak[contScope])||0;
+
+  // A session with nothing to compare against (no previous note/artifacts) only
+  // records a baseline and leaves the streak at 0, like the pre-#8 "unchanged
+  // note" rule; each later no-progress session adds 1, a progress session
+  // resets the streak to 1 (same as the plan reviewer side).
+  let streak=0;
+  if(prevArtifacts){
+    const madeProgress=reviewSessionProgress(prevArtifacts,currentArtifacts);
+    if(madeProgress){
+      s.codeReviewCappedArtifacts[contScope]=currentArtifacts;
+      s.codeReviewUnchangedNoteStreak[contScope]=1;
+      if(rv.workDigest && String(rv.workDigest).trim()){
+        unchangedReviewWorkDigests.set(contScope,String(rv.workDigest).trim());
+      }
+      if(checkpoint) s[CHECKPOINT_STATE_KEY]=checkpoint;
+      saveState(s);
+      if(prevStreak>0) console.log(`${subject} capped but made progress over the previous session; continuing.`);
+      return;
+    }
+    streak=prevStreak+1;
+  }
+  s.codeReviewCappedArtifacts[contScope]=currentArtifacts;
+  s.codeReviewUnchangedNoteStreak[contScope]=streak;
+  if(rv.workDigest && String(rv.workDigest).trim()){
+    unchangedReviewWorkDigests.set(contScope,String(rv.workDigest).trim());
+  }
+  if(streak>=2){
+    const blockingFindings=extractBlockingFindingsFromReviewNote(currentArtifacts.noteText);
+    if(blockingFindings.length>0){
+      clearCodeReviewUnchangedNoteState(s,contScope);
+      rv.status="completed";
+      rv.cappedFailFromNote=true;
+      rv.review={decision:"FAIL",findings:blockingFindings,notes:[]};
+      rv.failure=verdictFailure("code_reviewer",{status:"available",decision:"FAIL",findings:blockingFindings});
+      delete rv.capped;
+      if(checkpoint) s[CHECKPOINT_STATE_KEY]=checkpoint;
+      saveState(s);
+      console.log(`${subject} stopped without progress in ${streak} capped sessions; returning FAIL with ${blockingFindings.length} BLOCKING finding(s) from the hand-off note.`);
+      return {convertedToFail:true,findings:blockingFindings};
+    }
+    s.phase="escalated";
+    s.step=step;
+    s.phaseCheckpointError={code:"CODE_REVIEW_CAPPED_TWICE",evidence:{role:"code_reviewer",scope:contScope,sessions:streak,breach:rv.capped.type,used:rv.capped.used,limit:rv.capped.limit}};
+    if(checkpoint) s[CHECKPOINT_STATE_KEY]=checkpoint;
+    saveState(s);
+    dieFn(`${subject} ended capped in ${streak} sessions in a row with an unchanged hand-off note, so another identical review would repeat the same work. STOP — human intervention required. Raise ${capHint} or shrink this review stage, then resume.\nResume: ap reset --scope ${contScope} then ap run`);
+  }
+  if(checkpoint) s[CHECKPOINT_STATE_KEY]=checkpoint;
+  saveState(s);
+  return {convertedToFail:false};
+}
 function handleCappedPlanningResult({c,s,framework,role,result,subject,touchedFiles,step,stage,planRevision,runStartedAtMs}){
   const {taskRef,contScope}=planningScopeParts(framework,role);
   const mission=s.mission||null;
@@ -5659,6 +6810,15 @@ function handleCappedPlanningResult({c,s,framework,role,result,subject,touchedFi
     const acceptedFile = acceptCappedPlannerRevision({subject, result, touchedFiles, isRevision, candidateArtifacts, noteText, noteFresh});
     if(acceptedFile) return true;
   }
+  // Backlog #9(b)/(d): a capped plan_reviewer without a verdict is the live
+  // run 27/28 loop. If its fresh hand-off note says the review finished with
+  // a decided verdict, arm one short verdict-only continuation instead of a
+  // full re-review. Otherwise count the no-verdict cap and stop after two in
+  // a row — never start a third identical review.
+  if(role==="plan_reviewer"){
+    const capOutcome=handleCappedPlanReviewerWithoutVerdict({s,framework,result,subject,contScope,taskRef,mission});
+    if(capOutcome?.convertedToFail) return true;
+  }
   maybeApplyPendingContinuationReset(s,contScope);
   stopIfBriefExceedsCap({result, subject, role, contScope, s, c, mission, taskRef, step: `${framework}_planning_no_progress`});
   const cont=handlePlanningContinuation(s,role,result,contScope,c.policy,'capped');
@@ -5689,7 +6849,9 @@ function handleIncompletePlanningResult({c,s,framework,role,result,subject,touch
 // the §4 safety valve). Reads the optional policy override
 // (policy.role_timeout_ms?.[role] — never a required config key), the breach
 // flag, and the samples (current mission first, repo-wide fallback).
-function roleDeadline(c,s,role){
+// opts.final (whole-mission final review): never measured — relay_timeout_ms
+// (or the policy override); per-phase calls ignore final-review run samples.
+function roleDeadline(c,s,role,{final=false}={}){
   const relayTimeoutMs=Number(c.policy?.relay_timeout_ms)>0?Number(c.policy.relay_timeout_ms):RELAY_TIMEOUT_DEFAULT_MS;
   const rawOverride=c.policy?.role_timeout_ms?.[role];
   const override=Number.isInteger(rawOverride)&&rawOverride>0?rawOverride:null;
@@ -5705,15 +6867,20 @@ function roleDeadline(c,s,role){
       .filter((entry)=>entry.isDirectory())
       .map((entry)=>path.join(missionsRoot,entry.name,"runs"));
   }catch{}
-  const samplesMs=collectRoleSamples(runsDirFor(s),role,fallbackDirs);
-  const derived=deriveRoleDeadline({samplesMs,relayTimeoutMs,floorMs,override,breached});
+  const derived=final
+    ? deriveFinalReviewDeadline({relayTimeoutMs,override})
+    : deriveRoleDeadline({samplesMs:collectRoleSamples(runsDirFor(s),role,fallbackDirs,undefined,"phase"),relayTimeoutMs,floorMs,override,breached});
   if(derived.source==="breach-fallback"){
     console.log(`role deadline: ${role} fell back to relay_timeout_ms after a timeout at ${formatDuration(relayTimeoutMs)}`);
   }
-  const killAt=formatDuration(derived.timeoutMs);
-  const note=derived.lastMs!=null
-    ? `Time budget: this run is killed at ${killAt}. Measured: the last completed ${role} run in this project took ${formatDuration(derived.lastMs)} (longest of the last ${derived.sampleCount}: ${formatDuration(derived.longestMs)}). Size any command timeout from these numbers and finish — sentinel included — well inside the budget.`
-    : `Time budget: this run is killed at ${killAt}. No measured ${role} run exists yet.`;
+  const killAfter=formatDuration(derived.timeoutMs);
+  const killClock=new Date(Date.now()+derived.timeoutMs);
+  const killAt=`${killAfter} (at about ${String(killClock.getHours()).padStart(2,"0")}:${String(killClock.getMinutes()).padStart(2,"0")} local time)`;
+  const note=final
+    ? `Time budget: this run is killed after ${killAt}${derived.source==="policy"?" (the configured role timeout)":" (the full call backstop: per-phase reviews do not measure a whole-mission review)"}.`
+    : derived.lastMs!=null
+    ? `Time budget: this run is killed after ${killAt}. Measured: the last completed ${role} run in this project took ${formatDuration(derived.lastMs)} (longest of the last ${derived.sampleCount}: ${formatDuration(derived.longestMs)}). Size any command timeout from these numbers and finish — sentinel included — well inside the budget.`
+    : `Time budget: this run is killed after ${killAt}. No measured ${role} run exists yet.`;
   return {timeoutMs:derived.timeoutMs,note,derived};
 }
 // TASK-26 §4 safety valve: a derived deadline that was too tight. TIMEOUT
@@ -5828,8 +6995,11 @@ async function reviewExistingPlanning(c,s,state,request,opts={}){
         : "Read only the planning artifacts that already exist. Validate that the completed portion is internally consistent and safe to continue from the detected entry point; do not fail merely because later artifacts are intentionally missing.",
       framework==="gsd"?`Target phase: ${state.phase||"unknown"}. Check PROJECT/REQUIREMENTS/ROADMAP/STATE, RESEARCH/PLAN files, dependencies, verification commands, and phase scope.`:framework==="standalone"?`Check .autopilot/missions/<mission>/PLAN.md and TASKS.md. Validate objective/scope/risks in PLAN.md, phased checklist ordering/accept/verify/capabilities in TASKS.md (each task line is "- [ ] <text> — accept: ... ; verify: ... <!-- autopilot-requires: ... -->"), cross-file consistency, and that no task runs the whole test suite (a task's verify runs only its linked tests; the full suite ${(c?.gates?.commands||[]).length?"is run by the orchestrator as a gate after code review":"belongs to the verifier"}).${verifyDenylistPromptNote(effectiveVerifyDenylist(c))?` ${verifyDenylistPromptNote(effectiveVerifyDenylist(c))}`:""}`:"Check the current SpecKit specification/plan/tasks artifacts, their consistency, task derivation, constraints, and unresolved review gates.",
       PLAN_REVIEW_TESTING_RULE,
+      PLAN_REVIEW_DEFECT_PATTERN_INSTRUCTION,
+      planReviewGateClaimRule(c),
+      envToolsNoteForPlanning({text:[request, ...(framework==="standalone"?[readPlanningTextSafe(state?.planFile),readPlanningTextSafe(state?.tasksFile)]:framework==="speckit"&&s.speckitFeatureDir?[readPlanningTextSafe(path.join(repo,"specs",s.speckitFeatureDir,"spec.md")),readPlanningTextSafe(path.join(repo,"specs",s.speckitFeatureDir,"plan.md")),readPlanningTextSafe(path.join(repo,"specs",s.speckitFeatureDir,"tasks.md"))]:[])].filter(Boolean).join("\n"),config:c,role:"plan_reviewer"}),
       `Detected planning state: ${JSON.stringify(state)}`,
-      `Keep a hand-off note at ${scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, taskRef)}. OVERWRITE it (never append) at each milestone — after every important finding and before the review verdict — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${budgetReminder ? ` ${budgetReminder}` : ""}`,
+      `Keep a hand-off note at ${scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, taskRef)}. OVERWRITE it (never append) at each milestone — after every important finding and before the review verdict — with: 1. Checked and clear — file:line ranges + topics reviewed and found OK. 2. Findings (final) — each BLOCKING/minor finding with file:line evidence. 3. Remaining — concrete files/sections still to review. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${budgetReminder ? ` ${budgetReminder}` : ""}`,
       deadEndsText,
       noteText,
       `Project request/context: ${request}`,
@@ -5837,7 +7007,13 @@ async function reviewExistingPlanning(c,s,state,request,opts={}){
     ].filter(Boolean).join("\n\n");
   };
   const {taskRef,contScope}=planningScopeParts(framework,"plan_reviewer");
-  const runReview=()=>relayAsync("plan_reviewer",buildPrompt(),c,s,{readOnly:true,review:true,capEnabled:true,taskRef});
+  const runReview=async()=>{
+    const verdictOnlyText=planReviewVerdictOnlyText(s,contScope);
+    const reviewConfig=withPlanReviewVerdictOnlyCap(c,Boolean(verdictOnlyText));
+    const result=await relayAsync("plan_reviewer",`${buildPrompt()}${verdictOnlyText?`\n\n${verdictOnlyText}`:""}`,reviewConfig,s,{readOnly:true,review:true,capEnabled:true,taskRef});
+    if(verdictOnlyText){ clearPlanReviewVerdictOnly(s,contScope); saveState(s); }
+    return result;
+  };
   // TASK-14 Evidence call site 4: the adapter/infrastructure retry path is
   // gated by the positive allowlist `isPlanningReviewRetryFramework()`
   // (standalone or speckit only — never a negative `framework !== "gsd"`
@@ -5858,8 +7034,7 @@ async function reviewExistingPlanning(c,s,state,request,opts={}){
     rr=await runReview();
     if(rr.capped && acceptCappedFinalVerdict(`Existing ${framework} planning reviewer`,rr)){ /* verdict already complete */ }
     if(rr.capped){
-      handleCappedPlanningResult({c,s,framework,role:"plan_reviewer",result:rr,subject:`Existing ${framework} planning reviewer`});
-      continue;
+      if(!handleCappedPlanningResult({c,s,framework,role:"plan_reviewer",result:rr,subject:`Existing ${framework} planning reviewer`})) continue;
     }
     clearBackstopFirings(s,contScope);
     if(parseIncompleteSignal(rr.review ?? rr)){
@@ -5872,8 +7047,7 @@ async function reviewExistingPlanning(c,s,state,request,opts={}){
         {policyMessage:`Existing planning reviewer violated relay policy.`,escalatePrefix:`Existing ${framework} planning review`});
       if(rr.capped && acceptCappedFinalVerdict(`Existing ${framework} planning reviewer`,rr)){ /* verdict already complete */ }
       if(rr.capped){
-        handleCappedPlanningResult({c,s,framework,role:"plan_reviewer",result:rr,subject:`Existing ${framework} planning reviewer`});
-        continue;
+        if(!handleCappedPlanningResult({c,s,framework,role:"plan_reviewer",result:rr,subject:`Existing ${framework} planning reviewer`})) continue;
       }
       clearBackstopFirings(s,contScope);
       if(parseIncompleteSignal(rr.review ?? rr)){
@@ -5884,6 +7058,7 @@ async function reviewExistingPlanning(c,s,state,request,opts={}){
     break;
   }
   if(rr.review) clearPlanningContinuationScope(s,contScope);
+  if(rr.review) clearPlanReviewCappedNoVerdict(s,contScope);
   clearHandoffNote(s.mission,taskRef);
   if(rr.status!=="completed" || rr.review?.decision!=="PASS") {
     s.phase="escalated";s.step="existing-planning-review-failed";s.planningStateReview=rr.review||null;saveState(s);
@@ -5953,7 +7128,7 @@ async function ensurePlanningReady(c,s,request){
   const inPlanningStage=String(s.phase||"")==="planning"||String(s.phase||"")==="escalated"||String(s.step||"").startsWith("planning");
   const storedPlanningRequest=hasUsableRequest(s.planningRequest)?String(s.planningRequest).trim():"";
   const effectiveRequest=!hasUsableRequest(request)&&storedPlanningRequest&&inPlanningStage?storedPlanningRequest:request;
-  if(planningAdapter(c)===standalone){ ensureStandaloneMigrated(repo,s); const r=ensureStandaloneSplit(repo,s); if(r.migrated){ clearReviewFeedbackByPrefix(s,"standalone-task:"); clearFindingTasksByPrefix(s,"standalone-task:"); clearStaleStandaloneBudgets(s); saveState(s); } }
+  if(planningAdapter(c)===standalone){ ensureStandaloneMigrated(repo,s); const r=ensureStandaloneSplit(repo,s); if(r.migrated){ clearReviewFeedbackByPrefix(s,"standalone-task:"); clearReviewOpenFindingsByPrefix(s,"standalone-task:"); clearFindingTasksByPrefix(s,"standalone-task:"); clearStaleStandaloneBudgets(s); saveState(s); } }
   let state=detectPlanningState(c,s,effectiveRequest);
   const intent=classifyPlanningRequest({
     request:effectiveRequest,
@@ -6078,10 +7253,14 @@ async function ensurePlanningReady(c,s,request){
     delete s.standaloneSpecReview;
     delete s.reviewFeedback;
     delete s.planReviewHistory;
+    delete s.speckitCarriedFindings;
+    delete s.speckitGateFindingCounts;
+    delete s.speckitGateOutcomes;
     delete s.planReviewNotes;
     delete s.planPassNotes;
     delete s.planPassNoteStatus;
     delete s.planReviewTaskHashes;
+    delete s.planReviewConfirmationFailed;
     delete s.codeReviewHistory;
     delete s.verifierHistory;
     delete s.escalationSwitches;
@@ -6150,8 +7329,13 @@ async function ensurePlanningReady(c,s,request){
     ? loadReviewFeedback(s,STANDALONE_PLAN_FEEDBACK_KEY).length>0 : false;
   let pendingSpeckitStage=null;
   if(!startNewPlanning && state.framework==="speckit"){
+    const isPlannerRevCheckpoint=s.speckitGateReviewCheckpoint?.substage===SPECKIT_PLANNER_REVISION;
     for(const st of ["specify","plan","tasks"]){
-      if(loadReviewFeedback(s,speckitStageFeedbackKey(st)).length>0){ pendingSpeckitStage=st; break; }
+      const key=speckitStageFeedbackKey(st);
+      const findings=isPlannerRevCheckpoint
+        ? resolveSpeckitResumeFindings(s,key,loadReviewFeedback(s,key))
+        : loadReviewFeedback(s,key);
+      if(findings.length>0){ pendingSpeckitStage=st; break; }
     }
   }
   // A passed standalone plan review whose artifacts are unchanged is an
@@ -6169,6 +7353,10 @@ async function ensurePlanningReady(c,s,request){
     console.log("[autopilot] planning review skipped: all phases complete — resuming directly into mission-final review");
     s.phase="final_review";s.step="final_review";saveState(s);
     return state;
+  }
+  if(!startNewPlanning && s.phase==="escalated"){
+    s.phase="planning";
+    saveState(s);
   }
   // !startNewPlanning keeps the original `} else if` semantics: a new
   // request never takes the artifacts-complete shortcut.
@@ -6370,7 +7558,32 @@ function tasksIncludeE2eSetup(tasks){ return (tasks||[]).some(t=>String(t?.text?
 export {E2E_SETUP_PHRASE, testingPolicyPromptNote, testingPolicyRuleNote, tasksIncludeE2eSetup, artifactContractNoteFor};
 // Plan-review testing policy, one canonical string shared by every plan-review prompt.
 const PLAN_REVIEW_TESTING_RULE="Testing policy (BLOCKING): FAIL a task that adds or changes behavior but has no test and no test file in its verify, citing the task ID. When tests.e2e is playwright or cypress, also FAIL a user-facing UI feature that has no E2E test, citing the task ID. When tests.e2e is none or unset, do not require E2E tests.";
-export {PLAN_REVIEW_TESTING_RULE};
+function planReviewGateClaimRule(configOrCommands){
+  const cmds=Array.isArray(configOrCommands)
+    ? configOrCommands
+    : (Array.isArray(configOrCommands?.gates?.commands)
+        ? configOrCommands.gates.commands
+        : (Array.isArray(configOrCommands?.tests?.gate_commands)
+            ? configOrCommands.tests.gate_commands
+            : []));
+  const configured=cmds.length?cmds.join(", "):"(none)";
+  return `Configured orchestrator gate commands: ${configured}. Gate-claim check (BLOCKING): if the plan or tasks text claims the orchestrator gate runs type-check or lint (or names a lint/type-check gate) but the configured gate commands above do not include such a command, raise a finding "gate claim not configured" naming the missing command.`;
+}
+export {PLAN_REVIEW_TESTING_RULE, planReviewGateClaimRule};
+// Sibling to PLAN_REVIEW_TESTING_RULE (backlog #3): probe external CLI tools
+// named in the request + current planning artifacts and emit the BLOCKING
+// plan-review rule or planner guidance when any required tool is missing.
+function readPlanningTextSafe(filePath){
+  try{ return filePath && fs.existsSync(filePath) ? fs.readFileSync(filePath,"utf8") : ""; }catch{ return ""; }
+}
+function envToolsNoteForPlanning({text="", config=null, role="planner", probeOpts={}}={}){
+  const required=extractRequiredTools(text);
+  if(!required.length) return "";
+  const {missing}=probeTools(required,{envelope:config,...probeOpts});
+  if(!missing.length) return "";
+  return role==="plan_reviewer" ? planReviewEnvToolsRule(missing) : plannerEnvToolsRule(missing);
+}
+export {planReviewEnvToolsRule, plannerEnvToolsRule, envToolsNoteForPlanning};
 const CODE_REVIEW_REAL_TESTS_RULE="Real-tests policy: FAIL tests that have empty bodies or always-true asserts (for example check(name, true) or assert(true)); every test must exercise the behavior the change adds or modifies.";
 export {CODE_REVIEW_REAL_TESTS_RULE};
 // Planning-prompt rules, same one-canonical-string pattern as PLANNER_PATHS_LINE
@@ -6391,8 +7604,13 @@ function specReadCodeFirstLine(fileName){
 async function runPlanningPhase(c, step, request, s, planRevision=null){
   s.phase="planning"; s.step=step; saveState(s);
   const boundaryActive=Array.isArray(s.planningPreexistingFeatureDirs) && SPECKIT_PLANNING_STAGES.has(step);
+  const carriedFromStage=previousSpeckitStage(step);
+  const carriedFindings=carriedFromStage ? getSpeckitCarriedFindings(s,carriedFromStage) : [];
+  const hasCarriedFindings=carriedFindings.length>0;
+  const carriedPlannerText=speckitCarriedFindingsPlannerNote(s,step);
+  const carriedNote=carriedPlannerText ? `\n\n${carriedPlannerText}` : "";
   const boundaryNote=boundaryActive
-    ? boundaryNoteFor(step,s.speckitFeatureDir,{revision:!!planRevision})
+    ? boundaryNoteFor(step,s.speckitFeatureDir,{revision:!!planRevision,allowCarriedEarlierStage:hasCarriedFindings})
     : "";
   // TASK 15.6C: the write-boundary note above says WHERE the Planner may
   // write; it never said what the file at that path must actually contain.
@@ -6436,12 +7654,19 @@ async function runPlanningPhase(c, step, request, s, planRevision=null){
     gateStageFiles
   );
   const gateChangedLine=stageFilesChangedLine(gateStageChanged);
-  const gateFindings=feedbackText(loadReviewFeedback(s,speckitStageFeedbackKey(step)));
+  const stageFeedbackKey=speckitStageFeedbackKey(step);
+  const stageFeedbackFindings=(planRevision || s.speckitGateReviewCheckpoint?.substage===SPECKIT_PLANNER_REVISION)
+    ? resolveSpeckitResumeFindings(s,stageFeedbackKey,loadReviewFeedback(s,stageFeedbackKey))
+    : loadReviewFeedback(s,stageFeedbackKey);
+  const gateFindings=feedbackText(stageFeedbackFindings);
   const gateEarlierRounds=plannerEarlierRoundsText(s,speckitStageFeedbackKey(step),c.workflow?.plan_review_convergence!==false);
   const gateNotes=planReviewNotesText(s,speckitStageFeedbackKey(step));
+  const redesignLine=sameSectionRedesignLine(s,speckitStageFeedbackKey(step));
   const gateNote=gateFindings
-    ? `\n\n${gateChangedLine ? `${gateChangedLine}\n\n` : ""}The plan reviewer REJECTED the previous attempt at this stage. Address every finding; do not repeat the same output:\n${gateFindings}${gateEarlierRounds ? `\n\n${gateEarlierRounds}` : ""}${gateNotes ? `\n\n${gateNotes}` : ""}`
+    ? `\n\n${gateChangedLine ? `${gateChangedLine}\n\n` : ""}${redesignLine ? `${redesignLine}\n\n` : ""}The plan reviewer REJECTED the previous attempt at this stage. Address every finding (${PLAN_REVIEW_DEFECT_PATTERN_FIX_INSTRUCTION}); do not repeat the same output:\n${gateFindings}${gateEarlierRounds ? `\n\n${gateEarlierRounds}` : ""}${gateNotes ? `\n\n${gateNotes}` : ""}`
     : "";
+  const speckitEnvText=[request,readPlanningTextSafe(speckitSpecAbs),readPlanningTextSafe(speckitPlanAbs),readPlanningTextSafe(speckitTasksAbs)].filter(Boolean).join("\n");
+  const speckitEnvNote=envToolsNoteForPlanning({text:speckitEnvText,config:c,role:"planner"});
   let finalR=null;
   for(;;){
     const {taskRef,deadEndsText,noteText}=planningContinuationText(s,"speckit","planner");
@@ -6450,8 +7675,8 @@ async function runPlanningPhase(c, step, request, s, planRevision=null){
 Use the selected planning framework's installed commands/skills and project artifacts.
 ${speckitPathsLine}
 ${PLANNER_PATHS_LINE}
-${PLANNER_READ_RANGE_LINE}
-Do not implement production code. Do not commit/push.${boundaryNote}${contractNote}${correctionNote}${gateNote}
+${PLANNER_READ_RANGE_LINE}${speckitEnvNote?`\n${speckitEnvNote}`:""}
+Do not implement production code. Do not commit/push.${boundaryNote}${contractNote}${correctionNote}${carriedNote}${gateNote}
 ${deadEndsText?`${deadEndsText}\n\n`:""}${noteText?`${noteText}\n\n`:""}Keep a hand-off note at ${handoffNoteRelPath(s.mission, taskRef)}. OVERWRITE it (never append) at each milestone — after every important finding, before writing the stage artifact — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${budgetReminder ? ` ${budgetReminder}` : ""}
 Project request:
 ${request}`;
@@ -6481,12 +7706,16 @@ ${request}`;
   // so the planner is never treated as a generic planner failure.
   escalateIfRateLimited(c,s,"speckit-gate-review",r,{fatal:die,saveState,escalatePrefix:`SpecKit planner ${step}`,writeRole:true});
   if(r.status!=="completed" || r.policyViolation) die(`Planner failed or violated relay policy in phase ${step}.`);
-  enforcePlanningWriteBoundary(s,step,r.touchedFiles||[],{revision:!!planRevision});
-  // Record which earlier-stage artifacts a revision actually edited, so the
-  // next review re-checks them (SpecKit gate revision option (a)).
-  if(!!planRevision && s.speckitFeatureDir){
-    const earlierAllowed = step==="plan" ? ["spec.md"] : step==="tasks" ? ["spec.md","plan.md"] : [];
-    const earlierEdited = (r.touchedFiles||[]).map(normalizeRel).filter((f) => earlierAllowed.some((a) => f===`specs/${s.speckitFeatureDir}/${a}`));
+  resetAdapterRetryBudget(s, r?.adapter, "planner");
+  enforcePlanningWriteBoundary(s,step,r.touchedFiles||[],{revision:!!planRevision,allowCarriedEarlierStage:hasCarriedFindings});
+  // Record which earlier-stage artifacts a revision (or carried-findings pass)
+  // actually edited, so the next review re-checks them.
+  if((!!planRevision || hasCarriedFindings) && s.speckitFeatureDir){
+    const earlierEdited = (r.touchedFiles||[]).map(normalizeRel).filter((f) =>
+      step==="plan" ? f===`specs/${s.speckitFeatureDir}/spec.md`
+      : step==="tasks" ? (f===`specs/${s.speckitFeatureDir}/spec.md` || isPlanFeatureArtifact(f, s.speckitFeatureDir))
+      : false
+    );
     if(earlierEdited.length){
       s.planningEarlierStageEdits = { stage: step, files: earlierEdited, at: now() };
       saveState(s);
@@ -6517,17 +7746,19 @@ function earlierStageEditsNote(s,gateStage){
   if(!e?.files?.length || e.stage!==gateStage) return "";
   return ` The planner edited earlier-stage artifact(s) to resolve a finding: ${e.files.join(", ")}. Re-check them too.`;
 }
-function boundaryNoteFor(step,featureDir,{revision=false}={}){
+function boundaryNoteFor(step,featureDir,{revision=false,allowCarriedEarlierStage=false}={}){
   const feature=featureDir?`specs/${featureDir}/`:"specs/<new-feature>/";
   if(step==="specify") return `\nThis is a NEW feature. Write only: .specify/feature.json and ${feature}spec.md (plus ${feature}checklists/** if needed). Do not touch any other specs/ feature directory, do not write plan.md/tasks.md yet, and do not create any implementation deliverable.`;
   if(step==="plan") {
     let note=`\nFeature '${featureDir||"<new-feature>"}'. Write only: ${feature}plan.md, research.md, data-model.md, quickstart.md, contracts/**, and — if needed — ONLY the content between the ${CLAUDE_MD_MARKER_BEGIN} / ${CLAUDE_MD_MARKER_END} markers in CLAUDE.md (nothing else in CLAUDE.md may change). Do not write tasks.md yet, and do not create any implementation deliverable.`;
     if(revision) note += ` Revision mode: you may also edit an earlier-stage artifact cited by a finding (spec.md during plan) in the same feature dir, in addition to this stage's files. Never edit a later-stage artifact (tasks.md) or feature.json. Record which earlier-stage artifacts you edited in your hand-off note.`;
+    else if(allowCarriedEarlierStage) note += ` Carried-findings mode: you may also edit spec.md in the same feature dir to fix the carried spec-review findings listed below, in addition to this stage's files. Never edit a later-stage artifact (tasks.md) or feature.json.`;
     return note;
   }
   if(step==="tasks") {
     let note=`\nFeature '${featureDir||"<new-feature>"}'. Write only: ${feature}tasks.md. Do not create any implementation deliverable.`;
-    if(revision) note += ` Revision mode: you may also edit an earlier-stage artifact cited by a finding (spec.md, plan.md during tasks) in the same feature dir, in addition to this stage's files. Never edit feature.json or CLAUDE.md. Record which earlier-stage artifacts you edited in your hand-off note.`;
+    if(revision) note += ` Revision mode: you may also edit an earlier-stage artifact cited by a finding (spec.md, plan.md, research.md, data-model.md, quickstart.md, contracts/** during tasks) in the same feature dir, in addition to this stage's files. Never edit feature.json or CLAUDE.md. Record which earlier-stage artifacts you edited in your hand-off note.`;
+    else if(allowCarriedEarlierStage) note += ` Carried-findings mode: you may also edit plan-stage artifacts (plan.md, research.md, data-model.md, quickstart.md, contracts/**) in the same feature dir to fix the carried plan-review findings listed below, in addition to this stage's files. Never edit feature.json or CLAUDE.md.`;
     return note;
   }
   return "";
@@ -6574,6 +7805,7 @@ Artifact contract for this stage (validated on disk before it is accepted):
 - TASK 15.6F phase observability: structure work so that EVERY phase, when implemented, produces at least one Git-observable file addition, modification, or deletion. Never make empty-directory creation a standalone phase — Git cannot represent empty directories, so such a phase can never be code-reviewed or verified; fold directory preparation into the same phase (and task flow) as the task that creates the first file inside the directory. Likewise, never create a phase consisting only of reads, checks, or planning notes with no persistent file output.
 - Split build-then-wire work into two tasks: a task that needs both a new design/helper AND its wiring into a large file must be two tasks (build, then wire) — one task to build the helper/design, then a second task to wire it in — never combine both in a single task.
 - ${taskSizingRuleText(sizeTarget)}
+- ${SAME_FILE_SPLIT_RULE}
 - ${VERIFY_LENGTH_RULE}
 - ${testingPolicyRuleNote(cfg)}
 - If a previous attempt at this stage failed, the retry instruction carries a structured AUTOPILOT_PLANNING_CORRECTION={...} line naming the exact stage, artifact, expected path, and reason code — satisfy that contract exactly rather than rewriting the file a different way.`;
@@ -6715,7 +7947,7 @@ function classifyRecoverableBoundaryViolation(step,evaluation){
 // violation shape gets no checkpoint at all and remains exactly as
 // non-recoverable as before — no automatic resume, human intervention
 // required.
-function enforcePlanningWriteBoundary(s,step,touchedFiles,{revision=false}={}){
+function enforcePlanningWriteBoundary(s,step,touchedFiles,{revision=false,allowCarriedEarlierStage=false}={}){
   if(!Array.isArray(s.planningPreexistingFeatureDirs) || !SPECKIT_PLANNING_STAGES.has(step)) return;
   const {kept,ignored}=splitGitIgnoredTouched(repo,touchedFiles);
   if(ignored.length){
@@ -6729,7 +7961,8 @@ function enforcePlanningWriteBoundary(s,step,touchedFiles,{revision=false}={}){
     resolvedFeatureDir:s.speckitFeatureDir||null,
     readFile:(rel)=>{ try{ return fs.readFileSync(path.join(repo,rel),"utf8"); }catch{ return null; } },
     claudeMdBaseline:s.planningClaudeMdBaseline??null,
-    revision
+    revision,
+    allowCarriedEarlierStage
   });
   if(!evaluation.ok){
     s.phase="escalated";s.step="planning-write-boundary-violation";
@@ -6840,7 +8073,7 @@ function enforcePlanningStagePostcondition(s,step){
 function verifyDenylistPromptNote(denylist){
   const list=(Array.isArray(denylist)?denylist:[]).map(x=>typeof x==="string"?x.trim():"").filter(Boolean);
   if(!list.length)return "";
-  return `VERIFY DENYLIST: these entries must NEVER appear in a task's verify — the orchestrator rejects any plan whose task verify names one of them (substring match): ${list.map(x=>`"${x}"`).join(", ")}. Never use them in a verify; the plan reviewer must FAIL a plan that does.`;
+  return `VERIFY DENYLIST: these entries must NEVER appear in a task's verify — the orchestrator rejects any plan whose task verify names one of them (substring match): ${list.map(x=>`"${x}"`).join(", ")}. Never use them in a verify; the plan reviewer must FAIL a plan that does. Tasks must also not ask to run the full suite or the gate commands (e.g. \`npm run test\`, \`npm test\`, bare \`vitest run\`) in their text or verify: the gate runs after code review, and a task that records its result must take it from the gate's output or be dropped.`;
 }
 
 // verifyDenylistFindings and effectiveVerifyDenylist live in
@@ -6869,9 +8102,8 @@ function standaloneTaskVerifyEntries(tasksFile){
     if(!m)continue;
     const raw=m[2];
     const vm=raw.match(/;\s*verify:\s*(.+?)(?:\s*<!--|$)/);
-    if(!vm)continue;
     const idm=raw.match(/\*\*(\d+\.\d+)\*\*/);
-    out.push({taskLabel:idm?idm[1]:`line ${i+1}`,verify:vm[1].trim()});
+    out.push({taskLabel:idm?idm[1]:`line ${i+1}`,verify:vm?vm[1].trim():"",text:raw.split(/;\s*verify:/)[0]});
   }
   return out;
 }
@@ -6899,6 +8131,7 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
         [specFile]
       );
       const specChangedLine = stageFilesChangedLine(specStageChanged);
+      const specRedesignLine = sameSectionRedesignLine(s, STANDALONE_SPEC_FEEDBACK_KEY);
       const prompt = [
         "Write the feature specification for this request — do not write PLAN.md or TASKS.md in this stage.",
         `Write the feature specification for this request to exactly: ${specFile}`,
@@ -6914,7 +8147,7 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
         plannerHandoffNoteText,
         `Project request/context: ${request}`,
         `Keep a hand-off note at ${handoffNoteRelPath(mission, 'standalone-spec-planner')}. OVERWRITE it (never append) at each milestone — after every important finding, before writing SPEC.md/CODEMAP.md — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${plannerBudgetReminder ? ` ${plannerBudgetReminder}` : ""}`,
-        feedback ? `${specChangedLine ? `${specChangedLine}\n\n` : ""}Spec reviewer feedback that MUST be addressed:\n${feedback}` : ""
+        feedback ? `${specChangedLine ? `${specChangedLine}\n\n` : ""}${specRedesignLine ? `${specRedesignLine}\n\n` : ""}Spec reviewer feedback that MUST be addressed (${PLAN_REVIEW_DEFECT_PATTERN_FIX_INSTRUCTION}):\n${feedback}` : ""
       ].filter(Boolean).join("\n\n");
       const specMtimeBefore = fs.existsSync(specFile) ? fs.statSync(specFile).mtimeMs : 0;
       const codemapMtimeBefore = fs.existsSync(codemapFile) ? fs.statSync(codemapFile).mtimeMs : 0;
@@ -7002,7 +8235,7 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
       const reviewerHandoffNote = readHandoffNote(mission, 'standalone-spec-plan_reviewer');
       const _prEff = effectiveRoleModelFor(s, c, 'plan_reviewer');
       const _prPat = _prEff ? (agents[_prEff.adapter]?.free_model_pattern ?? null) : null;
-      const planReviewerBudgetReminder = handoffBudgetReminder(resolvePerRoleLimits('plan_reviewer', c.policy, _prEff ? { adapter: _prEff.adapter, model: _prEff.model, free_model_pattern: _prPat } : {}).perTaskMaxTurns);
+      const planReviewerBudgetReminder = handoffBudgetReminder(resolvePerRoleLimits('plan_reviewer', c.policy, _prEff ? { adapter: _prEff.adapter, model: _prEff.model, free_model_pattern: _prPat } : {}).perTaskMaxTurns, { review: true });
       let reviewPrompt = [
         "Review the feature specification before planning starts.",
         `Spec file: ${specFile}`,
@@ -7012,12 +8245,16 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
         REVIEWER_ALL_FINDINGS_LINE,
         PLAN_REVIEW_FULL_LINE,
         "Do not modify either file. End with the required AUTOPILOT_REVIEW sentinel.",
-        `Keep a hand-off note at ${scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, 'standalone-spec-plan_reviewer')}. OVERWRITE it (never append) at each milestone — after every important finding and before the review verdict — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${planReviewerBudgetReminder ? ` ${planReviewerBudgetReminder}` : ""}`,
+        `Keep a hand-off note at ${scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, 'standalone-spec-plan_reviewer')}. OVERWRITE it (never append) at each milestone — after every important finding and before the review verdict — with: 1. Checked and clear — file:line ranges + topics reviewed and found OK. 2. Findings (final) — each BLOCKING/minor finding with file:line evidence. 3. Remaining — concrete files/sections still to review. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${planReviewerBudgetReminder ? ` ${planReviewerBudgetReminder}` : ""}`,
         feedback ? `Prior findings to re-check:\n${feedback}` : "",
-        reviewerHandoffNote ? `Prior reviewer handoff note (continuation context — continue from where it stopped):\n${reviewerHandoffNote}` : ""
+        readOnlyContinuationNote(reviewerHandoffNote, repo, mission, 'standalone-spec-plan_reviewer', 'reviewer')
       ].filter(Boolean).join("\n\n");
-      const finalReviewPrompt = formatReviewBriefForContinuation(reviewPrompt);
-      let reviewResult = await relayAsync("plan_reviewer", finalReviewPrompt, c, s, { readOnly: true, review: true, resume: false, capEnabled: true, taskRef: 'standalone-spec-plan_reviewer', planRevision: revision });
+      const specReviewScope = 'task:standalone:spec:plan_reviewer';
+      const specVerdictOnlyText = planReviewVerdictOnlyText(s, specReviewScope);
+      const specReviewConfig = withPlanReviewVerdictOnlyCap(c, Boolean(specVerdictOnlyText));
+      const finalReviewPrompt = `${formatReviewBriefForContinuation(reviewPrompt)}${specVerdictOnlyText ? `\n\n${specVerdictOnlyText}` : ""}`;
+      let reviewResult = await relayAsync("plan_reviewer", finalReviewPrompt, specReviewConfig, s, { readOnly: true, review: true, resume: false, capEnabled: true, taskRef: 'standalone-spec-plan_reviewer', planRevision: revision });
+      if (specVerdictOnlyText) { clearPlanReviewVerdictOnly(s, specReviewScope); saveState(s); }
       if (reviewResult.policyViolation) die("Standalone spec review violated relay policy.");
       // Mirrors the plan loop's reviewer cap/incomplete handling with the spec reviewer scope.
       if (reviewResult.capped && acceptCappedFinalVerdict("Standalone spec review", reviewResult)) { /* verdict already complete */ }
@@ -7039,14 +8276,17 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
         clearBackstopFirings(s, contScope);
         maybeApplyPendingContinuationReset(s, contScope);
         stopIfBriefExceedsCap({result: reviewResult, subject: "Standalone spec review", role: "plan_reviewer", contScope, s, c, mission, taskRef: 'standalone-spec-plan_reviewer'});
-        const cont = handlePlanningContinuation(s, 'plan_reviewer', reviewResult, 'task:standalone:spec:plan_reviewer', c.policy, 'capped');
-        if (!cont.allowed) {
-          recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-plan_reviewer' });
-          die(`Standalone spec review did not converge after ${cont.used} capped generations (${reviewResult.capped.type} cap ${reviewResult.capped.used}/${reviewResult.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+        const capOutcome = handleCappedPlanReviewerWithoutVerdict({s,framework:"standalone",result:reviewResult,subject:"Standalone spec review",contScope,taskRef:'standalone-spec-plan_reviewer',mission});
+        if (!capOutcome?.convertedToFail) {
+          const cont = handlePlanningContinuation(s, 'plan_reviewer', reviewResult, 'task:standalone:spec:plan_reviewer', c.policy, 'capped');
+          if (!cont.allowed) {
+            recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-plan_reviewer' });
+            die(`Standalone spec review did not converge after ${cont.used} capped generations (${reviewResult.capped.type} cap ${reviewResult.capped.used}/${reviewResult.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+          }
+          console.log(`Standalone spec review hit the ${reviewResult.capped.type} cap (${reviewResult.capped.used}/${reviewResult.capped.limit} ${capUnitLabel(reviewResult.capped.type)}); continuing as session ${cont.used + 1} of ${cont.limit + 1}.`);
+          position = "reviewer";
+          continue;
         }
-        console.log(`Standalone spec review hit the ${reviewResult.capped.type} cap (${reviewResult.capped.used}/${reviewResult.capped.limit} ${capUnitLabel(reviewResult.capped.type)}); continuing as session ${cont.used + 1} of ${cont.limit + 1}.`);
-        position = "reviewer";
-        continue;
       }
       clearBackstopFirings(s, 'task:standalone:spec:plan_reviewer');
       if (parseIncompleteSignal(reviewResult.review ?? reviewResult)) {
@@ -7063,7 +8303,12 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
       }
       escalateIfRateLimited(c, s, "standalone-spec-review", reviewResult, { fatal: die, saveState, escalatePrefix: "Standalone spec review" });
       reviewResult = await resolvePlanningReviewAttempt(c, s, "standalone-spec-review", reviewResult,
-        () => relayAsync("plan_reviewer", reviewPrompt, c, s, { readOnly: true, review: true, resume: false, capEnabled: true, taskRef: 'standalone-spec-plan_reviewer', planRevision: revision }),
+        async () => {
+          const verdictOnlyText = planReviewVerdictOnlyText(s, specReviewScope);
+          const result = await relayAsync("plan_reviewer", `${reviewPrompt}${verdictOnlyText ? `\n\n${verdictOnlyText}` : ""}`, withPlanReviewVerdictOnlyCap(c, Boolean(verdictOnlyText)), s, { readOnly: true, review: true, resume: false, capEnabled: true, taskRef: 'standalone-spec-plan_reviewer', planRevision: revision });
+          if (verdictOnlyText) { clearPlanReviewVerdictOnly(s, specReviewScope); saveState(s); }
+          return result;
+        },
         { policyMessage: "Standalone spec review violated relay policy.", escalatePrefix: "Standalone spec review" });
       if (reviewResult.capped && acceptCappedFinalVerdict("Standalone spec review", reviewResult)) { /* verdict already complete */ }
       if (reviewResult.capped) {
@@ -7084,22 +8329,27 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
         clearBackstopFirings(s, contScope);
         maybeApplyPendingContinuationReset(s, contScope);
         stopIfBriefExceedsCap({result: reviewResult, subject: "Standalone spec review", role: "plan_reviewer", contScope, s, c, mission, taskRef: 'standalone-spec-plan_reviewer'});
-        const cont = handlePlanningContinuation(s, 'plan_reviewer', reviewResult, 'task:standalone:spec:plan_reviewer', c.policy, 'capped');
-        if (!cont.allowed) {
-          recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-plan_reviewer' });
-          die(`Standalone spec review did not converge after ${cont.used} capped generations (${reviewResult.capped.type} cap ${reviewResult.capped.used}/${reviewResult.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+        const capOutcome = handleCappedPlanReviewerWithoutVerdict({s,framework:"standalone",result:reviewResult,subject:"Standalone spec review",contScope,taskRef:'standalone-spec-plan_reviewer',mission});
+        if (!capOutcome?.convertedToFail) {
+          const cont = handlePlanningContinuation(s, 'plan_reviewer', reviewResult, 'task:standalone:spec:plan_reviewer', c.policy, 'capped');
+          if (!cont.allowed) {
+            recordLastContinuation(s, { contScope, taskId: null, missionName: mission, taskRef: 'standalone-spec-plan_reviewer' });
+            die(`Standalone spec review did not converge after ${cont.used} capped generations (${reviewResult.capped.type} cap ${reviewResult.capped.used}/${reviewResult.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+          }
+          console.log(`Standalone spec review hit the ${reviewResult.capped.type} cap (${reviewResult.capped.used}/${reviewResult.capped.limit} ${capUnitLabel(reviewResult.capped.type)}); continuing as session ${cont.used + 1} of ${cont.limit + 1}.`);
+          position = "reviewer";
+          continue;
         }
-        console.log(`Standalone spec review hit the ${reviewResult.capped.type} cap (${reviewResult.capped.used}/${reviewResult.capped.limit} ${capUnitLabel(reviewResult.capped.type)}); continuing as session ${cont.used + 1} of ${cont.limit + 1}.`);
-        position = "reviewer";
-        continue;
       }
       clearBackstopFirings(s, 'task:standalone:spec:plan_reviewer');
       if (reviewResult.review) clearPlanningContinuationScope(s, 'task:standalone:spec:plan_reviewer');
+      if (reviewResult.review) clearPlanReviewCappedNoVerdict(s, 'task:standalone:spec:plan_reviewer');
       clearHandoffNote(mission, 'standalone-spec-plan_reviewer');
       if (reviewResult.status === "completed" && reviewResult.review?.decision === "PASS") {
         s.standaloneSpecReview = { approved: true, notes: Array.isArray(reviewResult.review?.notes) ? reviewResult.review.notes : [] };
         clearReviewFeedback(s, STANDALONE_SPEC_FEEDBACK_KEY);
         clearReviewFailSnapshot(s, STANDALONE_SPEC_FEEDBACK_KEY);
+        clearPlanReviewHistory(s, STANDALONE_SPEC_FEEDBACK_KEY);
         saveState(s);
         return;
       }
@@ -7108,6 +8358,7 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
     revision++;
     const specFindings = saveReviewFeedback(s, STANDALONE_SPEC_FEEDBACK_KEY, rawFindings);
     recordReviewFailSnapshot(s, STANDALONE_SPEC_FEEDBACK_KEY, [specFile], repo);
+    recordPlanReviewRound(s, STANDALONE_SPEC_FEEDBACK_KEY, specFindings, reviewResult?.review?.previous);
     feedback = feedbackText(specFindings) || "Spec reviewer returned FAIL without findings.";
     position = "planner";
     s.standaloneSpecReview = { revision, position };
@@ -7118,6 +8369,7 @@ async function runStandaloneSpecStage(c, s, request, mission, specFile, codemapF
       s.standaloneSpecReview = { approved: true, notes: [], openFindings: specFindings };
       clearReviewFeedback(s, STANDALONE_SPEC_FEEDBACK_KEY);
       clearReviewFailSnapshot(s, STANDALONE_SPEC_FEEDBACK_KEY);
+      clearPlanReviewHistory(s, STANDALONE_SPEC_FEEDBACK_KEY);
       saveState(s);
       return;
     }
@@ -7135,7 +8387,7 @@ function standaloneFinalSpecPath(c,mission){
 
 async function runStandalonePlanning(c,s,request,opts={}){
   ensureStandaloneMigrated(repo,s);
-  { const r=ensureStandaloneSplit(repo,s); if(r.migrated){ clearReviewFeedbackByPrefix(s,"standalone-task:"); clearFindingTasksByPrefix(s,"standalone-task:"); clearStaleStandaloneBudgets(s); } }
+  { const r=ensureStandaloneSplit(repo,s); if(r.migrated){ clearReviewFeedbackByPrefix(s,"standalone-task:"); clearReviewOpenFindingsByPrefix(s,"standalone-task:"); clearFindingTasksByPrefix(s,"standalone-task:"); clearStaleStandaloneBudgets(s); } }
   const mission=resolveStandaloneMission(repo,s,request);
   const file=standalone.planPath(repo,mission);
   const tasksFile=standalone.tasksPath(repo,mission);
@@ -7193,6 +8445,12 @@ async function runStandalonePlanning(c,s,request,opts={}){
     // marker (not a local flag) is what makes a kill during that call resume
     // into the confirmation review instead of accepting the scoped PASS.
     const confirming=planReviewConfirmationPending(s,STANDALONE_PLAN_FEEDBACK_KEY);
+    // Backlog #8: after a confirmation round FAILED every later round is also
+    // a FULL review. Those rounds carry the same "full re-check" run note and
+    // console line as the confirmation, so the run list/WATCH-REPORT never
+    // shows them as quick scoped re-reviews. Recomputed at the top of every
+    // iteration, so a capped round's continuation session inherits it.
+    const fullRecheck=confirming||planReviewConfirmationFailed(s,STANDALONE_PLAN_FEEDBACK_KEY);
     if(confirming) skipPlannerFirst=true;
     // Mission 086: a queued `ap reset --scope standalone-plan-revision`
     // applies at the top of every revision-loop iteration, restarting the
@@ -7220,6 +8478,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
     // one implementer session — same const-use pattern as taskSizeLine above
     // so the regression test pins one canonical string across both branches.
     const oneSessionLine=taskSizingRuleText(resolveTaskSizeTargetTurns(c.policy));
+    const sameFileSplitLine=SAME_FILE_SPLIT_RULE;
     // Backlog #13: small tasks (like SpecKit). The limit counts work, not
     // tasks, so a phase may hold up to MAX_PHASE_TASKS small one-action
     // tasks; "task size wins over phase count" is the explicit top rule.
@@ -7271,6 +8530,11 @@ async function runStandalonePlanning(c,s,request,opts={}){
       [file, tasksFile]
     );
     const planChangedLine = stageFilesChangedLine(planStageChanged);
+    const standalonePlannerEnvNote=envToolsNoteForPlanning({
+      text:[request,readPlanningTextSafe(file),readPlanningTextSafe(tasksFile)].filter(Boolean).join("\n"),
+      config:c,
+      role:"planner"
+    });
     const prompt=feedback?[
       "Create or continue an implementation plan for this project without relying on SpecKit or GSD.",
       `Write the narrative plan to exactly: ${file}`,
@@ -7278,6 +8542,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       ...specRevisionLines,
       PLANNER_PATHS_LINE,
       PLANNER_READ_RANGE_LINE,
+      standalonePlannerEnvNote,
       specOn
         ? `This is a REVISION round, not a fresh authoring round. Before changing anything, read the current SPEC.md, PLAN.md and TASKS.md in full — ${specFile}, ${file} and ${tasksFile} — this is required, not optional.`
         : `This is a REVISION round, not a fresh authoring round. Before changing anything, read the current PLAN.md and TASKS.md in full — ${file} and ${tasksFile} — this is required, not optional.`,
@@ -7291,6 +8556,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       phaseBoundaryLine,
       taskSizeLine,
       oneSessionLine,
+      sameFileSplitLine,
       "Keep PLAN.md and TASKS.md consistent (every checklist item lives only in TASKS.md, with accept/verify inline on the same line).",
       "Do not implement production code and do not commit/push.",
       plannerDeadEndsText,
@@ -7299,7 +8565,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       `Keep a hand-off note at ${handoffNoteRelPath(mission, 'standalone-planning-planner')}. OVERWRITE it (never append) at each milestone — after every important finding, before writing PLAN.md/TASKS.md — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${plannerBudgetReminder ? ` ${plannerBudgetReminder}` : ""}`,
       planReviewNotesText(s,STANDALONE_PLAN_FEEDBACK_KEY),
       plannerEarlierRoundsText(s,STANDALONE_PLAN_FEEDBACK_KEY,c.workflow?.plan_review_convergence!==false),
-      `${planChangedLine ? `${planChangedLine}\n\n` : ""}Plan reviewer feedback that MUST be addressed:\n${feedback}`
+      `${planChangedLine ? `${planChangedLine}\n\n` : ""}${sameSectionRedesignLine(s,STANDALONE_PLAN_FEEDBACK_KEY) ? `${sameSectionRedesignLine(s,STANDALONE_PLAN_FEEDBACK_KEY)}\n\n` : ""}Plan reviewer feedback that MUST be addressed (${PLAN_REVIEW_DEFECT_PATTERN_FIX_INSTRUCTION}):\n${feedback}`
     ].filter(Boolean).join("\n\n"):[
       "Create or continue an implementation plan for this project without relying on SpecKit or GSD.",
       `Write the narrative plan to exactly: ${file}`,
@@ -7308,12 +8574,14 @@ async function runStandalonePlanning(c,s,request,opts={}){
       `Write the phased checklist to exactly: ${tasksFile}`,
       PLANNER_PATHS_LINE,
       PLANNER_READ_RANGE_LINE,
+      standalonePlannerEnvNote,
       tasksLine,
       phaseTaskLimitLine,
       mergeTasksLine,
       phaseBoundaryLine,
       taskSizeLine,
       oneSessionLine,
+      sameFileSplitLine,
       "Keep PLAN.md and TASKS.md consistent (every checklist item lives only in TASKS.md, with accept/verify inline on the same line).",
       "If artifacts already exist, preserve completed tasks and add/fix only what is missing for the request.",
       "Do not implement production code and do not commit/push.",
@@ -7321,7 +8589,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       plannerHandoffNoteText,
       `Project request/context: ${request}`,
       `Keep a hand-off note at ${handoffNoteRelPath(mission, 'standalone-planning-planner')}. OVERWRITE it (never append) at each milestone — after every important finding, before writing PLAN.md/TASKS.md — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${plannerBudgetReminder ? ` ${plannerBudgetReminder}` : ""}`
-    ].join("\n\n");
+    ].filter(Boolean).join("\n\n");
     // Always fresh, never resume: the prompt above already carries the full
     // plan file path and, on a revision, the reviewer's findings verbatim
     // (`feedback`) — nothing the planner needs is only available in a prior
@@ -7435,7 +8703,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
       const tmpS={...s, mission};
       try{
         const r=ensureStandaloneSplit(repo, tmpS);
-        if(r.migrated){ clearReviewFeedbackByPrefix(s,"standalone-task:"); clearFindingTasksByPrefix(s,"standalone-task:"); clearStaleStandaloneBudgets(s); saveState(s); }
+        if(r.migrated){ clearReviewFeedbackByPrefix(s,"standalone-task:"); clearReviewOpenFindingsByPrefix(s,"standalone-task:"); clearFindingTasksByPrefix(s,"standalone-task:"); clearStaleStandaloneBudgets(s); saveState(s); }
       }catch(e){
         if(e?.code==="MIGRATION_CONFLICT") die(e.message);
         throw e;
@@ -7455,6 +8723,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
     // A restart in this state resumes at the reviewer with content validated
     // (reviewer stage). Left unchanged on a retryable-infra retry below.
     writeStandaloneReviewerPendingCheckpoint(s,mission);
+    resetAdapterRetryBudget(s, planner?.adapter, "planner");
     saveState(s);
     } else {
       // Resumed at the reviewer: the planner already wrote these files before
@@ -7475,7 +8744,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
     // 85%/95% of its effective per-task turn cap to its note reminder.
     const _prEff=effectiveRoleModelFor(s,c,'plan_reviewer');
     const _prPat=_prEff? (agents[_prEff.adapter]?.free_model_pattern ?? null) : null;
-    const planReviewerBudgetReminder=handoffBudgetReminder(resolvePerRoleLimits('plan_reviewer',c.policy,_prEff?{adapter:_prEff.adapter,model:_prEff.model,free_model_pattern:_prPat}:{}).perTaskMaxTurns);
+    const planReviewerBudgetReminder=handoffBudgetReminder(resolvePerRoleLimits('plan_reviewer',c.policy,_prEff?{adapter:_prEff.adapter,model:_prEff.model,free_model_pattern:_prPat}:{}).perTaskMaxTurns,{review:true});
     let standaloneTaskSizeLine="";
     if(confirming){
       const recordedHashes=getPlanReviewTaskHashes(s,STANDALONE_PLAN_FEEDBACK_KEY);
@@ -7485,6 +8754,8 @@ async function runStandalonePlanning(c,s,request,opts={}){
     }
     // ...planReviewerRoundLines(s,STANDALONE_PLAN_FEEDBACK_KEY,c.workflow?.plan_review_convergence!==false)
     const reviewRoundLines=planReviewerRoundLines(s,STANDALONE_PLAN_FEEDBACK_KEY,c.workflow?.plan_review_convergence!==false,standaloneTaskSizeLine);
+    const isFirstStandaloneRound=!confirming && isFirstPlanReviewRound(s,STANDALONE_PLAN_FEEDBACK_KEY);
+    const standaloneCoverageLine=isFirstStandaloneRound ? coverageTableInstruction("standalone-plan") : "";
     const reviewPrompt=[
       "Review the standalone Autopilot plan before implementation.",
       `Plan file: ${file}` ,
@@ -7500,14 +8771,17 @@ async function runStandalonePlanning(c,s,request,opts={}){
       "FAIL a single task that combines building a new design/helper AND wiring it into a large file — such build-then-wire work must be two tasks (build, then wire); cite the oversized task by its numeric ID exactly as written in the file (e.g. 'TASKS.md 2.3').",
       taskSizeReviewText(resolveTaskSizeTargetTurns(c.policy))+"; cite the oversized task by its numeric ID exactly as written in the file (e.g. 'TASKS.md 2.3').",
       PLAN_REVIEW_TESTING_RULE,
+      planReviewGateClaimRule(c),
+      envToolsNoteForPlanning({text:[request,readPlanningTextSafe(file),readPlanningTextSafe(tasksFile)].filter(Boolean).join("\n"),config:c,role:"plan_reviewer"}),
       `FAIL any phase with more than ${resolveMaxPhaseTasks(c.policy)} tasks, citing the phase (e.g. 'TASKS.md Phase 2'); it must be split into additional phases. A phase with fewer than ${resolveMinPhaseTasks(c.policy)} tasks that could join a neighbouring related phase (staying within ${resolveMaxPhaseTasks(c.policy)} tasks, order unchanged) goes in "notes", never in "findings".`,
       "FAIL a task that changes no files (only runs tests / regression-checks), citing the task ID (e.g. 'TASKS.md 2.3'). Do NOT FAIL small tasks for being small or for not being merged — small one-action tasks are deliberate. Do not FAIL a phase merely for having few tasks: phases are cut by deliverable, and task size wins over phase count.",
       ...reviewRoundLines,
+      ...(standaloneCoverageLine?[standaloneCoverageLine]:[]),
       ...(specOn&&isFullPlanReviewRound(reviewRoundLines)?[STANDALONE_SPEC_ANALYZE_LINE]:[]),
       "Do not modify either file. End with the required AUTOPILOT_REVIEW sentinel.",
-      `Keep a hand-off note at ${scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, 'standalone-planning-plan_reviewer')}. OVERWRITE it (never append) at each milestone — after every important finding and before the review verdict — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${planReviewerBudgetReminder ? ` ${planReviewerBudgetReminder}` : ""}`,
+      `Keep a hand-off note at ${scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, 'standalone-planning-plan_reviewer')}. OVERWRITE it (never append) at each milestone — after every important finding and before the review verdict — with: 1. Checked and clear — file:line ranges + topics reviewed and found OK. 2. Findings (final) — each BLOCKING/minor finding with file:line evidence. 3. Remaining — concrete files/sections still to review. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${planReviewerBudgetReminder ? ` ${planReviewerBudgetReminder}` : ""}`,
       !confirming&&feedback?`Prior findings to re-check:\n${feedback}`:"",
-      reviewerHandoffNote?`Prior reviewer handoff note (continuation context — continue from where it stopped):\n${reviewerHandoffNote}`:"",
+      readOnlyContinuationNote(reviewerHandoffNote,repo,mission,'standalone-planning-plan_reviewer','reviewer'),
       verifyDenylistPromptNote(effectiveVerifyDenylist(c))
     ].filter(Boolean).join("\n\n");
     // TASK-38: deterministic verify-denylist gate. When any task's verify
@@ -7524,8 +8798,12 @@ async function runStandalonePlanning(c,s,request,opts={}){
     const standaloneVerifyEntries=standaloneTaskVerifyEntries(tasksFile);
     const standaloneTasksText=fs.existsSync(tasksFile)?fs.readFileSync(tasksFile,"utf8"):"";
     const denied=[...verifyDenylistFindings(standaloneVerifyEntries,effectiveVerifyDenylist(c)),...verifyLengthFindings(standaloneVerifyEntries),...verifyShardFindings(standaloneVerifyEntries),...phaseTaskCountFindings(standaloneTasksText, resolveMaxPhaseTasks(c.policy)),...unrecognizedAnnotationFindings(standaloneTasksText),...(specOn?specCoverageFindings(fs.existsSync(specFile)?fs.readFileSync(specFile,"utf8"):"",standaloneTasksText):[])];
+    denied.push(...taskTextFullSuiteFindings(standaloneVerifyEntries,fullSuiteTaskEntries(c)));
     if(denied.length){
-      if(confirming) clearPlanReviewConfirmation(s,STANDALONE_PLAN_FEEDBACK_KEY);
+      // A deterministic verify-denylist FAIL during the confirmation round is
+      // still a failed confirmation: the next review must be a full round
+      // (backlog #8), not another scoped re-review.
+      if(confirming) markPlanReviewConfirmationFailed(s,STANDALONE_PLAN_FEEDBACK_KEY);
       revision++;
       const planFindings=saveReviewFeedback(s,STANDALONE_PLAN_FEEDBACK_KEY,denied);
       recordReviewFailSnapshot(s,STANDALONE_PLAN_FEEDBACK_KEY,[file,tasksFile],repo);
@@ -7548,8 +8826,12 @@ async function runStandalonePlanning(c,s,request,opts={}){
       }
       continue;
     }
-    if(confirming) console.log("plan review: full re-check");
-    let reviewResult=await relayAsync("plan_reviewer",formatReviewBriefForContinuation(reviewPrompt),c,s,{readOnly:true,review:true,resume:false,capEnabled:true,taskRef:'standalone-planning-plan_reviewer',planRevision:revision,...(confirming?{runNote:"full re-check",resultExtra:{planReviewConfirmation:true}}:{})});
+    if(fullRecheck) console.log("plan review: full re-check");
+    const standaloneReviewScope='task:standalone:planning:plan_reviewer';
+    const standaloneVerdictOnlyText=planReviewVerdictOnlyText(s,standaloneReviewScope);
+    const standaloneReviewConfig=withFirstRoundReasoning(withPlanReviewVerdictOnlyCap(c,Boolean(standaloneVerdictOnlyText)),isFirstStandaloneRound);
+    let reviewResult=await relayAsync("plan_reviewer",`${formatReviewBriefForContinuation(reviewPrompt)}${standaloneVerdictOnlyText?`\n\n${standaloneVerdictOnlyText}`:""}`,standaloneReviewConfig,s,{readOnly:true,review:true,resume:false,capEnabled:true,taskRef:'standalone-planning-plan_reviewer',planRevision:revision,...(fullRecheck?{runNote:"full re-check",...(confirming?{resultExtra:{planReviewConfirmation:true}}:{})}:{})});
+    if(standaloneVerdictOnlyText){ clearPlanReviewVerdictOnly(s,standaloneReviewScope); saveState(s); }
     if(reviewResult.policyViolation)die("Standalone plan reviewer violated relay policy.");
     if(reviewResult.capped && acceptCappedFinalVerdict("Standalone plan review",reviewResult)){ /* verdict already complete */ }
     if(reviewResult.capped){
@@ -7587,18 +8869,21 @@ async function runStandalonePlanning(c,s,request,opts={}){
       // this decision, before the next generation is consumed.
       maybeApplyPendingContinuationReset(s,contScope);
       stopIfBriefExceedsCap({result: reviewResult, subject: "Plan reviewer", role: "plan_reviewer", contScope, s, c, mission, taskRef: 'standalone-planning-plan_reviewer'});
-      const cont=handlePlanningContinuation(s,'plan_reviewer',reviewResult,'task:standalone:planning:plan_reviewer',c.policy,'capped');
-      if(!cont.allowed){
-        recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:'standalone-planning-plan_reviewer'});
-        die(`Standalone planning did not converge after ${cont.used} capped generations (${reviewResult.capped.type} cap ${reviewResult.capped.used}/${reviewResult.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+      const capOutcome=handleCappedPlanReviewerWithoutVerdict({s,framework:"standalone",result:reviewResult,subject:"Plan reviewer",contScope,taskRef:'standalone-planning-plan_reviewer',mission});
+      if(!capOutcome?.convertedToFail){
+        const cont=handlePlanningContinuation(s,'plan_reviewer',reviewResult,'task:standalone:planning:plan_reviewer',c.policy,'capped');
+        if(!cont.allowed){
+          recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:'standalone-planning-plan_reviewer'});
+          die(`Standalone planning did not converge after ${cont.used} capped generations (${reviewResult.capped.type} cap ${reviewResult.capped.used}/${reviewResult.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+        }
+        console.log(`Plan reviewer hit the ${reviewResult.capped.type} cap (${reviewResult.capped.used}/${reviewResult.capped.limit} ${capUnitLabel(reviewResult.capped.type)}); continuing as session ${cont.used+1} of ${cont.limit+1}.`);
+        // Resume at the reviewer: the planner output is unchanged and the
+        // reviewer-pending checkpoint (written after the planner) is still
+        // current, so skip the planner next iteration and re-invoke only the
+        // reviewer with the wrap-up note quoted into its prompt above.
+        skipPlannerFirst=true;
+        continue;
       }
-      console.log(`Plan reviewer hit the ${reviewResult.capped.type} cap (${reviewResult.capped.used}/${reviewResult.capped.limit} ${capUnitLabel(reviewResult.capped.type)}); continuing as session ${cont.used+1} of ${cont.limit+1}.`);
-      // Resume at the reviewer: the planner output is unchanged and the
-      // reviewer-pending checkpoint (written after the planner) is still
-      // current, so skip the planner next iteration and re-invoke only the
-      // reviewer with the wrap-up note quoted into its prompt above.
-      skipPlannerFirst=true;
-      continue;
     }
     // Backlog #59 part (a): the plan_reviewer run ended WITHOUT a backstop
     // firing (normal completion, or the voluntary incomplete stop below) —
@@ -7640,7 +8925,12 @@ async function runStandalonePlanning(c,s,request,opts={}){
     // escalate naming class/domain; functional/output-contract outcomes flow
     // through to the unchanged revision behavior below with nothing recorded.
     reviewResult=await resolvePlanningReviewAttempt(c,s,"standalone-plan-review",reviewResult,
-      ()=>relayAsync("plan_reviewer",reviewPrompt,c,s,{readOnly:true,review:true,resume:false,capEnabled:true,taskRef:'standalone-planning-plan_reviewer',planRevision:revision,...(confirming?{runNote:"full re-check",resultExtra:{planReviewConfirmation:true}}:{})}),
+      async ()=>{
+        const verdictOnlyText=planReviewVerdictOnlyText(s,standaloneReviewScope);
+        const result=await relayAsync("plan_reviewer",`${reviewPrompt}${verdictOnlyText?`\n\n${verdictOnlyText}`:""}`,withFirstRoundReasoning(withPlanReviewVerdictOnlyCap(c,Boolean(verdictOnlyText)),isFirstStandaloneRound),s,{readOnly:true,review:true,resume:false,capEnabled:true,taskRef:'standalone-planning-plan_reviewer',planRevision:revision,...(fullRecheck?{runNote:"full re-check",...(confirming?{resultExtra:{planReviewConfirmation:true}}:{})}:{})});
+        if(verdictOnlyText){ clearPlanReviewVerdictOnly(s,standaloneReviewScope); saveState(s); }
+        return result;
+      },
       {policyMessage:"Standalone plan reviewer violated relay policy.",escalatePrefix:"Standalone plan review"});
     if(reviewResult.capped && acceptCappedFinalVerdict("Standalone plan review",reviewResult)){ /* verdict already complete */ }
     if(reviewResult.capped){
@@ -7673,15 +8963,18 @@ async function runStandalonePlanning(c,s,request,opts={}){
       // this decision, before the next generation is consumed.
       maybeApplyPendingContinuationReset(s,contScope);
       stopIfBriefExceedsCap({result: reviewResult, subject: "Plan reviewer", role: "plan_reviewer", contScope, s, c, mission, taskRef: 'standalone-planning-plan_reviewer'});
-      const cont=handlePlanningContinuation(s,'plan_reviewer',reviewResult,'task:standalone:planning:plan_reviewer',c.policy,'capped');
-      if(!cont.allowed){
-        recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:'standalone-planning-plan_reviewer'});
-        die(`Standalone planning did not converge after ${cont.used} capped generations (${reviewResult.capped.type} cap ${reviewResult.capped.used}/${reviewResult.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+      const capOutcome=handleCappedPlanReviewerWithoutVerdict({s,framework:"standalone",result:reviewResult,subject:"Plan reviewer",contScope,taskRef:'standalone-planning-plan_reviewer',mission});
+      if(!capOutcome?.convertedToFail){
+        const cont=handlePlanningContinuation(s,'plan_reviewer',reviewResult,'task:standalone:planning:plan_reviewer',c.policy,'capped');
+        if(!cont.allowed){
+          recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:'standalone-planning-plan_reviewer'});
+          die(`Standalone planning did not converge after ${cont.used} capped generations (${reviewResult.capped.type} cap ${reviewResult.capped.used}/${reviewResult.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+        }
+        console.log(`Plan reviewer hit the ${reviewResult.capped.type} cap (${reviewResult.capped.used}/${reviewResult.capped.limit} ${capUnitLabel(reviewResult.capped.type)}); continuing as session ${cont.used+1} of ${cont.limit+1}.`);
+        // Resume at the reviewer (same as the pre-helper branch above).
+        skipPlannerFirst=true;
+        continue;
       }
-      console.log(`Plan reviewer hit the ${reviewResult.capped.type} cap (${reviewResult.capped.used}/${reviewResult.capped.limit} ${capUnitLabel(reviewResult.capped.type)}); continuing as session ${cont.used+1} of ${cont.limit+1}.`);
-      // Resume at the reviewer (same as the pre-helper branch above).
-      skipPlannerFirst=true;
-      continue;
     }
     // Backlog #59 part (a): the retried plan_reviewer run ended WITHOUT a
     // backstop firing — reset the consecutive-firing count.
@@ -7691,6 +8984,7 @@ async function runStandalonePlanning(c,s,request,opts={}){
     // post-revision/confirmation reviews) instead of inheriting this round's
     // spent generations.
     if(reviewResult.review) clearPlanningContinuationScope(s,'task:standalone:planning:plan_reviewer');
+    if(reviewResult.review) clearPlanReviewCappedNoVerdict(s,'task:standalone:planning:plan_reviewer');
     // Mission 031 Phase 7 task 7.1: the reviewer finished without being
     // capped (PASS or FAIL below), so its wrap-up handoff note — if any —
     // is stale resume context. Clear it now, before the PASS break or the
@@ -7741,7 +9035,11 @@ async function runStandalonePlanning(c,s,request,opts={}){
       state=standalone.state(repo,mission);
       break;
     }
-    if(confirming) clearPlanReviewConfirmation(s,STANDALONE_PLAN_FEEDBACK_KEY);
+    // Backlog #8: a confirmation FAIL is not followed by another scoped
+    // re-review. Persist the marker so every later review for this key is a
+    // FULL round that also verifies these findings, and a PASS of it can be
+    // accepted without another confirmation.
+    if(confirming) markPlanReviewConfirmationFailed(s,STANDALONE_PLAN_FEEDBACK_KEY);
     revision++;
     const planFindings=saveReviewFeedback(s,STANDALONE_PLAN_FEEDBACK_KEY,reviewResult.review?.findings||[]);
     recordReviewFailSnapshot(s,STANDALONE_PLAN_FEEDBACK_KEY,[file,tasksFile],repo);
@@ -7887,22 +9185,31 @@ async function runSpecKitPlanning(c,s,request,opts={}){
       // are what actually stop an invalid tasks.md from reaching
       // implementation). Other gates and frameworks are untouched.
       const tasksGateNote = String(step.id||"").includes("tasks")
-        ? "\nAdditionally, enforce the phase-observability contract on the tasks artifact: every '## Phase N' section must be implementable into at least one Git-observable file addition, modification, or deletion. FAIL the gate if any phase can produce no Git-observable file change — for example a phase whose only task is creating an empty directory (Git cannot represent empty directories, so such a phase could never be code-reviewed or verified), or a phase of only reads, checks, or planning notes with no persistent file output. Setup phases that modify observable files (package.json, configuration, source files, documentation) satisfy this contract and must not fail it. FAIL a single task that combines building a new design/helper AND wiring it into a large file — such build-then-wire work must be two tasks (build, then wire); cite the oversized task by its ID exactly as written in the file (e.g. 'T001'). "+taskSizeReviewText(resolveTaskSizeTargetTurns(c.policy))+`; cite the oversized task by its ID exactly as written in the file (e.g. 'T001'). FAIL any phase with more than ${resolveMaxPhaseTasks(c.policy)} tasks, citing the phase; it must be split into additional phases. A phase with fewer than ${resolveMinPhaseTasks(c.policy)} tasks that could join a neighbouring related phase (staying within ${resolveMaxPhaseTasks(c.policy)} tasks, order unchanged) goes in "notes", never in "findings". ${PLAN_REVIEW_TESTING_RULE}${speckitAnalyzeGateText(speckit.analyzeCommandFile(repo))}`
-        : "";
+        ? "\nAdditionally, enforce the phase-observability contract on the tasks artifact: every '## Phase N' section must be implementable into at least one Git-observable file addition, modification, or deletion. FAIL the gate if any phase can produce no Git-observable file change — for example a phase whose only task is creating an empty directory (Git cannot represent empty directories, so such a phase could never be code-reviewed or verified), or a phase of only reads, checks, or planning notes with no persistent file output. Setup phases that modify observable files (package.json, configuration, source files, documentation) satisfy this contract and must not fail it. FAIL a single task that combines building a new design/helper AND wiring it into a large file — such build-then-wire work must be two tasks (build, then wire); cite the oversized task by its ID exactly as written in the file (e.g. 'T001'). "+taskSizeReviewText(resolveTaskSizeTargetTurns(c.policy))+`; cite the oversized task by its ID exactly as written in the file (e.g. 'T001'). FAIL any phase with more than ${resolveMaxPhaseTasks(c.policy)} tasks, citing the phase; it must be split into additional phases. A phase with fewer than ${resolveMinPhaseTasks(c.policy)} tasks that could join a neighbouring related phase (staying within ${resolveMaxPhaseTasks(c.policy)} tasks, order unchanged) goes in "notes", never in "findings". ${PLAN_REVIEW_TESTING_RULE} ${planReviewGateClaimRule(c)}${speckitAnalyzeGateText(speckit.analyzeCommandFile(repo))}`
+        : (String(step.id||"").includes("plan") ? `\n${planReviewGateClaimRule(c)}` : "");
       const planReviewerTaskRef=planningScopeParts("speckit","plan_reviewer").taskRef;
       const planReviewerContScope=planningScopeParts("speckit","plan_reviewer").contScope;
       const planReviewerContextText=()=>{
         const {deadEndsText,noteText}=planningContinuationText(s,"speckit","plan_reviewer");
         const budgetReminder=planningBudgetReminderFor(s,c,"plan_reviewer");
-        return [deadEndsText,noteText,`Keep a hand-off note at ${scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, planReviewerTaskRef)}. OVERWRITE it (never append) at each milestone — after every important finding and before the review verdict — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${budgetReminder ? ` ${budgetReminder}` : ""}`].filter(Boolean).join("\n\n");
+        return [deadEndsText,noteText,`Keep a hand-off note at ${scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, planReviewerTaskRef)}. OVERWRITE it (never append) at each milestone — after every important finding and before the review verdict — with: 1. Checked and clear — file:line ranges + topics reviewed and found OK. 2. Findings (final) — each BLOCKING/minor finding with file:line evidence. 3. Remaining — concrete files/sections still to review. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${budgetReminder ? ` ${budgetReminder}` : ""}`].filter(Boolean).join("\n\n");
       };
+      const fullRecheckNote="full re-check";
       const runCappedReview=async(prompt,opts={})=>{
         for(;;){
-          const result=await relay("plan_reviewer",`${prompt}\n\n${planReviewerContextText()}`,c,s,{readOnly:true,review:true,resume:false,...opts,capEnabled:true,taskRef:planReviewerTaskRef});
+          const verdictOnlyText=planReviewVerdictOnlyText(s,planReviewerContScope);
+          const {firstRound,verdictOnly,...relayOpts}=opts||{};
+          const reviewConfig=withFirstRoundReasoning(withPlanReviewVerdictOnlyCap(c,Boolean(verdictOnlyText||verdictOnly)),Boolean(firstRound));
+          // Backlog #8: a post-confirmation-FAIL full round (not the real
+          // confirmation, which logs its own line) prints the same
+          // "full re-check" line as the confirmation. Inside the loop so a
+          // capped round's continuation session prints it too.
+          if(relayOpts?.runNote===fullRecheckNote && relayOpts?.resultExtra?.planReviewConfirmation!==true) console.log(`SpecKit gate ${step.id}: ${fullRecheckNote}`);
+          const result=await relay("plan_reviewer",`${prompt}\n\n${planReviewerContextText()}${verdictOnlyText?`\n\n${verdictOnlyText}`:""}`,reviewConfig,s,{readOnly:true,review:true,resume:false,...relayOpts,capEnabled:true,taskRef:planReviewerTaskRef});
+          if(verdictOnlyText){ clearPlanReviewVerdictOnly(s,planReviewerContScope); saveState(s); }
           if(result.capped && acceptCappedFinalVerdict(`SpecKit gate ${step.id} plan reviewer`,result)){ /* verdict already complete */ }
           if(result.capped){
-            handleCappedPlanningResult({c,s,framework:"speckit",role:"plan_reviewer",result,subject:`SpecKit gate ${step.id} plan reviewer`});
-            continue;
+            if(!handleCappedPlanningResult({c,s,framework:"speckit",role:"plan_reviewer",result,subject:`SpecKit gate ${step.id} plan reviewer`})) continue;
           }
           clearBackstopFirings(s,planReviewerContScope);
           if(parseIncompleteSignal(result.review ?? result)){
@@ -7912,6 +9219,7 @@ async function runSpecKitPlanning(c,s,request,opts={}){
           // Item 6: this uncapped run produced a verdict, so the reviewer's
           // continuation allowance starts fresh on the next gate review.
           if(result.review) clearPlanningContinuationScope(s,planReviewerContScope);
+          if(result.review) clearPlanReviewCappedNoVerdict(s,planReviewerContScope);
           if(String(step.id||"").includes("tasks") && result.review){
             const {review: demoted, moved}=demoteLowSeverityFindings(result.review);
             result.review=demoted;
@@ -7945,20 +9253,53 @@ async function runSpecKitPlanning(c,s,request,opts={}){
       const resumingAtReReview=resumeSubstage===SPECKIT_POST_REVISION_REVIEW;
       const gateKey=speckitStageFeedbackKey(gateStage);
       const planReviewConverge=c.workflow?.plan_review_convergence!==false;
+      const isFirstGateRound=(gateStage==="plan" || gateStage==="tasks") && isFirstPlanReviewRound(s,gateKey);
+      const gateCoverageLine=isFirstGateRound ? `\n${coverageTableInstruction(step.id)}` : "";
+      const speckitGateEnvText=[
+        request,
+        s.speckitFeatureDir?readPlanningTextSafe(path.join(repo,"specs",s.speckitFeatureDir,"spec.md")):"",
+        s.speckitFeatureDir?readPlanningTextSafe(path.join(repo,"specs",s.speckitFeatureDir,"plan.md")):"",
+        s.speckitFeatureDir?readPlanningTextSafe(path.join(repo,"specs",s.speckitFeatureDir,"tasks.md")):""
+      ].filter(Boolean).join("\n");
+      const speckitGateEnvNote=envToolsNoteForPlanning({text:speckitGateEnvText,config:c,role:"plan_reviewer"});
+      const carriedReviewerText=speckitCarriedFindingsReviewerNote(s,gateStage);
+      const carriedReviewerBlock=carriedReviewerText ? `\n${carriedReviewerText}` : "";
       const initialReviewPrompt=
         `Review the current artifact state at the SpecKit gate "${step.id}".
-Message: ${step.message||""}${tasksGateNote}${earlierStageEditsNote(s,gateStage)}
+Message: ${step.message||""}${tasksGateNote}${speckitGateEnvNote?`\n${speckitGateEnvNote}`:""}${earlierStageEditsNote(s,gateStage)}${carriedReviewerBlock}
 ${REVIEWER_ALL_FINDINGS_LINE}
-${planReviewerRoundLines(s,speckitStageFeedbackKey(gateStage),c.workflow?.plan_review_convergence!==false).join("\n")}
+${planReviewerRoundLines(s,speckitStageFeedbackKey(gateStage),c.workflow?.plan_review_convergence!==false).join("\n")}${gateCoverageLine}
 Return PASS or FAIL with findings.`;
       const confirmationPrompt=
         `Review the current artifact state at the SpecKit gate "${step.id}" as a confirmation full review after a scoped re-review PASS. No previous findings are listed, so review the whole artifact again from scratch; do not limit this to earlier findings or recent changes.
-Message: ${step.message||""}${tasksGateNote}${earlierStageEditsNote(s,gateStage)}
+Message: ${step.message||""}${tasksGateNote}${speckitGateEnvNote?`\n${speckitGateEnvNote}`:""}${earlierStageEditsNote(s,gateStage)}${carriedReviewerBlock}
 ${REVIEWER_ALL_FINDINGS_LINE}
 ${planReviewerConfirmationLines().join("\n")}
 Return PASS or FAIL with findings.`;
-      const confirmationNote="full re-check";
+      const confirmationNote=fullRecheckNote;
       const confirmationRelayOpts={readOnly:true,review:true,resume:false,runNote:confirmationNote,resultExtra:{planReviewConfirmation:true}};
+      // Backlog #8: after a confirmation FAIL every later round is a FULL
+      // review, so it carries the same run note as the confirmation (never its
+      // planReviewConfirmation marker, which drives logic). Recomputed per
+      // call because the failed marker is set inside the gate loop.
+      const fullRoundRelayOpts=()=>planReviewConfirmationFailed(s,gateKey)
+        ? {readOnly:true,review:true,resume:false,runNote:confirmationNote}
+        : {};
+      const hasUsableReviewVerdict=(result)=>result?.review?.decision==="PASS" || result?.review?.decision==="FAIL";
+      const maybeRetryNoVerdict=async(result,relayOpts,escalatePrefix)=>{
+        if(hasUsableReviewVerdict(result)) return result;
+        const failureClass=result?.failure?.class||"STRUCTURED_OUTPUT_INVALID";
+        const evidenceMessage=(Array.isArray(result?.failure?.evidence)?result.failure.evidence.find(e=>typeof e?.message==="string"&&e.message.trim())?.message?.trim():null)||result?.contract?.error||"";
+        console.log(`  SpecKit gate ${step.id}: reviewer gave no usable verdict (${failureClass}${evidenceMessage?`: ${evidenceMessage}`:""}); running one verdict-only retry...`);
+        const retryPrompt=buildSpeckitVerdictOnlyRetryPrompt({stepId:step.id,failureClass,evidenceMessage});
+        let retried=await runCappedReview(retryPrompt,{...relayOpts,verdictOnly:true});
+        if(retried.policyViolation) die(`SpecKit gate ${step.id} reviewer violated read-only relay policy.`);
+        escalateIfRateLimited(c,s,"speckit-gate-review",retried,{fatal:die,saveState,escalatePrefix});
+        retried=await resolvePlanningReviewAttempt(c,s,"speckit-gate-review",retried,
+          ()=>runCappedReview(retryPrompt,{...relayOpts,verdictOnly:true}),
+          {policyMessage:`SpecKit gate ${step.id} reviewer violated read-only relay policy.`,escalatePrefix});
+        return retried;
+      };
       const runGateConfirmation=async()=>{
         console.log(`SpecKit gate ${step.id}: ${confirmationNote}`);
         let taskSizeLine="";
@@ -7977,6 +9318,7 @@ Return PASS or FAIL with findings.`;
         cr=await resolvePlanningReviewAttempt(c,s,"speckit-gate-review",cr,
           ()=>runCappedReview(activeConfirmationPrompt,confirmationRelayOpts),
           {policyMessage:`SpecKit gate ${step.id} reviewer violated read-only relay policy.`,escalatePrefix:`SpecKit gate ${step.id} confirmation review`});
+        cr=await maybeRetryNoVerdict(cr,confirmationRelayOpts,`SpecKit gate ${step.id} confirmation review`);
         clearHandoffNote(s.mission,planReviewerTaskRef);
         if(gateStage==="tasks" && s.speckitFeatureDir && cr.review){
           let tasksMdText="";
@@ -7989,8 +9331,27 @@ Return PASS or FAIL with findings.`;
       // The persisted marker (not a local flag) makes a kill during the
       // confirmation review resume into the confirmation, never into accepting.
       const confirmationPendingAtEntry=planReviewConfirmationPending(s,gateKey);
-      let rr;
+      // Backlog sk #4 (resume safety): a resumed mission whose revision budget
+      // is already spent (e.g. SampleApp 009 shape) with <= 2 open findings and
+      // decreasing finding counts carries forward immediately instead of
+      // running another revision or crashing.
+      let carriedOut=null;
+      const persistedFindingsAtEntry=resumingAtPlannerRevision
+        ? resolveSpeckitResumeFindings(s,gateKey,loadReviewFeedback(s,gateKey))
+        : loadReviewFeedback(s,gateKey);
+      const revisionsUsedAtEntry=planReviewRevisionCount(s,gateKey);
+      if(!confirmationPendingAtEntry && !resumingAtReReview
+          && maxPlanRevisions>0 && revisionsUsedAtEntry>=maxPlanRevisions
+          && persistedFindingsAtEntry.length>0){
+        const entryDecision=evaluateSpeckitGateExhaustion({state:s,stepId:step.id,gateStage,gateKey,findings:persistedFindingsAtEntry,maxPlanRevisions,revisionsUsed:revisionsUsedAtEntry,failedVerdict:true});
+        if(entryDecision.action==="carry"){
+          carriedOut=entryDecision.findings;
+          console.log(`  PASS (with carried findings) — ${label} budget spent (${revisionsUsedAtEntry}/${maxPlanRevisions}), carrying ${carriedOut.length} finding(s) forward to ${entryDecision.nextStage}`);
+        }
+      }
+      let rr=null;
       let kind="initial"; // "initial" | "rereview" | "confirmation"
+      if(!carriedOut){
       if(confirmationPendingAtEntry){
         kind="confirmation";
         rr=await runGateConfirmation();
@@ -8000,7 +9361,10 @@ Return PASS or FAIL with findings.`;
         // against this stage. Re-running it would pay again for a review the
         // crash already completed — and planner_revision names the Planner as
         // the position to resume at, so the reviewer must not run first.
-        rr={status:"completed",review:{decision:"FAIL",findings:loadReviewFeedback(s,speckitStageFeedbackKey(gateStage))}};
+        const resumedFindings=resumingAtPlannerRevision
+          ? resolveSpeckitResumeFindings(s,gateKey,loadReviewFeedback(s,gateKey))
+          : loadReviewFeedback(s,gateKey);
+        rr={status:"completed",review:{decision:"FAIL",findings:resumedFindings}};
       } else {
         // TASK-14 Phase 6 task 19: initial_review — written before the first
         // review call, so a crash during that review resumes here with the
@@ -8018,6 +9382,7 @@ Return PASS or FAIL with findings.`;
           let tasksMdText="";
           try{ tasksMdText=fs.readFileSync(path.join(repo,"specs",s.speckitFeatureDir,"tasks.md"),"utf8"); }catch{ tasksMdText=""; }
           const denied=[...speckitTaskDenylistFindings(tasksMdText,effectiveVerifyDenylist(c)),...speckitTaskVerifyLengthFindings(tasksMdText),...speckitTaskVerifyShardFindings(tasksMdText)];
+          denied.push(...speckitTaskTextFullSuiteFindings(tasksMdText,fullSuiteTaskEntries(c)));
           if(denied.length){
             // Render to strings here: reReviewPrompt below joins
             // rr.review.findings, and raw objects would reach the
@@ -8025,10 +9390,10 @@ Return PASS or FAIL with findings.`;
             const deniedText=denied.map(f=>`${f.location}: ${f.problem} — ${f.correction}`);
             rr={status:"completed",review:{decision:"FAIL",findings:deniedText},failure:failure("PLANNING_REJECTED","planning",true,deniedText),deterministic:true};
           } else {
-            rr=await runCappedReview(initialReviewPrompt);
+            rr=await runCappedReview(initialReviewPrompt,{...fullRoundRelayOpts(),firstRound:isFirstGateRound});
           }
         } else {
-          rr=await runCappedReview(initialReviewPrompt);
+          rr=await runCappedReview(initialReviewPrompt,{...fullRoundRelayOpts(),firstRound:isFirstGateRound});
         }
         if(rr.policyViolation){
           die(`SpecKit gate ${step.id} reviewer violated read-only relay policy.`);
@@ -8045,8 +9410,9 @@ Return PASS or FAIL with findings.`;
         // and no runPlanningPhase revision.
         escalateIfRateLimited(c,s,"speckit-gate-review",rr,{fatal:die,saveState,escalatePrefix:`SpecKit gate ${step.id} plan review`});
         rr=await resolvePlanningReviewAttempt(c,s,"speckit-gate-review",rr,
-          ()=>runCappedReview(initialReviewPrompt),
+          ()=>runCappedReview(initialReviewPrompt,{...fullRoundRelayOpts(),firstRound:isFirstGateRound}),
           {policyMessage:`SpecKit gate ${step.id} reviewer violated read-only relay policy.`,escalatePrefix:`SpecKit gate ${step.id} plan review`});
+        rr=await maybeRetryNoVerdict(rr,fullRoundRelayOpts(),`SpecKit gate ${step.id} plan review`);
         clearHandoffNote(s.mission,planReviewerTaskRef);
         if(gateStage==="tasks" && s.speckitFeatureDir && rr.review && rr.deterministic!==true){
           let tasksMdText="";
@@ -8076,23 +9442,41 @@ Return PASS or FAIL with findings.`;
           }
           break;
         }
+        if(!hasUsableReviewVerdict(rr)){
+          const revisionsUsed=planReviewRevisionCount(s,gateKey);
+          console.log(formatSpeckitGateFailLabel({label,revisionAllowed:false,failedVerdict:false,revisionsUsed,maxPlanRevisions}));
+          if(!s.speckitPlanningCheckpoint) s.speckitPlanningCheckpoint={};
+          s.speckitPlanningCheckpoint={step:step.id,index:idx,failedAt:now()};
+          saveState(s);
+          die(formatSpeckitGateNoVerdictMessage({stepId:step.id,result:rr,revisionsUsed,maxPlanRevisions}));
+        }
         if(kind!=="rereview"){
           const revisionsUsed=planReviewRevisionCount(s,gateKey);
           // Initial reviews keep the legacy rule (budget > 0 grants the gate's
           // revision); a confirmation FAIL needs unspent budget.
           const revisionAllowed=kind==="confirmation" ? revisionsUsed<maxPlanRevisions : maxPlanRevisions>0;
+          let savedFindings=loadReviewFeedback(s,gateKey);
           if(!skipRevision){
-            console.log(revisionAllowed?`  FAIL — revising ${label}`:`  FAIL — ${label} (plan revision budget is ${maxPlanRevisions>0?"spent":"0"})`);
+            console.log(formatSpeckitGateFailLabel({label,revisionAllowed,failedVerdict:rr.review?.decision==="FAIL",revisionsUsed,maxPlanRevisions}));
             // Backlog #54: RATE_LIMITED re-check before spending a gate revision.
             escalateIfRateLimited(c,s,"speckit-gate-review",rr,{fatal:die,saveState,escalatePrefix:`SpecKit gate ${step.id} plan review`});
             // Persist the findings against the stage about to be revised, so
             // runPlanningPhase() quotes them and a resume mid-revision has them.
-            saveReviewFeedback(s,speckitStageFeedbackKey(gateStage),rr.review?.findings||[]);
+            savedFindings=saveReviewFeedback(s,speckitStageFeedbackKey(gateStage),rr.review?.findings||[]);
             recordReviewFailSnapshot(s,speckitStageFeedbackKey(gateStage),speckitStageFilePaths(repo,s,gateStage),repo);
             if(rr.deterministic!==true) recordPlanReviewNotes(s,speckitStageFeedbackKey(gateStage),rr.review?.notes);
-            recordPlanReviewRound(s,speckitStageFeedbackKey(gateStage),rr.review?.findings||[],rr.review?.previous,{reviewer:rr.deterministic!==true});noteEscalationTrigger(s,c,"planner",speckitStageFeedbackKey(gateStage),"plan_reviewer",rr.review?.previous);
+            // Record finding count BEFORE recordPlanReviewRound so the first-round
+            // history fallback in recordSpeckitGateFindingCount does not seed from
+            // the round just appended and double-count it.
+            if(rr.review?.decision==="FAIL" && !stubRevisionResume) recordSpeckitGateFindingCount(s,gateKey,savedFindings.length);
+            if(!stubRevisionResume) recordPlanReviewRound(s,speckitStageFeedbackKey(gateStage),rr.review?.findings||[],rr.review?.previous,{reviewer:rr.deterministic!==true});
+            noteEscalationTrigger(s,c,"planner",speckitStageFeedbackKey(gateStage),"plan_reviewer",rr.review?.previous);
             // The confirmation round is over: its FAIL is now ordinary feedback.
-            clearPlanReviewConfirmation(s,gateKey);
+            // Backlog #8: if this round WAS the confirmation, persist that it
+            // failed so every later review for this gate is a full round (with
+            // the previous findings listed) and needs no second confirmation.
+            if(kind==="confirmation") markPlanReviewConfirmationFailed(s,gateKey);
+            else clearPlanReviewConfirmation(s,gateKey);
             // A resume at planner_revision re-runs a revision already counted.
             if(revisionAllowed && !stubRevisionResume) recordPlanReviewRevision(s,gateKey);
             saveState(s);
@@ -8101,6 +9485,7 @@ Return PASS or FAIL with findings.`;
               // Planner call (writable stage: only version/identity/paths are
               // validated on resume, so a crash here resumes at the Planner).
               writeSpeckitGateCheckpoint(s,{feature:s.speckitFeatureDir,gate:step.id,gateIndex:idx,substage:SPECKIT_PLANNER_REVISION});
+              deleteCarriedScratch(repo,s.mission,planReviewerTaskRef);
               saveState(s);
               await runPlanningPhase(c,gateStage,request,s,planReviewRevisionCount(s,gateKey));
               persistDetectedMission(s);
@@ -8111,6 +9496,12 @@ Return PASS or FAIL with findings.`;
             }
           }
           if(!revisionAllowed){
+            const exhaustion=evaluateSpeckitGateExhaustion({state:s,stepId:step.id,gateStage,gateKey,findings:savedFindings,maxPlanRevisions,revisionsUsed,failedVerdict:rr.review?.decision==="FAIL"});
+            if(exhaustion.action==="carry"){
+              carriedOut=exhaustion.findings;
+              console.log(`  PASS (with carried findings) — ${label} budget spent (${revisionsUsed}/${maxPlanRevisions}), carrying ${carriedOut.length} finding(s) forward to ${exhaustion.nextStage}`);
+              break;
+            }
             // Backlog #100: the budget forbids a gate revision, so the findings
             // persisted above are the last word. Checkpoint like an exhausted
             // re-review (a resume returns to the Planner position) and stop.
@@ -8118,7 +9509,7 @@ Return PASS or FAIL with findings.`;
             s.speckitPlanningCheckpoint={step:step.id,index:idx,failedAt:now()};
             writeSpeckitGateCheckpoint(s,{feature:s.speckitFeatureDir,gate:step.id,gateIndex:idx,substage:SPECKIT_PLANNER_REVISION});
             saveState(s);
-            die(`SpecKit gate ${step.id} failed.`);
+            die(exhaustion.message);
           }
           skipRevision=false;
           stubRevisionResume=false;
@@ -8138,20 +9529,22 @@ Return PASS or FAIL with findings.`;
           const revisionsUsed=planReviewRevisionCount(s,gateKey);
           // Only an explicit FAIL verdict earns another revision. A
           // re-review/retry that produced no usable verdict (output-contract
-          // or infrastructure outcome) escalates exactly as before.
+          // or infrastructure outcome) escalates via the no-verdict guard above.
           const failedVerdict=rr.review?.decision==="FAIL";
           const revisionAllowed=failedVerdict && revisionsUsed<maxPlanRevisions;
           const reFindings=rr.review?.findings||[];
-          console.log(revisionAllowed?`  FAIL — revising ${label}`:`  FAIL — ${label} (plan revision budget is ${maxPlanRevisions>0?"spent":"0"})`);
-          saveReviewFeedback(s,speckitStageFeedbackKey(gateStage),reFindings);
+          console.log(formatSpeckitGateFailLabel({label,revisionAllowed,failedVerdict,revisionsUsed,maxPlanRevisions}));
+          const savedFindings=saveReviewFeedback(s,speckitStageFeedbackKey(gateStage),reFindings);
           recordReviewFailSnapshot(s,speckitStageFeedbackKey(gateStage),speckitStageFilePaths(repo,s,gateStage),repo);
           if(rr.deterministic!==true) recordPlanReviewNotes(s,speckitStageFeedbackKey(gateStage),rr.review?.notes);
+          if(failedVerdict) recordSpeckitGateFindingCount(s,gateKey,savedFindings.length);
           recordPlanReviewRound(s,speckitStageFeedbackKey(gateStage),reFindings,rr.review?.previous,{reviewer:rr.deterministic!==true});noteEscalationTrigger(s,c,"planner",speckitStageFeedbackKey(gateStage),"plan_reviewer",rr.review?.previous);
           clearPlanReviewConfirmation(s,gateKey);
           if(revisionAllowed) recordPlanReviewRevision(s,gateKey);
           saveState(s);
           if(revisionAllowed){
             writeSpeckitGateCheckpoint(s,{feature:s.speckitFeatureDir,gate:step.id,gateIndex:idx,substage:SPECKIT_PLANNER_REVISION});
+            deleteCarriedScratch(repo,s.mission,planReviewerTaskRef);
             saveState(s);
             await runPlanningPhase(c,gateStage,request,s,planReviewRevisionCount(s,gateKey));
             persistDetectedMission(s);
@@ -8162,6 +9555,12 @@ Return PASS or FAIL with findings.`;
             kind="rereview";
             continue;
           }
+          const exhaustion=evaluateSpeckitGateExhaustion({state:s,stepId:step.id,gateStage,gateKey,findings:savedFindings,maxPlanRevisions,revisionsUsed,failedVerdict});
+          if(exhaustion.action==="carry"){
+            carriedOut=exhaustion.findings;
+            console.log(`  PASS (with carried findings) — ${label} budget spent (${revisionsUsed}/${maxPlanRevisions}), carrying ${carriedOut.length} finding(s) forward to ${exhaustion.nextStage}`);
+            break;
+          }
           if(!s.speckitPlanningCheckpoint) s.speckitPlanningCheckpoint={};
           s.speckitPlanningCheckpoint={step:step.id,index:idx,failedAt:now()};
           // 023 Phase 2 task 2.2 (standalone 2.1 twin): on gate exhaustion the
@@ -8171,32 +9570,43 @@ Return PASS or FAIL with findings.`;
           // artifacts (only version/identity/paths are validated there).
           writeSpeckitGateCheckpoint(s,{feature:s.speckitFeatureDir,gate:step.id,gateIndex:idx,substage:SPECKIT_PLANNER_REVISION});
           saveState(s);
-          die(`SpecKit gate ${step.id} failed.`);
+          die(exhaustion.message);
         }
+      }
       }
       // Hoisted function declaration (block scope): the scoped re-review of a
       // revision cycle, used by the gate loop above it.
       async function runGateReReview(findings){
-        const reReviewPrompt=`Re-review the SpecKit gate "${step.id}" after revision.\n${(findings||[]).join("\n")}${tasksGateNote}${earlierStageEditsNote(s,gateStage)}\n${planReviewerRoundLines(s,speckitStageFeedbackKey(gateStage),c.workflow?.plan_review_convergence!==false).join("\n")}\n${REVIEWER_ALL_FINDINGS_LINE}`;
+        const reReviewPrompt=`Re-review the SpecKit gate "${step.id}" after revision.\n${(findings||[]).join("\n")}${tasksGateNote}${earlierStageEditsNote(s,gateStage)}${carriedReviewerBlock}\n${planReviewerRoundLines(s,speckitStageFeedbackKey(gateStage),c.workflow?.plan_review_convergence!==false).join("\n")}\n${REVIEWER_ALL_FINDINGS_LINE}`;
         let deterministicRetry=null;
         if(gateStage==="tasks" && s.speckitFeatureDir){
           let revisedText="";
           try{ revisedText=fs.readFileSync(path.join(repo,"specs",s.speckitFeatureDir,"tasks.md"),"utf8"); }catch{ revisedText=""; }
           const stillDenied=[...speckitTaskDenylistFindings(revisedText,effectiveVerifyDenylist(c)),...speckitTaskVerifyLengthFindings(revisedText),...speckitTaskVerifyShardFindings(revisedText)];
+          stillDenied.push(...speckitTaskTextFullSuiteFindings(revisedText,fullSuiteTaskEntries(c)));
           if(stillDenied.length){
             const stillDeniedText=stillDenied.map(f=>`${f.location}: ${f.problem} — ${f.correction}`);
             deterministicRetry={status:"completed",review:{decision:"FAIL",findings:stillDeniedText},failure:failure("PLANNING_REJECTED","planning",true,stillDeniedText),deterministic:true};
           }
         }
-        let retry=deterministicRetry||await runCappedReview(reReviewPrompt);
+        let retry=deterministicRetry||await runCappedReview(reReviewPrompt,fullRoundRelayOpts());
         escalateIfRateLimited(c,s,"speckit-gate-review",retry,{fatal:die,saveState,escalatePrefix:`SpecKit gate ${step.id} plan re-review`});
         retry=await resolvePlanningReviewAttempt(c,s,"speckit-gate-review",retry,
-          ()=>runCappedReview(reReviewPrompt),
+          ()=>runCappedReview(reReviewPrompt,fullRoundRelayOpts()),
           {policyMessage:`SpecKit gate ${step.id} reviewer violated read-only relay policy.`,escalatePrefix:`SpecKit gate ${step.id} plan re-review`});
+        retry=await maybeRetryNoVerdict(retry,fullRoundRelayOpts(),`SpecKit gate ${step.id} plan re-review`);
         clearHandoffNote(s.mission,planReviewerTaskRef);
         return retry;
       }
-      recordPlanPassNotes(s,speckitStageFeedbackKey(gateStage),rr.review?.notes);
+      if(carriedOut){
+        recordSpeckitCarriedFindings(s,gateStage,carriedOut);
+        if(!s.speckitGateOutcomes || typeof s.speckitGateOutcomes!=="object") s.speckitGateOutcomes={};
+        s.speckitGateOutcomes[step.id]={status:"passed_with_carried_findings",count:carriedOut.length,at:now()};
+      } else if(rr){
+        recordPlanPassNotes(s,speckitStageFeedbackKey(gateStage),rr.review?.notes);
+      }
+      const prevGateStage=previousSpeckitStage(gateStage);
+      if(prevGateStage) clearSpeckitCarriedFindings(s,prevGateStage);
       clearPlanReviewConfirmation(s,gateKey);
       clearPlanReviewRevisions(s,gateKey);
       // Reached only when this gate passed — on the first attempt or after a
@@ -8209,12 +9619,17 @@ Return PASS or FAIL with findings.`;
       clearReviewFeedback(s,speckitStageFeedbackKey(gateStage));
       clearReviewFailSnapshot(s,speckitStageFeedbackKey(gateStage));
       clearPlanReviewHistory(s,speckitStageFeedbackKey(gateStage));
+      clearSpeckitGateFindingCounts(s,gateKey);
+      // Backlog #9(a): this gate's review is over — a PASS is final for the
+      // taskRef, so its carried scratch must not seed a later gate/round.
+      deleteCarriedScratch(repo,s.mission,planReviewerTaskRef);
       delete s.planningEarlierStageEdits;
       clearFindingTasks(s,speckitStageFeedbackKey(gateStage));
       // TASK-14 Phase 6 task 19: cleared the moment THIS gate reaches PASS —
       // not only at the end of the whole planning loop — so a crash after a
       // passed gate can never resume into it.
       delete s.speckitGateReviewCheckpoint;
+      if(s.speckitPlanningCheckpoint?.step===step.id) delete s.speckitPlanningCheckpoint;
       saveState(s);
       if(gateStage==="tasks"){
         const pList=specKitPhases(c,s);
@@ -8222,7 +9637,7 @@ Return PASS or FAIL with findings.`;
         const tasksFile=s.speckitFeatureDir?path.join("specs",s.speckitFeatureDir,"tasks.md"):null;
         regenerateAllPhaseBriefs({repo,mission:missionIdentity,framework:"speckit",phases:pList,tasksFile,revision:1});
       }
-      console.log(`  ✓ PASS`);
+      console.log(carriedOut ? `  ✓ PASS (carried ${carriedOut.length} finding(s) to ${nextSpeckitStage(gateStage)})` : `  ✓ PASS`);
       continue;
     }
     if(step.command){
@@ -8256,7 +9671,7 @@ Return PASS or FAIL with findings.`;
   s.phase="tasks_ready";s.step="tasks_ready";saveState(s);
 }
 
-function gsdPlanningReviewPrompt(stage, phase, request, findings=""){
+function gsdPlanningReviewPrompt(stage, phase, request, findings="", config=null, extraText="", probeOpts={}){
   return [
     `Review the GSD planning stage "${stage}" for ${phase || "the current project"}.`,
     "You are read-only. Do not edit planning artifacts. Do not implement code. Do not commit/push.",
@@ -8268,6 +9683,8 @@ function gsdPlanningReviewPrompt(stage, phase, request, findings=""){
     stage === "plan-check" ? "Plan-check review: independently challenge the saved plans and identify any blocking gap before execution." : "",
     PLAN_REVIEW_SEVERITY_LINE,
     PLAN_REVIEW_TESTING_RULE,
+    planReviewGateClaimRule(config),
+    envToolsNoteForPlanning({text:[request,extraText].filter(Boolean).join("\n"),config,role:"plan_reviewer",probeOpts}),
     findings ? `Prior findings to re-check:\n${findings}` : "",
     "Return exactly one AUTOPILOT_REVIEW JSON sentinel with decision PASS or FAIL and concise findings."
   ].filter(Boolean).join("\n\n");
@@ -8296,6 +9713,7 @@ async function gsdPlanningStage(c,s,{stage,phase,request,resume=false,planRevisi
       stage === "discuss" ? "Capture or refine the implementation decisions/context needed by the next planning step. Do not implement production code." : "",
       stage === "plan" ? "Run the GSD plan-phase workflow for the target phase. It must produce the native PLAN.md artifacts and preserve GSD-native structure." : "",
       stage === "plan" ? testingPolicyRuleNote(c) : "",
+      envToolsNoteForPlanning({text:request,config:c,role:"planner"}),
       "Do not commit or push.",
       deadEndsText,
       noteText,
@@ -8342,16 +9760,17 @@ async function reviewGsdPlanningStage(c,s,stage,phase,request,previousFindings="
     const {deadEndsText,noteText}=planningContinuationText(s,"gsd","plan_reviewer");
     const budgetReminder=planningBudgetReminderFor(s,c,"plan_reviewer");
     const prompt=[
-      gsdPlanningReviewPrompt(stage,phase,request,previousFindings),
+      gsdPlanningReviewPrompt(stage,phase,request,previousFindings,c),
       deadEndsText,
       noteText,
-      `Keep a hand-off note at ${scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, taskRef)}. OVERWRITE it (never append) at each milestone — after every important finding and before the review verdict — with: 1. Done — files changed (names only; details are in the worktree). 2. Found — facts the next session needs: exact file:line, function names, how the code works there. 3. Next — the exact next edit: file, line, what to change. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${budgetReminder ? ` ${budgetReminder}` : ""}`
+      `Keep a hand-off note at ${scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, taskRef)}. OVERWRITE it (never append) at each milestone — after every important finding and before the review verdict — with: 1. Checked and clear — file:line ranges + topics reviewed and found OK. 2. Findings (final) — each BLOCKING/minor finding with file:line evidence. 3. Remaining — concrete files/sections still to review. 4. Dead ends — what you tried that did not work, and why. If your session is stopped, the next session starts from this note.${budgetReminder ? ` ${budgetReminder}` : ""}`
     ].filter(Boolean).join("\n\n");
-    const rr=await relayAsync("plan_reviewer",prompt,c,s,{readOnly:true,review:true,capEnabled:true,taskRef});
+    const verdictOnlyText=planReviewVerdictOnlyText(s,contScope);
+    const rr=await relayAsync("plan_reviewer",`${prompt}${verdictOnlyText?`\n\n${verdictOnlyText}`:""}`,withPlanReviewVerdictOnlyCap(c,Boolean(verdictOnlyText)),s,{readOnly:true,review:true,capEnabled:true,taskRef});
+    if(verdictOnlyText){ clearPlanReviewVerdictOnly(s,contScope); saveState(s); }
     if(rr.capped && acceptCappedFinalVerdict(`GSD ${stage} reviewer`,rr)){ /* verdict already complete */ }
     if(rr.capped){
-      handleCappedPlanningResult({c,s,framework:"gsd",role:"plan_reviewer",result:rr,subject:`GSD ${stage} reviewer`});
-      continue;
+      if(!handleCappedPlanningResult({c,s,framework:"gsd",role:"plan_reviewer",result:rr,subject:`GSD ${stage} reviewer`})) continue;
     }
     clearBackstopFirings(s,contScope);
     if(parseIncompleteSignal(rr.review ?? rr)){
@@ -8362,6 +9781,7 @@ async function reviewGsdPlanningStage(c,s,stage,phase,request,previousFindings="
     // Item 6: this uncapped run produced a verdict, so the reviewer's
     // continuation allowance starts fresh on the next stage review.
     if(rr.review) clearPlanningContinuationScope(s,contScope);
+    if(rr.review) clearPlanReviewCappedNoVerdict(s,contScope);
     clearHandoffNote(s.mission,taskRef);
     return rr;
   }
@@ -8428,8 +9848,9 @@ async function runGsdPlanning(c,s,request){
       // default config rejects a task that runs the full suite.
       if(stage==="plan"){
         const gsdEntries=gsd.phasePlans(repo,phase,gsdPhaseRoot(c))
-          .flatMap(plan=>plan.tasks.map((task,idx)=>({file:plan.file,taskLabel:task.name||`task-${idx+1}`,verify:task.verify})));
+          .flatMap(plan=>plan.tasks.map((task,idx)=>({file:plan.file,taskLabel:task.name||`task-${idx+1}`,verify:task.verify,text:task.action})));
         const gsdDenied=verifyDenylistFindings(gsdEntries,effectiveVerifyDenylist(c));
+        gsdDenied.push(...taskTextFullSuiteFindings(gsdEntries,fullSuiteTaskEntries(c)));
         if(gsdDenied.length){
           revision++;
           lastFindings=gsdDenied.map(f=>`${f.location}: ${f.problem} — ${f.correction}`).join("\n");
@@ -9398,16 +10819,22 @@ async function runFinalReviewSessions(c,s,{site,mission,requirements,buildPrompt
   const contScope=`final:${site}`;
   const ref=`final-review-${site}`;
   for(;;){
-    const budget=roleDeadline(c,s,"code_reviewer");
+    const budget=roleDeadline(c,s,"code_reviewer",{final:true});
     const verdictOnlyText=s.verdictOnlyTurns?.[contScope];
+    const effReviewer=effectiveRoleModelFor(s,c,"code_reviewer");
+    const patReviewer=effReviewer?(agents[effReviewer.adapter]?.free_model_pattern??null):null;
+    const finalMaxTurns=resolveFinalReviewMaxTurns(c.policy,effReviewer?{adapter:effReviewer.adapter,model:effReviewer.model,free_model_pattern:patReviewer}:{});
     const cReview=verdictOnlyText
       ? {...c, policy: {...c.policy, free_model_turns_cap: 5, caps: {...c.policy?.caps, code_reviewer: {...c.policy?.caps?.code_reviewer, max_turns: 5}}}}
-      : c;
+      : {...c, policy: {...c.policy, caps: {...c.policy?.caps, code_reviewer: {...c.policy?.caps?.code_reviewer, max_turns: finalMaxTurns}}}};
     const deadEnds=readRolloverDeadEnds(s,contScope);
     const deadEndsText=deadEnds.length?`Prior dead ends (continuation context — do not retry blindly):\n${deadEnds.map((d)=>`- Generation ${d.generation} (${d.reason} ${d.used}/${d.limit}): ${d.tail}`).join("\n")}\n\n`:"";
-    const noteText=readOnlyContinuationNote(readHandoffNote(mission,ref),repo,mission,ref,"reviewer");
+    const prevRawNote=readHandoffNote(mission,ref)||"";
+    const noteText=readOnlyContinuationNote(prevRawNote,repo,mission,ref,"reviewer");
+    const unchangedDigest=unchangedReviewWorkDigests.get(contScope)||"";
+    const unchangedDigestText=unchangedDigest?`Capped previous session work digest (files already checked / commands run — do not repeat them):\n${unchangedDigest}\n\n`:"";
     const rv=await review("code_reviewer",
-      `${buildPrompt()}\n\n${deadEndsText}${noteText?`${noteText}\n\n`:""}${CODE_REVIEWER_TARGETED_TESTS_LINE}\n\n${budget.note}\n${readOnlyHandoffNoteReminder({mission, ref, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyText?`\n\n${verdictOnlyText}`:""}`,
+      `${buildPrompt()}\n\n${deadEndsText}${noteText?`${noteText}\n\n`:""}${unchangedDigestText}${CODE_REVIEWER_TARGETED_TESTS_LINE}\n\n${budget.note}\n${readOnlyHandoffNoteReminder({mission, ref, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyText?`\n\n${verdictOnlyText}`:""}`,
       cReview,s,"",requirements,ref,budget.timeoutMs,true,codeReviewScopeKey("final",site));
     noteRoleDeadlineOutcome(s,"code_reviewer",rv,budget.derived);
     if(rv.policyViolation) return rv;
@@ -9419,6 +10846,17 @@ async function runFinalReviewSessions(c,s,{site,mission,requirements,buildPrompt
         stopIfBriefExceedsCap({result: rv, subject: `Final review (${site})`, role: "code_reviewer", contScope, s, c, mission, taskRef: ref, step: "final_review_not_converging"});
       }
       maybeApplyPendingContinuationReset(s,contScope);
+      if (rv.capped) {
+        const nextRawNote=readHandoffNote(mission,ref)||"";
+        const capOutcome=handleCodeReviewerUnchangedNote({s,rv,prevNote:prevRawNote,nextNote:nextRawNote,contScope,subject:`Final review (${site})`,step:"final_review_not_converging",capHint:"caps.final_review_max_turns"});
+        if(capOutcome?.convertedToFail){
+          clearContinuationRound(s,contScope);
+          clearHandoffNote(mission,ref);
+          return rv;
+        }
+      } else {
+        clearCodeReviewUnchangedNoteState(s,contScope);
+      }
       cont=consumeContinuation(s,c.policy,contScope,resolvePerRoleLimits("code_reviewer",c.policy).continuationAllowance);
       recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:rv.capped?.type??"incomplete",used:rv.capped?.used??null,limit:rv.capped?.limit??null,tail:deadEndTail({summary:`Final review ${rv.capped?`capped (${rv.capped.type} ${rv.capped.used}/${rv.capped.limit})`:`incomplete (${rv.review?.decision ?? "INCOMPLETE"})`}; mission delta unchanged — continue the unchecked requirements.`,files:[]})});
       saveState(s);
@@ -9442,6 +10880,7 @@ async function runFinalReviewSessions(c,s,{site,mission,requirements,buildPrompt
     }
     if(rv.status==="completed"&&["PASS","FAIL"].includes(rv.review?.decision)){
       clearContinuationRound(s,contScope);
+      clearCodeReviewUnchangedNoteState(s,contScope);
       clearHandoffNote(mission,ref);
     }
     return rv;
@@ -9588,7 +11027,7 @@ async function runPhaseCrossPhaseRepairs({
 async function runStandaloneImplementation(c,s){
   const stopStage=activeStage;
   ensureStandaloneMigrated(repo,s);
-  { const r=ensureStandaloneSplit(repo,s); if(r.migrated){ clearReviewFeedbackByPrefix(s,"standalone-task:"); clearFindingTasksByPrefix(s,"standalone-task:"); clearStaleStandaloneBudgets(s); saveState(s); } }
+  { const r=ensureStandaloneSplit(repo,s); if(r.migrated){ clearReviewFeedbackByPrefix(s,"standalone-task:"); clearReviewOpenFindingsByPrefix(s,"standalone-task:"); clearFindingTasksByPrefix(s,"standalone-task:"); clearStaleStandaloneBudgets(s); saveState(s); } }
   const mission=resolveStandaloneMission(repo,s,"");
   const missionDir = getMissionWatchDir(s);
   const stPhases=standalone.phases(repo,mission);
@@ -9748,6 +11187,7 @@ async function runStandaloneImplementation(c,s){
     // the blocks still show it).
     if(s.fixtureGitBlockWarning && s.fixtureGitBlockWarningPhaseIndex!==s.phaseIndex){ delete s.fixtureGitBlockWarning; delete s.fixtureGitBlockWarningPhaseIndex; }
     let phaseTasks=phase.tasks.filter(t=>!t.done);
+    phaseTasks=skipManualTasksInPhase(phaseTasks,s,{phaseName:phase.name,phaseIndex:s.phaseIndex}).automated;
     if(!phaseTasks.length){
       // Every task already checked: a stale checkpoint must not survive
       // its completed phase — clear it and advance.
@@ -9839,7 +11279,7 @@ async function runStandaloneImplementation(c,s){
     // the fail-closed rule lives in `allMapped`, which an empty or unmapped
     // entry list turns into an empty carry.
     const recordPhaseFindingTasks=(key,findings,carryAllowed)=>{
-      recordFindingTasks(s,key,{
+      const rec=recordFindingTasks(s,key,{
         phaseTaskDigest:phaseTaskDigest({framework:"standalone",mission,phaseIndex:s.phaseIndex,phaseName:phase.name,tasks:taskIdentities(),repoRoot:repo}),
         findings,
         taskIds:stableTaskIds({framework:"standalone",mission,phaseIndex:s.phaseIndex,phaseNumber:s.phaseIndex+1,phaseName:phase.name,tasks:taskIdentities(),repoRoot:repo}),
@@ -9848,6 +11288,23 @@ async function runStandaloneImplementation(c,s){
         carryAllowed,
         taskOwnership:loadTaskOwnership(s),
       });
+      const openList=loadReviewOpenFindings(s,key);
+      if(openList.length&&rec?.entries?.length){
+        let changed=false;
+        for(let i=0;i<openList.length&&i<rec.entries.length;i++){
+          if((!openList[i].tasks||!openList[i].tasks.length)&&rec.entries[i]?.taskIds?.length){
+            openList[i].tasks=[...rec.entries[i].taskIds];
+            if(openList[i].raw&&typeof openList[i].raw==="object"){
+              openList[i].raw.tasks=[...rec.entries[i].taskIds];
+            }else{
+              openList[i].raw={tasks:[...rec.entries[i].taskIds],problem:openList[i].text};
+            }
+            changed=true;
+          }
+        }
+        if(changed) saveReviewOpenFindings(s,key,openList);
+      }
+      return rec;
     };
 
     let passed=false;
@@ -9979,6 +11436,7 @@ async function runStandaloneImplementation(c,s){
           feedback,
           relay,
         });
+        const combinedFallbackTaskIds=new Set();
         for(;;){
           const cursorResume=evaluateCrashResume({progress:checkpoint.roleProgress,role:"implementer",taskIds:phaseTaskIds});
           if(cursorResume.action==="complete") break;
@@ -9996,6 +11454,7 @@ async function runStandaloneImplementation(c,s){
           // dashboard never reports a stale first task. taskIndex IS the
           // position of taskId (indexOf above), parallel to phaseTasks.
           if(taskIndex>=0){ s.currentTask=phaseTasks[taskIndex]; saveState(s); }
+          if(syncStickyFallback(s,c,"implementer")){ try{ saveState(s); }catch{} }
           const prep=prepareTaskInvocation({progress:checkpoint.roleProgress,role:"implementer",runId:expectedRunId,revision:checkpoint.revision,phaseTaskDigest:phaseTaskDigestValue,taskId,taskIds:phaseTaskIds});
           if(!prep.ok){
             s.phase="escalated";s.step="standalone_role_progress_invalid";
@@ -10063,6 +11522,149 @@ async function runStandaloneImplementation(c,s){
             continue;
           }
 
+          // Backlog rv #3: when >=2 tasks would re-run ONLY for overlap (no own
+          // findings, not local-check-failed), run ONE combined re-verify session
+          // instead of one implementer session per task. On failure, fall back to
+          // today's per-task re-runs for those tasks.
+          if(feedback&&carried.reason==="overlap"&&carried.overlap&&!combinedFallbackTaskIds.has(taskId)){
+            const phaseTaskFindings=loadReviewFeedback(s,phaseKey);
+            const overlapBatch=collectOverlapReverifyBatch({
+              phaseTaskIds,
+              startIndex:taskIndex,
+              findingRecord,
+              taskFindings:phaseTaskFindings,
+              progress:checkpoint.roleProgress,
+              revision:checkpoint.revision,
+              phaseTaskDigest:phaseTaskDigestValue,
+              skipTaskIds:combinedFallbackTaskIds,
+            });
+            if(overlapBatch.eligible){
+              let combinedBeforeMap, combinedAnchoredTestsNote="";
+              try{
+                const beforeChunks=scopedDeltaChunks(repo,phaseBaselineKey,{mission,declaredPaths});
+                combinedBeforeMap=attributionMap(beforeChunks);
+                combinedAnchoredTestsNote=anchoredTestsSection(beforeChunks);
+              }catch(e){
+                s.phase="escalated";s.step="standalone_delta_mismatch";
+                s.phaseCheckpointError={code:e?.code||"DELTA_COMPUTATION_FAILED",evidence:{message:e?.message||String(e)}};
+                s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+                die(`Standalone combined overlap attribution failed: ${e?.message||e}. STOP — human intervention required.`);
+              }
+              const combinedTaskRef=`overlap-reverify-phase-${s.phaseIndex+1}`;
+              const combinedContScope=`task:standalone:phase-${s.phaseIndex}:overlap-reverify`;
+              const combinedHandled=renderHandledFindings(overlapBatch.overlapTasks[0]?.grouped?.handled);
+              const combinedEarlier=implementerEarlierRoundsText(s,codeReviewScopeKey("standalone-phase",s.phaseIndex));
+              const combinedAutoReject=autoRejectRetryNote([lastImpl,lastReview,impl].filter(Boolean));
+              const combinedOperatorNote=operatorPhaseNoteLine(s);
+              const combinedBrief=buildCombinedOverlapReverifyBrief({
+                framework:"standalone",
+                phaseNumber:s.phaseIndex+1,
+                phaseName:phase.name,
+                phaseTotal:phaseList.length,
+                phaseBriefPath:phaseBriefRelativePath(mission,s.phaseIndex+1),
+                phaseTaskIds,
+                phaseTasks,
+                overlapTasks:overlapBatch.overlapTasks,
+                fixingTaskIds:overlapBatch.fixingTaskIds,
+                changedFiles:overlapBatch.changedFiles,
+                handledBlock:combinedHandled,
+                earlierCodeRounds:combinedEarlier,
+                handoffNotePath:handoffNoteRelPath(mission,combinedTaskRef),
+                anchoredTestsNote:combinedAnchoredTestsNote,
+                operatorNote:combinedOperatorNote,
+                resumeNote,
+                autoRejectNote:combinedAutoReject,
+              });
+              const combinedRes=await runCombinedOverlapReverify({
+                overlapBatch,
+                initialPrep:prep,
+                progress:checkpoint.roleProgress,
+                runId:expectedRunId,
+                revision:checkpoint.revision,
+                phaseTaskDigest:phaseTaskDigestValue,
+                phaseTaskIds,
+                invokeRelay:async()=>{
+                  const r=await relay("implementer",combinedBrief,c,s,{
+                    resume:false,requirements:phaseRequirements,timeoutMs:perTaskLimits.perTaskTimeoutMs,
+                    taskRef:combinedTaskRef,capEnabled:true,contScope:combinedContScope,carriedForwardTasks:[...carriedTasks],
+                  });
+                  if(missionDir){
+                    let diffStat=null;
+                    try{ diffStat=changedFilesStat(repo); }catch{ diffStat=null; }
+                    const attempt=(checkpoint?.attempts?.implementer??0)+1;
+                    try{ appendWatchEvent(missionDir,{type:"diff_stat",phase:s.phaseIndex+1,attempt,taskRef:combinedTaskRef,stat:diffStat}); }catch{}
+                  }
+                  maybeInjectPostRoleCrash();
+                  return r;
+                },
+                computeAttributedFiles:()=>{
+                  const afterMap=attributionMap(scopedDeltaChunks(repo,phaseBaselineKey,{mission,declaredPaths}));
+                  return attributedChangedPaths(combinedBeforeMap,afterMap);
+                },
+                onCarryTask:(item,normalized)=>{
+                  const idx=item.taskIndex;
+                  const ref=taskDisplayRef(phaseTasks[idx],idx);
+                  const scope=`task:standalone:phase-${s.phaseIndex}:${item.taskId}`;
+                  recordTaskOwnership(s,{taskId:item.taskId,phaseIndex:s.phaseIndex,phaseNumber:s.phaseIndex+1,phaseName:phase.name,taskText:phaseTasks[idx]?.text,files:normalized.facts?.files,summary:normalized.facts?.summary});
+                  clearTaskContinuation(s,scope);
+                  clearRolloverDeadEnds(s,scope);
+                  clearBackstopFirings(s,scope);
+                  logSessionStoreSize(mission,ref);
+                  clearSessionStore(mission,ref);
+                  clearHandoffNote(mission,ref);
+                  clearLastContinuation(s,scope);
+                  carriedTasks.push(item.taskId);
+                },
+                onCommitTask:(item,normalized)=>{
+                  const idx=item.taskIndex;
+                  const ref=taskDisplayRef(phaseTasks[idx],idx);
+                  const scope=`task:standalone:phase-${s.phaseIndex}:${item.taskId}`;
+                  recordTaskOwnership(s,{taskId:item.taskId,phaseIndex:s.phaseIndex,phaseNumber:s.phaseIndex+1,phaseName:phase.name,taskText:phaseTasks[idx]?.text,files:normalized.facts?.files,summary:normalized.facts?.summary});
+                  clearTaskContinuation(s,scope);
+                  clearRolloverDeadEnds(s,scope);
+                  clearBackstopFirings(s,scope);
+                  if(s?.escalationPending?.implementer?.reason==="no_progress"&&s.escalationPending.implementer.scopeKey===scope){
+                    delete s.escalationPending.implementer;
+                    if(!Object.keys(s.escalationPending).length) delete s.escalationPending;
+                  }
+                  logSessionStoreSize(mission,ref);
+                  clearSessionStore(mission,ref);
+                  clearHandoffNote(mission,ref);
+                  clearLastContinuation(s,scope);
+                },
+              });
+              if(combinedRes.policyViolation){
+                reconcileTaskCheckboxesBeforePolicyDie(s,preAttemptTasks,"Standalone","pendingStandaloneCheckboxSnapshot");
+                s.phase="escalated";s.step="relay_policy_violation";s.relayPolicyViolation=combinedRes.policyViolation;
+                s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+                die(formatRelayPolicyViolation(s.relayPolicyViolation,combinedRes.relayResult?.touchedFiles));
+              }
+              if(combinedRes.commitError){
+                s.phase="escalated";s.step="standalone_task_commit_invalid";
+                s.phaseCheckpointError={code:combinedRes.commitError.code,reason:combinedRes.commitError.reason,evidence:combinedRes.commitError.evidence};
+                s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+                die(`Standalone combined overlap commit failed (${combinedRes.stage} ${combinedRes.taskId}): ${combinedRes.commitError.reason}. STOP — human intervention required.`);
+              }
+              if(combinedRes.ok){
+                impl=combinedRes.relayResult;
+                checkpoint.roleProgress=combinedRes.progress;
+                resetAdapterRetryBudget(s,combinedRes.relayResult?.adapter,"implementer");
+                clearTaskContinuation(s,combinedContScope);
+                clearRolloverDeadEnds(s,combinedContScope);
+                clearBackstopFirings(s,combinedContScope);
+                logSessionStoreSize(mission,combinedTaskRef);
+                clearSessionStore(mission,combinedTaskRef);
+                clearHandoffNote(mission,combinedTaskRef);
+                s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+                console.log(`  Combined overlap re-verify completed for ${combinedRes.coveredTaskIds.join(", ")} (1 session instead of ${combinedRes.coveredTaskIds.length})`);
+                continue;
+              }
+              for(const ov of overlapBatch.overlapTasks) combinedFallbackTaskIds.add(ov.taskId);
+              clearHandoffNote(mission,combinedTaskRef);
+              console.log(`  Combined overlap re-verify did not complete (${combinedRes.reason || "failed"}); falling back to per-task re-verify for ${overlapBatch.overlapTasks.map(t=>t.taskId).join(", ")}`);
+            }
+          }
+
           let beforeMap, anchoredTestsNote="";
           try{ const beforeChunks=scopedDeltaChunks(repo,phaseBaselineKey,{mission,declaredPaths}); beforeMap=attributionMap(beforeChunks); anchoredTestsNote=anchoredTestsSection(beforeChunks); }
           catch(e){
@@ -10100,11 +11702,11 @@ async function runStandaloneImplementation(c,s){
           if(feedback){
             const taskFindings=loadReviewFeedback(s,phaseKey);
             if(taskFindings.length===0){
-              taskRetryFindings=`\n\nReviewer feedback from the previous attempt that MUST be addressed — fix every finding or rebut it with evidence, do not declare the work complete while any finding stands:\n${feedback}`;
+              taskRetryFindings=`\n\n${IMPLEMENTER_RETRY_FEEDBACK_HEADING}\n${feedback}`;
             }else{
               const grouped=findingsForTask({findings:taskFindings,record:findingRecord,taskId,revision:checkpoint.revision});
               if(grouped.fallback){
-                taskRetryFindings=`\n\nReviewer feedback from the previous attempt that MUST be addressed — fix every finding or rebut it with evidence, do not declare the work complete while any finding stands:\n${feedback}`;
+                taskRetryFindings=`\n\n${IMPLEMENTER_RETRY_FEEDBACK_HEADING}\n${feedback}`;
               }else{
                 const sections=[];
                 if(grouped.own.length) sections.push(`Findings for this task:\n${feedbackText(grouped.own)}`);
@@ -10116,9 +11718,9 @@ async function runStandaloneImplementation(c,s){
                 const handledBlock=renderHandledFindings(grouped.handled);
                 if(sections.length){
                   const fixPassBlock=fixPassBriefExcerpts([...grouped.own,...grouped.phaseWide,...grouped.unlinked],fixPassBriefReadFile);
-                  taskRetryFindings=`\n\nReviewer feedback from the previous attempt that MUST be addressed — fix every finding or rebut it with evidence, do not declare the work complete while any finding stands:\n${sections.join("\n")}\n${fixPassHandoffPointer(readHandoffNote(mission,taskDisplayRef(phaseTasks[taskIndex],taskIndex)))}${fixPassBlock}`;
+                  taskRetryFindings=`\n\n${IMPLEMENTER_RETRY_FEEDBACK_HEADING}\n${sections.join("\n")}\n${fixPassHandoffPointer(readHandoffNote(mission,taskDisplayRef(phaseTasks[taskIndex],taskIndex)))}${fixPassBlock}`;
                 }else if(carried.reason==="overlap"&&carried.overlap){
-                  const labels=(carried.overlap.taskIds??[]).map(id=>{const idx=phaseTaskIds.indexOf(id);return idx>=0?taskLabel(idx):id;}).join(", ");
+                  const labels=(carried.overlap.taskIds??[]).map(id=>{const idx=phaseTaskIds.indexOf(id);if(idx<0)return id;const pos=taskLabel(idx);return id===pos?pos:`${pos} (${id})`;}).join(", ");
                   const files=(carried.overlap.files??[]).join(", ");
                   taskRetryFindings=`\n\nThis task is being re-run because the fix for task(s) ${labels} changed file(s) it owns: ${files}. That fix is already done — do not redo it. Re-verify this task against its acceptance criteria and repair only what the change broke.`;
                 }else if(carried.reason==="local-check-failed"){
@@ -10237,6 +11839,9 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             console.log(`Task ${taskId} hit the ${taskImpl.capped.type} cap (${taskImpl.capped.used}/${taskImpl.capped.limit} ${capUnitLabel(taskImpl.capped.type)}); wrap-up note: ${taskImpl.wrapUp?.status||"unknown"}${taskImpl.wrapUp?.reason?` (${taskImpl.wrapUp.reason})`:""}; continuing as session ${cont.used+1} of ${cont.limit+1}.`);
             continue;
           }
+          if(Array.isArray(taskImpl.toolMarkupDebrisFiles)&&taskImpl.toolMarkupDebrisFiles.length>0){
+            console.warn(`Task ${taskId}: ${TOOL_MARKUP_DEBRIS_LABEL}: ${taskImpl.toolMarkupDebrisFiles.map((f)=>JSON.stringify(f)).join(", ")}`);
+          }
           if(taskImpl.status!=="completed"){
             // Interrupted attempt: leave the cursor on this task and let the
             // existing budget/enforcement path below decide retry vs escalate.
@@ -10345,6 +11950,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             summary: normalized.facts?.summary,
           });
           checkpoint.roleProgress=committed.progress;
+          resetAdapterRetryBudget(s, taskImpl?.adapter, "implementer");
           // Backlog 003#17: task converged — its continuation allowance and
           // dead ends die with it, never leaking into the next task.
           clearTaskContinuation(s,`task:standalone:phase-${s.phaseIndex}:${taskId}`);
@@ -10414,6 +12020,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           // interrupted task by the loop, so the retry resumes there.
           const recorded=enforceAttemptFailure(c,s,`standalone:phase-${s.phaseIndex}`,[impl],{ok:true});
           noteBudgetEscalationTrigger(s,c,`standalone:phase-${s.phaseIndex}`,recorded.budget);
+          maybeSwitchFromUnavailableEscalation(s,c,`standalone:phase-${s.phaseIndex}`,impl);
           checkpoint=applyCheckpointTransition(decideTransition(checkpoint,recorded));
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
           continue;
@@ -10453,6 +12060,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           checkpoint=applyCheckpointTransition(transition);
           checkpoint.deltaDigest=transition.deltaDigest;
           checkpoint.implementer={runId:transition.runId,summary:transition.summary};
+          resetAdapterRetryBudget(s, impl?.adapter, "implementer");
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
         }
         if(stopStage==="implement"){
@@ -10477,6 +12085,25 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
           console.log(`  Code review skipped for phase ${s.phaseIndex+1} (workflow.code_review_per_phase=false)`);
           continue;
+        }
+        if(lastReview===null){
+          const reviewKey=`${phaseBaselineKey}-review-r${checkpoint.revision}`;
+          const reuse=canReuseFailedReviewOnResume({
+            repo,state:s,key:phaseKey,revision:checkpoint.revision,
+            reviewKey,declaredPaths,mission,phaseTaskDigest:observed.phaseTaskDigest
+          });
+          if(reuse.canReuse){
+            console.log(`  Resuming after review FAIL: working tree matches review snapshot (${reviewKey}); skipping re-review and starting fix round with saved findings`);
+            feedback=feedbackText(reuse.findings)||"Implementation/code review failed.";
+            const transition=decideTransition(checkpoint,{
+              stage:"code_reviewer",
+              failure:{domain:"implementation",sourceRole:"code_reviewer",findings:reuse.findings},
+              budget:{allowed:true}
+            });
+            checkpoint=applyCheckpointTransition(transition);
+            s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+            continue;
+          }
         }
         if(checkpoint.attempts.code_reviewer>0){ s.attempt+=1;saveState(s);await maybeRetryPause(c,s,checkpoint,"code_reviewer"); }
         s.step="code_review";checkpoint.runningStage="code_reviewer";s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
@@ -10561,18 +12188,22 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         const cReview=s.verdictOnlyTurns?.[contScopeReview]
           ? {...c, policy: {...c.policy, free_model_turns_cap: 5, caps: {...c.policy?.caps, code_reviewer: {...c.policy?.caps?.code_reviewer, max_turns: 5}}}}
           : c;
-        const reviewRef=reviewTaskRef(s,phaseKey,phaseTasks,reviewIds,checkpoint.revision,isRereview);
+        const openFindingsForReview=loadReviewOpenFindings(s,phaseKey);
+        const reviewFeedback=openFindingsForReview.length?formatReviewOpenFindingsBrief(openFindingsForReview):feedback;
+        const reviewRef=roleHandoffRef(reviewTaskRef(s,phaseKey,phaseTasks,reviewIds,checkpoint.revision,isRereview),"code_reviewer");
         const reviewDeadEnds=readRolloverDeadEnds(s, `task:standalone:phase-${s.phaseIndex}:code_reviewer`);
         const reviewHandoffNote=readHandoffNote(mission, reviewRef);
         const reviewDeadEndsText=reviewDeadEnds.length?`Prior dead ends (continuation context — do not retry blindly):\n${reviewDeadEnds.map((d)=>`- Generation ${d.generation} (${d.reason} ${d.used}/${d.limit}): ${d.tail}`).join("\n")}`:"";
         const reviewHandoffNoteText=readOnlyContinuationNote(reviewHandoffNote,repo,mission,reviewRef,"reviewer");
+        const unchangedDigest=unchangedReviewWorkDigests.get(contScopeReview)||"";
+        const unchangedDigestText=unchangedDigest?`Capped previous session work digest (files already checked / commands run — do not repeat them):\n${unchangedDigest}\n\n`:"";
         const operatorNote=operatorPhaseNoteLine(s);
         const tasksFilePathForReview=standalone.tasksPath(repo,mission);
         const tasksTextForReview=fs.existsSync(tasksFilePathForReview)?fs.readFileSync(tasksFilePathForReview,"utf8"):"";
         const scratchNote=unexpectedNewFilesReviewNote(tasksTextForReview);
         const phaseReviewPassNotes=phaseCodeReviewPassNotesText(s);
-        const rv=await review("code_reviewer",`${reviewHandoff.text}\n\n${scratchNote?`${scratchNote}\n\n`:""}${reviewDeadEndsText}\n\n${reviewHandoffNoteText}\n\n${operatorNote?`${operatorNote}\n\n`:""}${phaseReviewPassNotes?`${phaseReviewPassNotes}\n\n`:""}${CODE_REVIEWER_TARGETED_TESTS_LINE}\n\n${CODE_REVIEWER_BROWSER_LINE}\n\n${NETWORK_GATED_TEST_LINE}\n\n${reviewBudget.note}\n${readOnlyHandoffNoteReminder({mission, ref: reviewRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
-          cReview,s,feedback,phaseRequirements,reviewRef,reviewBudget.timeoutMs,true,codeReviewScopeKey("standalone-phase",s.phaseIndex),
+        const rv=await review("code_reviewer",`${reviewHandoff.text}\n\n${scratchNote?`${scratchNote}\n\n`:""}${reviewDeadEndsText}\n\n${reviewHandoffNoteText}\n\n${unchangedDigestText}${operatorNote?`${operatorNote}\n\n`:""}${phaseReviewPassNotes?`${phaseReviewPassNotes}\n\n`:""}${CODE_REVIEWER_TARGETED_TESTS_LINE}\n\n${CODE_REVIEWER_BROWSER_LINE}\n\n${NETWORK_GATED_TEST_LINE}\n\n${reviewBudget.note}\n${readOnlyHandoffNoteReminder({mission, ref: reviewRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
+          cReview,s,reviewFeedback,phaseRequirements,reviewRef,reviewBudget.timeoutMs,true,codeReviewScopeKey("standalone-phase",s.phaseIndex),
           reviewTruncationResult(reviewHandoff.meta));
         noteRoleDeadlineOutcome(s,"code_reviewer",rv,reviewBudget.derived);
         lastReview=rv;
@@ -10617,36 +12248,40 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           // this decision, before the next generation is consumed.
           maybeApplyPendingContinuationReset(s,contScope);
           stopIfBriefExceedsCap({result: rv, subject: "Standalone code review", role: "code_reviewer", contScope, s, c, checkpoint, mission, taskRef: reviewRef, step: "standalone_task_not_converging"});
-          const cont=consumeContinuation(s,c.policy,contScope,resolvePerRoleLimits('code_reviewer',c.policy).continuationAllowance);
-          recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:rv.capped.type,used:rv.capped.used,limit:rv.capped.limit,tail:deadEndTail({summary:`Code review capped (${rv.capped.type} ${rv.capped.used}/${rv.capped.limit}); phase diff unchanged — re-review the same phase diff.`,files:[]})});
-          s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
-          if(!cont.allowed){
-            // Backlog #27: record the continuation for bare `ap reset`, and
-            // end with the exact resume command.
-            recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:reviewRef});
-            const lastNote=readHandoffNote(mission, reviewRef);
-            if(noteSaysOnlyGateLeft(lastNote) && !s.verdictOnlyTurns?.[contScope]){
-              s.verdictOnlyTurns=s.verdictOnlyTurns||{};
-              s.verdictOnlyTurns[contScope]="VERDICT-ONLY TURN: the previous sessions found no open findings and only the gate was left. Do not run any tests or the gate. Decide PASS or FAIL now from the hand-off note and the delta; the orchestrator runs the gate.";
-              saveState(s);
-              console.log(`Code review capped but handoff note reports only gate left; continuing for one verdict-only turn.`);
-              continue;
-            }
-            // Dead ends are deliberately NOT cleared here: per-phase keys
-            // cannot leak into another phase, and the entries are the
-            // post-mortem record of why this phase never converged.
-            s.phase="escalated";s.step="standalone_task_not_converging";
-            s.phaseCheckpointError={code:"CONTINUATION_EXHAUSTED",evidence:{role:"code_reviewer",used:cont.used,limit:cont.limit,breach:rv.capped.type}};
+          const capOutcome=handleCodeReviewerUnchangedNote({s,rv,prevNote:reviewHandoffNote||"",nextNote:readHandoffNote(mission,reviewRef)||"",contScope,subject:"Standalone code review",step:"standalone_task_not_converging",checkpoint});
+          if(!capOutcome?.convertedToFail){
+            const cont=consumeContinuation(s,c.policy,contScope,resolvePerRoleLimits('code_reviewer',c.policy).continuationAllowance);
+            recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:rv.capped.type,used:rv.capped.used,limit:rv.capped.limit,tail:deadEndTail({summary:`Code review capped (${rv.capped.type} ${rv.capped.used}/${rv.capped.limit}); phase diff unchanged — re-review the same phase diff.`,files:[]})});
             s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
-            die(`Standalone code review did not converge after ${cont.used} capped generations (${rv.capped.type} cap ${rv.capped.used}/${rv.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+            if(!cont.allowed){
+              // Backlog #27: record the continuation for bare `ap reset`, and
+              // end with the exact resume command.
+              recordLastContinuation(s,{contScope,taskId:null,missionName:mission,taskRef:reviewRef});
+              const lastNote=readHandoffNote(mission, reviewRef);
+              if(noteSaysOnlyGateLeft(lastNote) && !s.verdictOnlyTurns?.[contScope]){
+                s.verdictOnlyTurns=s.verdictOnlyTurns||{};
+                s.verdictOnlyTurns[contScope]="VERDICT-ONLY TURN: the previous sessions found no open findings and only the gate was left. Do not run any tests or the gate. Decide PASS or FAIL now from the hand-off note and the delta; the orchestrator runs the gate.";
+                saveState(s);
+                console.log(`Code review capped but handoff note reports only gate left; continuing for one verdict-only turn.`);
+                continue;
+              }
+              // Dead ends are deliberately NOT cleared here: per-phase keys
+              // cannot leak into another phase, and the entries are the
+              // post-mortem record of why this phase never converged.
+              s.phase="escalated";s.step="standalone_task_not_converging";
+              s.phaseCheckpointError={code:"CONTINUATION_EXHAUSTED",evidence:{role:"code_reviewer",used:cont.used,limit:cont.limit,breach:rv.capped.type}};
+              s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+              die(`Standalone code review did not converge after ${cont.used} capped generations (${rv.capped.type} cap ${rv.capped.used}/${rv.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+            }
+            console.log(`Code review hit the ${rv.capped.type} cap (${rv.capped.used}/${rv.capped.limit} ${capUnitLabel(rv.capped.type)}); continuing as session ${cont.used+1} of ${cont.limit+1}.`);
+            continue;
           }
-          console.log(`Code review hit the ${rv.capped.type} cap (${rv.capped.used}/${rv.capped.limit} ${capUnitLabel(rv.capped.type)}); continuing as session ${cont.used+1} of ${cont.limit+1}.`);
-          continue;
         }
         // Backlog #59 part (a): the code_reviewer run ended WITHOUT a
         // backstop firing (normal completion, or the voluntary incomplete
         // stop below) — reset the consecutive-firing count.
         clearBackstopFirings(s,`task:standalone:phase-${s.phaseIndex}:code_reviewer`);
+        clearCodeReviewUnchangedNoteState(s,`task:standalone:phase-${s.phaseIndex}:code_reviewer`);
         if(parseIncompleteSignal(rv.review ?? rv)){
           // Mission 031 Phase 4 task 4.3: voluntary early stop (INCOMPLETE
           // decision or non-empty Next section) is a continuation event,
@@ -10671,6 +12306,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           console.log(`Code review stopped voluntarily as incomplete; continuing as session ${cont.used+1} of ${cont.limit+1}.`);
           continue;
         }
+        clearHandoffNote(mission, reviewRef);
         if(rv.status==="completed"&&(rv.review?.decision==="PASS"||rv.review?.decision==="FAIL")){
           applyPlanPassNoteMarks(s, rv, {phase:s.phaseIndex+1, allowSkip:false});
           clearContinuationRound(s,`task:standalone:phase-${s.phaseIndex}:code_reviewer`);
@@ -10690,8 +12326,17 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             const toolCommand=toolRefusal.command?` \`${String(toolRefusal.command).slice(0,200)}\``:"";
             const toolExit=toolRefusal.exitCode ?? toolRefusal.status ?? "unknown";
             const refusalFindings=[`Reviewer PASS refused: linked verify/tool result${toolCommand} ${toolReason} (exit ${toolExit}). Re-verify the work after addressing the failure instead of passing.`];
-            feedback=feedbackText(saveReviewFeedback(s,phaseKey,refusalFindings))||"Implementation/code review failed.";
-            recordPhaseFindingTasks(phaseKey,refusalFindings,true);recordCodeReviewRound(s,codeReviewScopeKey("standalone-phase",s.phaseIndex),refusalFindings,rv.review?.previous);
+            const openResult=updateReviewOpenFindings(s,phaseKey,{newFindings:refusalFindings,previous:rv.review?.previous});
+            const mergedList=openResult.openFindings;
+            feedback=feedbackText(saveReviewFeedback(s,phaseKey,mergedList.map(f=>f.raw||f.text)))||"Implementation/code review failed.";
+            recordPhaseFindingTasks(phaseKey,mergedList.map(f=>{
+              if(f.tasks&&f.tasks.length){
+                if(f.raw&&typeof f.raw==="object") return {...f.raw,tasks:f.tasks};
+                return {tasks:f.tasks,problem:f.text};
+              }
+              return f.raw||f.text;
+            }),true);
+            recordCodeReviewRound(s,codeReviewScopeKey("standalone-phase",s.phaseIndex),mergedList.map(f=>f.text),rv.review?.previous);
             {
               const recorded=enforceAttemptFailure(c,s,`standalone:phase-${s.phaseIndex}`,lastImpl?[lastImpl,{...rv,failure:failure("IMPLEMENTATION_REJECTED","implementation",true,refusalFindings)}]:[{...rv,failure:failure("IMPLEMENTATION_REJECTED","implementation",true,refusalFindings)}],{ok:true});
               noteBudgetEscalationTrigger(s,c,`standalone:phase-${s.phaseIndex}`,recorded.budget);
@@ -10700,9 +12345,35 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             }
             continue;
           }
-          clearCodeReviewHistory(s,codeReviewScopeKey("standalone-phase",s.phaseIndex));const transition=decideTransition(checkpoint,{stage:"code_reviewer",status:"completed",decision:"PASS",runId:rv.sessionId??null,findings:rv.review?.findings??[]});
+          const openFindingsForReview=loadReviewOpenFindings(s,phaseKey);
+          const listedFindings=openFindingsForReview.length
+            ?openFindingsForReview.slice(0,20).map(f=>f.id?`${f.id}: ${f.text}`:f.text)
+            :(loadReviewFeedback(s,phaseKey).length
+              ?loadReviewFeedback(s,phaseKey).slice(0,20)
+              :(feedback&&String(feedback).trim()?[String(feedback).trim()]:[]));
+          const prevCheck=await enforceRereviewPreviousOnPass({rv,listedFindings,c,s,requirements:phaseRequirements,reviewRef});
+          if(prevCheck.action==="policy_violation"){
+            s.phase="escalated";s.step="relay_policy_violation";s.relayPolicyViolation=prevCheck.rv.policyViolation;saveState(s);
+            die(formatRelayPolicyViolation(s.relayPolicyViolation,prevCheck.rv.touchedFiles));
+          }
+          if(prevCheck.action==="fail"){
+            const scopeKey=codeReviewScopeKey("standalone-phase",s.phaseIndex);
+            updateReviewOpenFindings(s,phaseKey,{newFindings:prevCheck.failFindings,previous:rv.review?.previous});
+            feedback=feedbackText(saveReviewFeedback(s,phaseKey,prevCheck.failFindings))||"Implementation/code review failed.";
+            recordPhaseFindingTasks(phaseKey,prevCheck.failFindings,true);
+            recordCodeReviewRound(s,scopeKey,prevCheck.failFindings,prevCheck.previous);
+            noteEscalationTrigger(s,c,"implementer",scopeKey,"code_reviewer",prevCheck.previous);
+            const failResult={...prevCheck.rv,failure:failure("IMPLEMENTATION_REJECTED","implementation",true,prevCheck.failFindings)};
+            const recorded=enforceAttemptFailure(c,s,`standalone:phase-${s.phaseIndex}`,lastImpl?[lastImpl,failResult]:[failResult],{ok:true});
+            noteBudgetEscalationTrigger(s,c,`standalone:phase-${s.phaseIndex}`,recorded.budget);
+            checkpoint=applyCheckpointTransition(decideTransition(checkpoint,recorded));
+            s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+            continue;
+          }
+          clearReviewOpenFindings(s,phaseKey);clearCodeReviewHistory(s,codeReviewScopeKey("standalone-phase",s.phaseIndex));const transition=decideTransition(checkpoint,{stage:"code_reviewer",status:"completed",decision:"PASS",runId:rv.sessionId??null,findings:rv.review?.findings??[]});
           checkpoint=applyCheckpointTransition(transition);
           checkpoint.codeReviewer={runId:rv.sessionId??null,decision:"PASS",findings:rv.review?.findings??[]};
+          resetAdapterRetryBudget(s, rv?.adapter, "code_reviewer");
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
           if(stopStage==="review"){
             // Mission 090 task 1.5: review covers the Code Reviewer only.
@@ -10712,13 +12383,27 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           continue;
         }
         if(rv.status==="completed"){
+          resetAdapterRetryBudget(s, rv?.adapter, "code_reviewer");
           // Functional FAIL: the findings feed the Implementer retry, and
           // the stored approval is invalidated via the transition.
-          feedback=feedbackText(saveReviewFeedback(s,phaseKey,rv.review?.findings||[]))||"Implementation/code review failed.";
+          const openResult=updateReviewOpenFindings(s,phaseKey,{
+            newFindings:rawReviewFindings(rv),
+            previous:rv.review?.previous
+          });
+          const mergedList=openResult.openFindings;
+          feedback=feedbackText(saveReviewFeedback(s,phaseKey,mergedList.map(f=>f.raw||f.text)))||"Implementation/code review failed.";
           // TASK-20 step 1: record the finding→task map before the transition
           // below wipes roleProgress. The wipe itself is unchanged; TASK-21
           // step 2 replays the unflagged tasks' facts on the retry instead.
-          recordPhaseFindingTasks(phaseKey,rawReviewFindings(rv),true);recordCodeReviewRound(s,codeReviewScopeKey("standalone-phase",s.phaseIndex),rv.review?.findings||[],rv.review?.previous);noteEscalationTrigger(s,c,"implementer",codeReviewScopeKey("standalone-phase",s.phaseIndex),"code_reviewer",rv.review?.previous);
+          recordPhaseFindingTasks(phaseKey,mergedList.map(f=>{
+            if(f.tasks&&f.tasks.length){
+              if(f.raw&&typeof f.raw==="object") return {...f.raw,tasks:f.tasks};
+              return {tasks:f.tasks,problem:f.text};
+            }
+            return f.raw||f.text;
+          }),true);
+          recordCodeReviewRound(s,codeReviewScopeKey("standalone-phase",s.phaseIndex),mergedList.map(f=>f.text),rv.review?.previous);
+          noteEscalationTrigger(s,c,"implementer",codeReviewScopeKey("standalone-phase",s.phaseIndex),"code_reviewer",rv.review?.previous);
         }
         // Infrastructure interruption or functional rejection: the split is
         // read off enforceAttemptFailure()'s return value — retry only the
@@ -10760,7 +12445,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             g=cached;
             console.log("gate result reused (digest unchanged)");noteGateReused(s,g);
           }else{
-            g=await gates(c,s);
+            g=await gates(c,s,{keepForVerifier:true});
             if(g.ok===true){
               setCachedGateResult(checkpoint,preGateCacheKey,g);
               s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
@@ -10811,13 +12496,13 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         const cVerify=s.verdictOnlyTurns?.[contScopeVerify]
           ? {...c, policy: {...c.policy, free_model_turns_cap: 5, caps: {...c.policy?.caps, verifier: {...c.policy?.caps?.verifier, max_turns: 5}}}}
           : c;
-        const verifyRef=allPhaseTaskRef(phaseTasks);
+        const verifyRef=roleHandoffRef(allPhaseTaskRef(phaseTasks),"verifier");
         const verifyDeadEnds=readRolloverDeadEnds(s, `task:standalone:phase-${s.phaseIndex}:verifier`);
         const verifyHandoffNote=readHandoffNote(mission, verifyRef);
         const verifyDeadEndsText=verifyDeadEnds.length?`Prior dead ends (continuation context — do not retry blindly):\n${verifyDeadEnds.map((d)=>`- Generation ${d.generation} (${d.reason} ${d.used}/${d.limit}): ${d.tail}`).join("\n")}`:"";
         const verifyHandoffNoteText=readOnlyContinuationNote(verifyHandoffNote,repo,mission,verifyRef,"verifier");
-        const vv=await relayAsync("verifier",`${verifyHandoff.text}\n\n${verifyDeadEndsText}\n\n${verifyHandoffNoteText}\n\n${verifyBudget.note}${browserVerifierNote(phaseTaskFacts)?`\n${browserVerifierNote(phaseTaskFacts)}`:""}\n${verifierRoundLines(s,codeReviewScopeKey("standalone-phase",s.phaseIndex)).join("\n")}\n${readOnlyHandoffNoteReminder({mission, ref: verifyRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
-          cVerify,s,{readOnly:true,review:true,requirements:phaseRequirements,taskFacts:phaseTaskFacts,taskRef:verifyRef,timeoutMs:verifyBudget.timeoutMs,capEnabled:true});
+        const vv=await relayVerifierWithApp(`${verifyHandoff.text}\n\n${verifyDeadEndsText}\n\n${verifyHandoffNoteText}\n\n${verifyBudget.note}${browserVerifierNote(phaseTaskFacts)?`\n${browserVerifierNote(phaseTaskFacts)}`:""}\n${verifierRoundLines(s,codeReviewScopeKey("standalone-phase",s.phaseIndex)).join("\n")}\n${readOnlyHandoffNoteReminder({mission, ref: verifyRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
+          cVerify,s,{readOnly:true,review:true,requirements:phaseRequirements,taskFacts:phaseTaskFacts,taskRef:verifyRef,timeoutMs:verifyBudget.timeoutMs,capEnabled:true,deltaPaths:effectiveVerifyChunks.map((ch)=>ch.path)});
         noteRoleDeadlineOutcome(s,"verifier",vv,verifyBudget.derived);
         {
           // Backlog #91: a red phase gate forces the recorded verdict to FAIL.
@@ -10926,6 +12611,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           console.log(`Verification stopped voluntarily as incomplete; continuing as session ${cont.used+1} of ${cont.limit+1}.`);
           continue;
         }
+        clearHandoffNote(mission, verifyRef);
         if(vv.review){
           const {moved}=moveManualCheckFindings(vv.review);
           if(vv.verdict) moveManualCheckFindings(vv.verdict);
@@ -10946,6 +12632,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         if(vv.status==="completed"&&(vv.review?.decision==="PASS"||vv.review?.decision==="FAIL")){
           clearContinuationRound(s,`task:standalone:phase-${s.phaseIndex}:verifier`);
           deleteCarriedScratch(repo,mission,verifyRef);
+          resetAdapterRetryBudget(s, vv?.adapter, "verifier");
         }
         if(g.ok&&vv.status==="completed"&&vv.review?.decision==="PASS"){
           { const bn=filterUnrecordedManualChecks(s,phase?.name||String(s.phaseIndex),browserCheckNotes(vv.review)); if(bn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:bn,at:new Date().toISOString()})) console.log(`Manual UI check recorded in MANUAL-CHECKS.md (${bn.length} note(s)).`); } }
@@ -10977,9 +12664,12 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           const transition=decideTransition(checkpoint,{stage:"verifier",status:"completed",decision:"PASS",runId:vv.sessionId??null,findings:vv.review?.findings??[]});
           checkpoint=applyCheckpointTransition(transition);
           checkpoint.verifier={runId:vv.sessionId??null,decision:"PASS",findings:vv.review?.findings??[]};
+          resetAdapterRetryBudget(s, vv?.adapter, "verifier");
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+          try{ cleanAllMissionsBrowserArtifacts(repo); }catch{}
           continue;
         }
+        try{ cleanAllMissionsBrowserArtifacts(repo); }catch{}
         feedback=feedbackText(saveReviewFeedback(s,phaseKey,vv.review?.findings||[]))||(g.ok?"Verification failed.":`Verification gate failed: ${g.command||"unknown"}`);
         // TASK-20 step 1: same record as the review FAIL site. A gate failure
         // with no findings at all lands here as `entries:[]` +
@@ -11125,6 +12815,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         // TASK-20: the finding→task record is cleared with the findings it
         // describes — a PASS must never leave a FAIL's map readable.
         clearReviewFeedback(s,phaseKey);
+        clearReviewOpenFindings(s,phaseKey);
         clearFindingTasks(s,phaseKey);clearCodeReviewHistory(s,codeReviewScopeKey("standalone-phase",s.phaseIndex));clearVerifierHistory(s,codeReviewScopeKey("standalone-phase",s.phaseIndex));
         clearBudgetEscalation(s,`standalone:phase-${s.phaseIndex}`);
         // TASK-23: this phase's per-review snapshots are only ever read by
@@ -11502,6 +13193,7 @@ async function runImplementation(c){
     // mission's outcome — drop them unconditionally so the new mission
     // carries no prior cancel line, reset record or escalation record.
     for(const key of MISSION_SCOPED_STATE_KEYS) delete s[key];
+    removeOperatorDecisionQueue(repo);
     clearPlanningContinuations(s);
     delete s.lastCancelled; delete s.lastReset; delete s.lastContinuation;
     s.phase="idle"; s.step="idle"; s.mission=null; s.missionSeq=null; s.planningStartedAt=null;
@@ -11542,6 +13234,10 @@ async function runImplementation(c){
     const bypass=evaluateResumeBypass(c,s);
     if(bypass.decision.action==="resume"){
       console.log(`Phase checkpoint resume: skipping planning (valid ${bypass.framework} checkpoint for phase ${bypass.phaseIndex}).`);
+      if(s.phase==="escalated"){
+        s.phase="implementing";
+        saveState(s);
+      }
     }else if(bypass.decision.action==="escalate"){
       s.phase="escalated";s.step=`${bypass.framework}_checkpoint_drift`;
       s.phaseCheckpointError={code:bypass.decision.code,evidence:bypass.decision.evidence};
@@ -11653,6 +13349,7 @@ async function runImplementation(c){
     if(s.operatorPhaseNote&&Number.isInteger(s.operatorPhaseNote.phaseIndex)&&s.operatorPhaseNote.phaseIndex!==s.phaseIndex){ delete s.operatorPhaseNote; saveState(s); }
     const phase=phaseList[s.phaseIndex];
     let phaseTasks=phase.tasks.filter(t=>!t.done);
+    phaseTasks=skipManualTasksInPhase(phaseTasks,s,{phaseName:phase.name,phaseIndex:s.phaseIndex}).automated;
     if(!phaseTasks.length){
       // Every task already checked: a stale checkpoint must not survive
       // its completed phase — clear it and advance.
@@ -11747,7 +13444,7 @@ async function runImplementation(c){
     // pre-transition revision N; `carryAllowed` is true for a code-review
     // FAIL and for a verifier FAIL (TASK-21 step 2, c-gap 2).
     const recordPhaseFindingTasks=(key,findings,carryAllowed)=>{
-      recordFindingTasks(s,key,{
+      const rec=recordFindingTasks(s,key,{
         phaseTaskDigest:phaseTaskDigest({framework:"speckit",mission:missionIdentity,phaseIndex:s.phaseIndex,phaseName:phase.name,tasks:taskIdentities(),repoRoot:repo}),
         findings,
         taskIds:stableTaskIds({framework:"speckit",mission:missionIdentity,phaseIndex:s.phaseIndex,phaseNumber:s.phaseIndex+1,phaseName:phase.name,tasks:taskIdentities(),repoRoot:repo}),
@@ -11756,6 +13453,23 @@ async function runImplementation(c){
         carryAllowed,
         taskOwnership:loadTaskOwnership(s),
       });
+      const openList=loadReviewOpenFindings(s,key);
+      if(openList.length&&rec?.entries?.length){
+        let changed=false;
+        for(let i=0;i<openList.length&&i<rec.entries.length;i++){
+          if((!openList[i].tasks||!openList[i].tasks.length)&&rec.entries[i]?.taskIds?.length){
+            openList[i].tasks=[...rec.entries[i].taskIds];
+            if(openList[i].raw&&typeof openList[i].raw==="object"){
+              openList[i].raw.tasks=[...rec.entries[i].taskIds];
+            }else{
+              openList[i].raw={tasks:[...rec.entries[i].taskIds],problem:openList[i].text};
+            }
+            changed=true;
+          }
+        }
+        if(changed) saveReviewOpenFindings(s,key,openList);
+      }
+      return rec;
     };
 
     // Role results from this process, kept so combined failure
@@ -11884,6 +13598,7 @@ async function runImplementation(c){
         feedback,
         relay,
       });
+      const combinedFallbackTaskIds=new Set();
       for(;;){
         const cursorResume=evaluateCrashResume({progress:checkpoint.roleProgress,role:"implementer",taskIds:phaseTaskIds});
         if(cursorResume.action==="complete") break;
@@ -11899,6 +13614,7 @@ async function runImplementation(c){
         // to the task the cursor is actually on, so the watch-report header
         // never reports the stale phase-start task.
         if(taskIndex>=0){ s.currentTask=phaseTasks[taskIndex]; saveState(s); }
+        if(syncStickyFallback(s,c,"implementer")){ try{ saveState(s); }catch{} }
         const prep=prepareTaskInvocation({progress:checkpoint.roleProgress,role:"implementer",runId:expectedRunId,revision:checkpoint.revision,phaseTaskDigest:phaseTaskDigestValue,taskId,taskIds:phaseTaskIds});
         if(!prep.ok){
           s.phase="escalated";s.step="speckit_role_progress_invalid";
@@ -11960,6 +13676,145 @@ async function runImplementation(c){
           continue;
         }
 
+        // Backlog rv #3 (SpecKit twin): when >=2 tasks would re-run ONLY for
+        // overlap (no own findings, not local-check-failed), run ONE combined
+        // re-verify session instead of one implementer session per task. On
+        // failure, fall back to today's per-task re-runs for those tasks.
+        if(feedback&&carried.reason==="overlap"&&carried.overlap&&!combinedFallbackTaskIds.has(taskId)){
+          const phaseTaskFindings=loadReviewFeedback(s,speckitPhaseFeedbackKey(s.phaseIndex));
+          const overlapBatch=collectOverlapReverifyBatch({
+            phaseTaskIds,
+            startIndex:taskIndex,
+            findingRecord,
+            taskFindings:phaseTaskFindings,
+            progress:checkpoint.roleProgress,
+            revision:checkpoint.revision,
+            phaseTaskDigest:phaseTaskDigestValue,
+            skipTaskIds:combinedFallbackTaskIds,
+          });
+          if(overlapBatch.eligible){
+            let combinedBeforeMap;
+            try{ combinedBeforeMap=attributionMap(scopedDeltaChunks(repo,phaseBaselineKey)); }
+            catch(e){
+              s.phase="escalated";s.step="speckit_delta_mismatch";
+              s.phaseCheckpointError={code:e?.code||"DELTA_COMPUTATION_FAILED",evidence:{message:e?.message||String(e)}};
+              s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+              die(`SpecKit combined overlap attribution failed: ${e?.message||e}. STOP — human intervention required.`);
+            }
+            const combinedTaskRef=`overlap-reverify-phase-${s.phaseIndex+1}`;
+            const combinedContScope=`task:speckit:phase-${s.phaseIndex}:overlap-reverify`;
+            const combinedHandled=renderHandledFindings(overlapBatch.overlapTasks[0]?.grouped?.handled);
+            const combinedEarlier=implementerEarlierRoundsText(s,codeReviewScopeKey("speckit-phase",s.phaseIndex));
+            const combinedAutoReject=autoRejectRetryNote([lastImpl,lastReview,impl].filter(Boolean));
+            const combinedOperatorNote=operatorPhaseNoteLine(s);
+            const combinedBrief=buildCombinedOverlapReverifyBrief({
+              framework:"speckit",
+              phaseNumber:s.phaseIndex+1,
+              phaseName:phase.name,
+              phaseTotal:phaseList.length,
+              phaseBriefPath:phaseBriefRelativePath(missionIdentity,s.phaseIndex+1),
+              phaseTaskIds,
+              phaseTasks,
+              overlapTasks:overlapBatch.overlapTasks,
+              fixingTaskIds:overlapBatch.fixingTaskIds,
+              changedFiles:overlapBatch.changedFiles,
+              handledBlock:combinedHandled,
+              earlierCodeRounds:combinedEarlier,
+              handoffNotePath:handoffNoteRelPath(missionIdentity,combinedTaskRef),
+              operatorNote:combinedOperatorNote,
+              resumeNote,
+              autoRejectNote:combinedAutoReject,
+            });
+            const combinedRes=await runCombinedOverlapReverify({
+              overlapBatch,
+              initialPrep:prep,
+              progress:checkpoint.roleProgress,
+              runId:expectedRunId,
+              revision:checkpoint.revision,
+              phaseTaskDigest:phaseTaskDigestValue,
+              phaseTaskIds,
+              invokeRelay:async()=>{
+                const r=await relay("implementer",combinedBrief,c,s,{
+                  resume:false,requirements:phaseRequirements,timeoutMs:perTaskLimits.perTaskTimeoutMs,
+                  taskRef:combinedTaskRef,capEnabled:true,contScope:combinedContScope,carriedForwardTasks:[...carriedTasks],
+                });
+                if(missionDir){
+                  let diffStat=null;
+                  try{ diffStat=changedFilesStat(repo); }catch{ diffStat=null; }
+                  const attempt=(checkpoint?.attempts?.implementer??0)+1;
+                  try{ appendWatchEvent(missionDir,{type:"diff_stat",phase:s.phaseIndex+1,attempt,taskRef:combinedTaskRef,stat:diffStat}); }catch{}
+                }
+                maybeInjectPostRoleCrash();
+                return r;
+              },
+              computeAttributedFiles:()=>{
+                const afterMap=attributionMap(scopedDeltaChunks(repo,phaseBaselineKey));
+                return attributedChangedPaths(combinedBeforeMap,afterMap);
+              },
+              onCarryTask:(item,normalized)=>{
+                const idx=item.taskIndex;
+                const ref=taskDisplayRef(phaseTasks[idx],idx);
+                const scope=`task:speckit:phase-${s.phaseIndex}:${item.taskId}`;
+                recordTaskOwnership(s,{taskId:item.taskId,phaseIndex:s.phaseIndex,phaseNumber:s.phaseIndex+1,phaseName:phase.name,taskText:phaseTasks[idx]?.text,files:normalized.facts?.files,summary:normalized.facts?.summary});
+                clearTaskContinuation(s,scope);
+                clearRolloverDeadEnds(s,scope);
+                clearBackstopFirings(s,scope);
+                logSessionStoreSize(missionIdentity,ref);
+                clearSessionStore(missionIdentity,ref);
+                clearHandoffNote(missionIdentity,ref);
+                clearLastContinuation(s,scope);
+                carriedTasks.push(item.taskId);
+              },
+              onCommitTask:(item,normalized)=>{
+                const idx=item.taskIndex;
+                const ref=taskDisplayRef(phaseTasks[idx],idx);
+                const scope=`task:speckit:phase-${s.phaseIndex}:${item.taskId}`;
+                recordTaskOwnership(s,{taskId:item.taskId,phaseIndex:s.phaseIndex,phaseNumber:s.phaseIndex+1,phaseName:phase.name,taskText:phaseTasks[idx]?.text,files:normalized.facts?.files,summary:normalized.facts?.summary});
+                clearTaskContinuation(s,scope);
+                clearRolloverDeadEnds(s,scope);
+                clearBackstopFirings(s,scope);
+                if(s?.escalationPending?.implementer?.reason==="no_progress"&&s.escalationPending.implementer.scopeKey===scope){
+                  delete s.escalationPending.implementer;
+                  if(!Object.keys(s.escalationPending).length) delete s.escalationPending;
+                }
+                logSessionStoreSize(missionIdentity,ref);
+                clearSessionStore(missionIdentity,ref);
+                clearHandoffNote(missionIdentity,ref);
+                clearLastContinuation(s,scope);
+              },
+            });
+            if(combinedRes.policyViolation){
+              reconcileTaskCheckboxesBeforePolicyDie(s,preAttemptTasks,"SpecKit","pendingCheckboxSnapshot");
+              s.phase="escalated";s.step="relay_policy_violation";s.relayPolicyViolation=combinedRes.policyViolation;
+              s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+              die(formatRelayPolicyViolation(s.relayPolicyViolation,combinedRes.relayResult?.touchedFiles));
+            }
+            if(combinedRes.commitError){
+              s.phase="escalated";s.step="speckit_task_commit_invalid";
+              s.phaseCheckpointError={code:combinedRes.commitError.code,reason:combinedRes.commitError.reason,evidence:combinedRes.commitError.evidence};
+              s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+              die(`SpecKit combined overlap commit failed (${combinedRes.stage} ${combinedRes.taskId}): ${combinedRes.commitError.reason}. STOP — human intervention required.`);
+            }
+            if(combinedRes.ok){
+              impl=combinedRes.relayResult;
+              checkpoint.roleProgress=combinedRes.progress;
+              resetAdapterRetryBudget(s,combinedRes.relayResult?.adapter,"implementer");
+              clearTaskContinuation(s,combinedContScope);
+              clearRolloverDeadEnds(s,combinedContScope);
+              clearBackstopFirings(s,combinedContScope);
+              logSessionStoreSize(missionIdentity,combinedTaskRef);
+              clearSessionStore(missionIdentity,combinedTaskRef);
+              clearHandoffNote(missionIdentity,combinedTaskRef);
+              s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+              console.log(`  Combined overlap re-verify completed for ${combinedRes.coveredTaskIds.join(", ")} (1 session instead of ${combinedRes.coveredTaskIds.length})`);
+              continue;
+            }
+            for(const ov of overlapBatch.overlapTasks) combinedFallbackTaskIds.add(ov.taskId);
+            clearHandoffNote(missionIdentity,combinedTaskRef);
+            console.log(`  Combined overlap re-verify did not complete (${combinedRes.reason || "failed"}); falling back to per-task re-verify for ${overlapBatch.overlapTasks.map(t=>t.taskId).join(", ")}`);
+          }
+        }
+
         let beforeMap;
         try{ beforeMap=attributionMap(scopedDeltaChunks(repo,phaseBaselineKey)); }
         catch(e){
@@ -11995,11 +13850,11 @@ async function runImplementation(c){
         if(feedback){
           const taskFindings=loadReviewFeedback(s,speckitPhaseFeedbackKey(s.phaseIndex));
           if(taskFindings.length===0){
-            taskRetryFindings=`\n\nReviewer feedback from the previous attempt that MUST be addressed — fix every finding or rebut it with evidence, do not declare the work complete while any finding stands:\n${feedback}`;
+            taskRetryFindings=`\n\n${IMPLEMENTER_RETRY_FEEDBACK_HEADING}\n${feedback}`;
           }else{
             const grouped=findingsForTask({findings:taskFindings,record:findingRecord,taskId,revision:checkpoint.revision});
             if(grouped.fallback){
-              taskRetryFindings=`\n\nReviewer feedback from the previous attempt that MUST be addressed — fix every finding or rebut it with evidence, do not declare the work complete while any finding stands:\n${feedback}`;
+              taskRetryFindings=`\n\n${IMPLEMENTER_RETRY_FEEDBACK_HEADING}\n${feedback}`;
             }else{
               const sections=[];
               if(grouped.own.length) sections.push(`Findings for this task:\n${feedbackText(grouped.own)}`);
@@ -12011,9 +13866,9 @@ async function runImplementation(c){
               const handledBlock=renderHandledFindings(grouped.handled);
               if(sections.length){
                 const fixPassBlock=fixPassBriefExcerpts([...grouped.own,...grouped.phaseWide,...grouped.unlinked],fixPassBriefReadFile);
-                taskRetryFindings=`\n\nReviewer feedback from the previous attempt that MUST be addressed — fix every finding or rebut it with evidence, do not declare the work complete while any finding stands:\n${sections.join("\n")}\n${fixPassHandoffPointer(readHandoffNote(missionIdentity,taskDisplayRef(phaseTasks[taskIndex],taskIndex)))}${fixPassBlock}`;
+                taskRetryFindings=`\n\n${IMPLEMENTER_RETRY_FEEDBACK_HEADING}\n${sections.join("\n")}\n${fixPassHandoffPointer(readHandoffNote(missionIdentity,taskDisplayRef(phaseTasks[taskIndex],taskIndex)))}${fixPassBlock}`;
               }else if(carried.reason==="overlap"&&carried.overlap){
-                const labels=(carried.overlap.taskIds??[]).map(id=>{const idx=phaseTaskIds.indexOf(id);return idx>=0?taskLabel(idx):id;}).join(", ");
+                const labels=(carried.overlap.taskIds??[]).map(id=>{const idx=phaseTaskIds.indexOf(id);if(idx<0)return id;const pos=taskLabel(idx);return id===pos?pos:`${pos} (${id})`;}).join(", ");
                 const files=(carried.overlap.files??[]).join(", ");
                 taskRetryFindings=`\n\nThis task is being re-run because the fix for task(s) ${labels} changed file(s) it owns: ${files}. That fix is already done — do not redo it. Re-verify this task against its acceptance criteria and repair only what the change broke.`;
               }else if(carried.reason==="local-check-failed"){
@@ -12123,6 +13978,9 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             console.log(`Task ${taskId} hit the ${taskImpl.capped.type} cap (${taskImpl.capped.used}/${taskImpl.capped.limit} ${capUnitLabel(taskImpl.capped.type)}); wrap-up note: ${taskImpl.wrapUp?.status||"unknown"}${taskImpl.wrapUp?.reason?` (${taskImpl.wrapUp.reason})`:""}; continuing as session ${cont.used+1} of ${cont.limit+1}.`);
             continue;
           }
+          if(Array.isArray(taskImpl.toolMarkupDebrisFiles)&&taskImpl.toolMarkupDebrisFiles.length>0){
+            console.warn(`Task ${taskId}: ${TOOL_MARKUP_DEBRIS_LABEL}: ${taskImpl.toolMarkupDebrisFiles.map((f)=>JSON.stringify(f)).join(", ")}`);
+          }
           // Mission 047 Phase 1 task 1.2: ended WITHOUT a backstop firing —
           // reset the consecutive-firing count (PLAN).
           if(taskImpl.status!=="completed") clearBackstopFirings(s,`task:speckit:phase-${s.phaseIndex}:${taskId}`);
@@ -12203,6 +14061,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           summary: normalized.facts?.summary,
         });
         checkpoint.roleProgress=committed.progress;
+        resetAdapterRetryBudget(s, taskImpl?.adapter, "implementer");
           // Backlog 003#17: task converged — its continuation allowance and
           // dead ends die with it, never leaking into the next task.
           clearTaskContinuation(s,`task:speckit:phase-${s.phaseIndex}:${taskId}`);
@@ -12276,6 +14135,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         // interrupted task by the loop, so the retry resumes there.
         const recorded=enforceAttemptFailure(c,s,`speckit:${phase.name}`,[impl],{ok:true});
         noteBudgetEscalationTrigger(s,c,`speckit:${phase.name}`,recorded.budget);
+        maybeSwitchFromUnavailableEscalation(s,c,`speckit:${phase.name}`,impl);
         checkpoint=applyCheckpointTransition(decideTransition(checkpoint,recorded));
         s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
         continue;
@@ -12334,6 +14194,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         checkpoint=applyCheckpointTransition(transition);
         checkpoint.deltaDigest=transition.deltaDigest;
         checkpoint.implementer={runId:transition.runId,summary:transition.summary};
+        resetAdapterRetryBudget(s, impl?.adapter, "implementer");
         s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
       }
       continue;
@@ -12355,6 +14216,25 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           console.log(`  Code review skipped for phase ${phase.name} (workflow.code_review_per_phase=false)`);
           continue;
         }
+        if(lastReview===null){
+          const reviewKey=`${phaseBaselineKey}-review-r${checkpoint.revision}`;
+          const reuse=canReuseFailedReviewOnResume({
+            repo,state:s,key:speckitPhaseFeedbackKey(s.phaseIndex),revision:checkpoint.revision,
+            reviewKey,declaredPaths:null,mission:missionIdentity,phaseTaskDigest:observed.phaseTaskDigest
+          });
+          if(reuse.canReuse){
+            console.log(`  Resuming after review FAIL: working tree matches review snapshot (${reviewKey}); skipping re-review and starting fix round with saved findings`);
+            feedback=feedbackText(reuse.findings)||"Implementation/code review failed.";
+            const transition=decideTransition(checkpoint,{
+              stage:"code_reviewer",
+              failure:{domain:"implementation",sourceRole:"code_reviewer",findings:reuse.findings},
+              budget:{allowed:true}
+            });
+            checkpoint=applyCheckpointTransition(transition);
+            s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+            continue;
+          }
+        }
         if(checkpoint.attempts.code_reviewer>0){ s.attempt+=1;saveState(s);await maybeRetryPause(c,s,checkpoint,"code_reviewer"); }
         s.step="code_review";checkpoint.runningStage="code_reviewer";s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
         // TASK-23: snapshot the tree at the start of EVERY code review, so
@@ -12368,6 +14248,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         // previous revision's review snapshot. Missing snapshot (older
         // mission, hand-deleted) falls back to today's whole-phase review.
         // Never guess.
+        const speckitPhaseKey=speckitPhaseFeedbackKey(s.phaseIndex);
         const prevReviewKey=`${phaseBaselineKey}-review-r${checkpoint.revision-1}`;
         const fixChunks=(checkpoint.revision>1&&hasBaseline(repo,prevReviewKey))
           ? scopedDeltaChunks(repo,prevReviewKey) : null;
@@ -12411,16 +14292,21 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         const cReview=s.verdictOnlyTurns?.[contScopeReview]
           ? {...c, policy: {...c.policy, free_model_turns_cap: 5, caps: {...c.policy?.caps, code_reviewer: {...c.policy?.caps?.code_reviewer, max_turns: 5}}}}
           : c;
-        const reviewRef=reviewTaskRef(s,speckitPhaseFeedbackKey(s.phaseIndex),phaseTasks,reviewIds,checkpoint.revision,!!fixChunks);
+        const openFindingsForReview=loadReviewOpenFindings(s,speckitPhaseKey);
+        const reviewFeedback=openFindingsForReview.length?formatReviewOpenFindingsBrief(openFindingsForReview):feedback;
+        const reviewRef=roleHandoffRef(reviewTaskRef(s,speckitPhaseFeedbackKey(s.phaseIndex),phaseTasks,reviewIds,checkpoint.revision,!!fixChunks),"code_reviewer");
         const reviewDeadEnds=readRolloverDeadEnds(s, `task:speckit:phase-${s.phaseIndex}:code_reviewer`);
         const reviewHandoffNote=readHandoffNote(missionIdentity, reviewRef);
         const reviewDeadEndsText=reviewDeadEnds.length?`Prior dead ends (continuation context — do not retry blindly):\n${reviewDeadEnds.map((d)=>`- Generation ${d.generation} (${d.reason} ${d.used}/${d.limit}): ${d.tail}`).join("\n")}`:"";
         const reviewHandoffNoteText=readOnlyContinuationNote(reviewHandoffNote,repo,missionIdentity,reviewRef,"reviewer");
+        const unchangedDigest=unchangedReviewWorkDigests.get(contScopeReview)||"";
+        const unchangedDigestText=unchangedDigest?`Capped previous session work digest (files already checked / commands run — do not repeat them):\n${unchangedDigest}\n\n`:"";
         const scratchNote=unexpectedNewFilesReviewNote(phaseTasks.map((t)=>`${t.text||""} ${t.file||""}`).join("\n"));
         const phaseReviewPassNotes=phaseCodeReviewPassNotesText(s);
         const rv=await review("code_reviewer",
-          `${reviewPrompt}\n\n${scratchNote?`${scratchNote}\n\n`:""}${reviewDeadEndsText}\n\n${reviewHandoffNoteText}\n\n${operatorPhaseNoteLine(s)?`${operatorPhaseNoteLine(s)}\n\n`:""}${phaseReviewPassNotes?`${phaseReviewPassNotes}\n\n`:""}${CODE_REVIEWER_TARGETED_TESTS_LINE}\n\n${CODE_REVIEWER_BROWSER_LINE}\n\n${NETWORK_GATED_TEST_LINE}\n\n${reviewBudget.note}\n${readOnlyHandoffNoteReminder({mission: missionIdentity, ref: reviewRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
-          cReview,s,feedback,phaseRequirements,reviewRef,reviewBudget.timeoutMs,true,codeReviewScopeKey("speckit-phase",s.phaseIndex));
+          `${reviewPrompt}\n\n${scratchNote?`${scratchNote}\n\n`:""}${reviewDeadEndsText}\n\n${reviewHandoffNoteText}\n\n${unchangedDigestText}${operatorPhaseNoteLine(s)?`${operatorPhaseNoteLine(s)}\n\n`:""}${phaseReviewPassNotes?`${phaseReviewPassNotes}\n\n`:""}${CODE_REVIEWER_TARGETED_TESTS_LINE}\n\n${CODE_REVIEWER_BROWSER_LINE}\n\n${NETWORK_GATED_TEST_LINE}\n\n${reviewBudget.note}\n${readOnlyHandoffNoteReminder({mission: missionIdentity, ref: reviewRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
+          cReview,s,reviewFeedback,phaseRequirements,reviewRef,reviewBudget.timeoutMs,true,codeReviewScopeKey("speckit-phase",s.phaseIndex),
+          null);
         noteRoleDeadlineOutcome(s,"code_reviewer",rv,reviewBudget.derived);
         lastReview=rv;
         if(rv.policyViolation){
@@ -12462,36 +14348,40 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           // this decision, before the next generation is consumed.
           maybeApplyPendingContinuationReset(s,contScope);
           stopIfBriefExceedsCap({result: rv, subject: "SpecKit code review", role: "code_reviewer", contScope, s, c, checkpoint, mission: missionIdentity, taskRef: reviewRef, step: "speckit_task_not_converging"});
-          const cont=consumeContinuation(s,c.policy,contScope,resolvePerRoleLimits('code_reviewer',c.policy).continuationAllowance);
-          recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:rv.capped.type,used:rv.capped.used,limit:rv.capped.limit,tail:deadEndTail({summary:`Code review capped (${rv.capped.type} ${rv.capped.used}/${rv.capped.limit}); phase diff unchanged — re-review the same phase diff.`,files:[]})});
-          s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
-          if(!cont.allowed){
-            // Backlog #27: record the continuation for bare `ap reset`, and
-            // end with the exact resume command.
-            recordLastContinuation(s,{contScope,taskId:null,missionName:missionIdentity,taskRef:reviewRef});
-            const lastNote=readHandoffNote(missionIdentity, reviewRef);
-            if(noteSaysOnlyGateLeft(lastNote) && !s.verdictOnlyTurns?.[contScope]){
-              s.verdictOnlyTurns=s.verdictOnlyTurns||{};
-              s.verdictOnlyTurns[contScope]="VERDICT-ONLY TURN: the previous sessions found no open findings and only the gate was left. Do not run any tests or the gate. Decide PASS or FAIL now from the hand-off note and the delta; the orchestrator runs the gate.";
-              saveState(s);
-              console.log(`SpecKit code review capped but handoff note reports only gate left; continuing for one verdict-only turn.`);
-              continue;
-            }
-            // Dead ends are deliberately NOT cleared here: per-phase keys
-            // cannot leak into another phase, and the entries are the
-            // post-mortem record of why this phase never converged.
-            s.phase="escalated";s.step="speckit_task_not_converging";
-            s.phaseCheckpointError={code:"CONTINUATION_EXHAUSTED",evidence:{role:"code_reviewer",used:cont.used,limit:cont.limit,breach:rv.capped.type}};
+          const capOutcome=handleCodeReviewerUnchangedNote({s,rv,prevNote:reviewHandoffNote||"",nextNote:readHandoffNote(missionIdentity,reviewRef)||"",contScope,subject:"SpecKit code review",step:"speckit_task_not_converging",checkpoint});
+          if(!capOutcome?.convertedToFail){
+            const cont=consumeContinuation(s,c.policy,contScope,resolvePerRoleLimits('code_reviewer',c.policy).continuationAllowance);
+            recordRolloverDeadEnd(s,contScope,{generation:cont.used,reason:rv.capped.type,used:rv.capped.used,limit:rv.capped.limit,tail:deadEndTail({summary:`Code review capped (${rv.capped.type} ${rv.capped.used}/${rv.capped.limit}); phase diff unchanged — re-review the same phase diff.`,files:[]})});
             s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
-             die(`SpecKit code review did not converge after ${cont.used} capped generations (${rv.capped.type} cap ${rv.capped.used}/${rv.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
+            if(!cont.allowed){
+              // Backlog #27: record the continuation for bare `ap reset`, and
+              // end with the exact resume command.
+              recordLastContinuation(s,{contScope,taskId:null,missionName:missionIdentity,taskRef:reviewRef});
+              const lastNote=readHandoffNote(missionIdentity, reviewRef);
+              if(noteSaysOnlyGateLeft(lastNote) && !s.verdictOnlyTurns?.[contScope]){
+                s.verdictOnlyTurns=s.verdictOnlyTurns||{};
+                s.verdictOnlyTurns[contScope]="VERDICT-ONLY TURN: the previous sessions found no open findings and only the gate was left. Do not run any tests or the gate. Decide PASS or FAIL now from the hand-off note and the delta; the orchestrator runs the gate.";
+                saveState(s);
+                console.log(`SpecKit code review capped but handoff note reports only gate left; continuing for one verdict-only turn.`);
+                continue;
+              }
+              // Dead ends are deliberately NOT cleared here: per-phase keys
+              // cannot leak into another phase, and the entries are the
+              // post-mortem record of why this phase never converged.
+              s.phase="escalated";s.step="speckit_task_not_converging";
+              s.phaseCheckpointError={code:"CONTINUATION_EXHAUSTED",evidence:{role:"code_reviewer",used:cont.used,limit:cont.limit,breach:rv.capped.type}};
+              s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+              die(`SpecKit code review did not converge after ${cont.used} capped generations (${rv.capped.type} cap ${rv.capped.used}/${rv.capped.limit}). STOP — human intervention required.\nResume: ap reset --scope ${contScope} then ap run`);
             }
-             console.log(`SpecKit code review hit the ${rv.capped.type} cap (${rv.capped.used}/${rv.capped.limit} ${capUnitLabel(rv.capped.type)}); continuing as session ${cont.used+1} of ${cont.limit+1}.`);
-          continue;
+            console.log(`SpecKit code review hit the ${rv.capped.type} cap (${rv.capped.used}/${rv.capped.limit} ${capUnitLabel(rv.capped.type)}); continuing as session ${cont.used+1} of ${cont.limit+1}.`);
+            continue;
+          }
         }
         // Backlog #59 part (a): the code_reviewer run ended WITHOUT a
         // backstop firing (normal completion, or the voluntary incomplete
         // stop below) — reset the consecutive-firing count.
         clearBackstopFirings(s,`task:speckit:phase-${s.phaseIndex}:code_reviewer`);
+        clearCodeReviewUnchangedNoteState(s,`task:speckit:phase-${s.phaseIndex}:code_reviewer`);
         if(parseIncompleteSignal(rv.review ?? rv)){
           // Mission 031 Phase 5 task 5.3: voluntary early stop (INCOMPLETE
           // decision or non-empty Next section) is a continuation event,
@@ -12523,6 +14413,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             console.log(`SpecKit code review stopped voluntarily as incomplete; continuing as session ${cont.used+1} of ${cont.limit+1}.`);
           continue;
         }
+        clearHandoffNote(missionIdentity, reviewRef);
         if(rv.status==="completed"&&(rv.review?.decision==="PASS"||rv.review?.decision==="FAIL")){
           applyPlanPassNoteMarks(s, rv, {phase:s.phaseIndex+1, allowSkip:false});
           clearContinuationRound(s,`task:speckit:phase-${s.phaseIndex}:code_reviewer`);
@@ -12542,8 +14433,17 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             const toolCommand=toolRefusal.command?` \`${String(toolRefusal.command).slice(0,200)}\``:"";
             const toolExit=toolRefusal.exitCode ?? toolRefusal.status ?? "unknown";
             const refusalFindings=[`Reviewer PASS refused: linked verify/tool result${toolCommand} ${toolReason} (exit ${toolExit}). Re-verify the work after addressing the failure instead of passing.`];
-            feedback=feedbackText(saveReviewFeedback(s,speckitPhaseFeedbackKey(s.phaseIndex),refusalFindings))||"Implementation/code review failed.";
-            recordPhaseFindingTasks(speckitPhaseFeedbackKey(s.phaseIndex),refusalFindings,true);recordCodeReviewRound(s,codeReviewScopeKey("speckit-phase",s.phaseIndex),refusalFindings,rv.review?.previous);
+            const openResult=updateReviewOpenFindings(s,speckitPhaseKey,{newFindings:refusalFindings,previous:rv.review?.previous});
+            const mergedList=openResult.openFindings;
+            feedback=feedbackText(saveReviewFeedback(s,speckitPhaseKey,mergedList.map(f=>f.raw||f.text)))||"Implementation/code review failed.";
+            recordPhaseFindingTasks(speckitPhaseKey,mergedList.map(f=>{
+              if(f.tasks&&f.tasks.length){
+                if(f.raw&&typeof f.raw==="object") return {...f.raw,tasks:f.tasks};
+                return {tasks:f.tasks,problem:f.text};
+              }
+              return f.raw||f.text;
+            }),true);
+            recordCodeReviewRound(s,codeReviewScopeKey("speckit-phase",s.phaseIndex),mergedList.map(f=>f.text),rv.review?.previous);
             {
               const recorded=enforceAttemptFailure(c,s,`speckit:${phase.name}`,lastImpl?[lastImpl,{...rv,failure:failure("IMPLEMENTATION_REJECTED","implementation",true,refusalFindings)}]:[{...rv,failure:failure("IMPLEMENTATION_REJECTED","implementation",true,refusalFindings)}],{ok:true});
               noteBudgetEscalationTrigger(s,c,`speckit:${phase.name}`,recorded.budget);
@@ -12552,20 +14452,60 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             }
             continue;
           }
-          clearCodeReviewHistory(s,codeReviewScopeKey("speckit-phase",s.phaseIndex));const transition=decideTransition(checkpoint,{stage:"code_reviewer",status:"completed",decision:"PASS",runId:rv.sessionId??null,findings:rv.review?.findings??[]});
+          const openFindingsForReview=loadReviewOpenFindings(s,speckitPhaseKey);
+          const listedFindings=openFindingsForReview.length
+            ?openFindingsForReview.slice(0,20).map(f=>f.id?`${f.id}: ${f.text}`:f.text)
+            :(loadReviewFeedback(s,speckitPhaseKey).length
+              ?loadReviewFeedback(s,speckitPhaseKey).slice(0,20)
+              :(feedback&&String(feedback).trim()?[String(feedback).trim()]:[]));
+          const prevCheck=await enforceRereviewPreviousOnPass({rv,listedFindings,c,s,requirements:phaseRequirements,reviewRef});
+          if(prevCheck.action==="policy_violation"){
+            s.phase="escalated";s.step="relay_policy_violation";s.relayPolicyViolation=prevCheck.rv.policyViolation;saveState(s);
+            die(formatRelayPolicyViolation(s.relayPolicyViolation,prevCheck.rv.touchedFiles));
+          }
+          if(prevCheck.action==="fail"){
+            const scopeKey=codeReviewScopeKey("speckit-phase",s.phaseIndex);
+            updateReviewOpenFindings(s,speckitPhaseKey,{newFindings:prevCheck.failFindings,previous:rv.review?.previous});
+            feedback=feedbackText(saveReviewFeedback(s,speckitPhaseKey,prevCheck.failFindings))||"Implementation/code review failed.";
+            recordPhaseFindingTasks(speckitPhaseKey,prevCheck.failFindings,true);
+            recordCodeReviewRound(s,scopeKey,prevCheck.failFindings,prevCheck.previous);
+            noteEscalationTrigger(s,c,"implementer",scopeKey,"code_reviewer",prevCheck.previous);
+            const failResult={...prevCheck.rv,failure:failure("IMPLEMENTATION_REJECTED","implementation",true,prevCheck.failFindings)};
+            const recorded=enforceAttemptFailure(c,s,`speckit:${phase.name}`,lastImpl?[lastImpl,failResult]:[failResult],{ok:true});
+            noteBudgetEscalationTrigger(s,c,`speckit:${phase.name}`,recorded.budget);
+            checkpoint=applyCheckpointTransition(decideTransition(checkpoint,recorded));
+            s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+            continue;
+          }
+          clearReviewOpenFindings(s,speckitPhaseKey);clearCodeReviewHistory(s,codeReviewScopeKey("speckit-phase",s.phaseIndex));const transition=decideTransition(checkpoint,{stage:"code_reviewer",status:"completed",decision:"PASS",runId:rv.sessionId??null,findings:rv.review?.findings??[]});
           checkpoint=applyCheckpointTransition(transition);
           checkpoint.codeReviewer={runId:rv.sessionId??null,decision:"PASS",findings:rv.review?.findings??[]};
+          resetAdapterRetryBudget(s, rv?.adapter, "code_reviewer");
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
           continue;
         }
         if(rv.status==="completed"){
+          resetAdapterRetryBudget(s, rv?.adapter, "code_reviewer");
           // Functional FAIL: the findings feed the Implementer retry, and
           // the stored approval is invalidated via the transition.
-          feedback=feedbackText(saveReviewFeedback(s,speckitPhaseFeedbackKey(s.phaseIndex),rv.review?.findings||[]))||"Implementation/code review failed.";
+          const openResult=updateReviewOpenFindings(s,speckitPhaseKey,{
+            newFindings:rawReviewFindings(rv),
+            previous:rv.review?.previous
+          });
+          const mergedList=openResult.openFindings;
+          feedback=feedbackText(saveReviewFeedback(s,speckitPhaseKey,mergedList.map(f=>f.raw||f.text)))||"Implementation/code review failed.";
           // TASK-20 step 1: record the finding→task map before the transition
           // below wipes roleProgress. The wipe itself is unchanged; TASK-21
           // step 2 replays the unflagged tasks' facts on the retry instead.
-          recordPhaseFindingTasks(speckitPhaseFeedbackKey(s.phaseIndex),rawReviewFindings(rv),true);recordCodeReviewRound(s,codeReviewScopeKey("speckit-phase",s.phaseIndex),rv.review?.findings||[],rv.review?.previous);noteEscalationTrigger(s,c,"implementer",codeReviewScopeKey("speckit-phase",s.phaseIndex),"code_reviewer",rv.review?.previous);
+          recordPhaseFindingTasks(speckitPhaseKey,mergedList.map(f=>{
+            if(f.tasks&&f.tasks.length){
+              if(f.raw&&typeof f.raw==="object") return {...f.raw,tasks:f.tasks};
+              return {tasks:f.tasks,problem:f.text};
+            }
+            return f.raw||f.text;
+          }),true);
+          recordCodeReviewRound(s,codeReviewScopeKey("speckit-phase",s.phaseIndex),mergedList.map(f=>f.text),rv.review?.previous);
+          noteEscalationTrigger(s,c,"implementer",codeReviewScopeKey("speckit-phase",s.phaseIndex),"code_reviewer",rv.review?.previous);
         }
         // Infrastructure interruption or functional rejection: the split is
         // read off enforceAttemptFailure()'s return value — retry only the
@@ -12607,7 +14547,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             g=cached;
             console.log("gate result reused (digest unchanged)");noteGateReused(s,g);
           }else{
-            g=await gates(c,s);
+            g=await gates(c,s,{keepForVerifier:true});
             if(g.ok===true){
               setCachedGateResult(checkpoint,preGateCacheKey,g);
               s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
@@ -12650,15 +14590,16 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         const cVerify=s.verdictOnlyTurns?.[contScopeVerify]
           ? {...c, policy: {...c.policy, free_model_turns_cap: 5, caps: {...c.policy?.caps, verifier: {...c.policy?.caps?.verifier, max_turns: 5}}}}
           : c;
-        const verifyRef=allPhaseTaskRef(phaseTasks);
+        const verifyRef=roleHandoffRef(allPhaseTaskRef(phaseTasks),"verifier");
         const verifyDeadEnds=readRolloverDeadEnds(s, `task:speckit:phase-${s.phaseIndex}:verifier`);
         const verifyHandoffNote=readHandoffNote(missionIdentity, verifyRef);
         const verifyDeadEndsText=verifyDeadEnds.length?`Prior dead ends (continuation context — do not retry blindly):\n${verifyDeadEnds.map((d)=>`- Generation ${d.generation} (${d.reason} ${d.used}/${d.limit}): ${d.tail}`).join("\n")}`:"";
         const verifyHandoffNoteText=readOnlyContinuationNote(verifyHandoffNote,repo,missionIdentity,verifyRef,"verifier");
-        const vv=await relayAsync("verifier",
+        const speckitVerifyDeltaPaths=(()=>{try{return scopedDeltaChunks(repo,phaseBaselineKey,{mission:missionIdentity,declaredPaths}).map((ch)=>ch.path);}catch{return [];}})();
+        const vv=await relayVerifierWithApp(
           `${`Verify this phase after implementation and code review.${gateSection?" The full test suite already ran as the phase gate; review the recorded gate result below — do not re-run it.":""}\nPhase: ${phase.name}\n\nTasks:\n${scope}\n\nScoped implementation delta for THIS PHASE only (pre-existing repository changes made before this mission started, and changes from earlier phases, are excluded — do not evaluate or flag anything outside this delta; an empty delta means this phase made no repository changes):\n${scopedDeltaBeginMarker("PHASE")}\n${speckitBoundedDelta(repo,phaseBaselineKey,"PHASE_REVIEW",{mission:missionIdentity,role:"verifier"})}\n${SCOPED_DELTA_END_MARKER}`}${gateSection?`\n\n${gateSection}`:""}${verifyDurations?`\n\n${verifyDurations}`:""}${heavyNoParallelVerify?`
 \n\n${heavyNoParallelVerify}`:""}\n\n${verifyDeadEndsText}\n\n${verifyHandoffNoteText}\n\n${verifyBudget.note}${browserVerifierNote(phaseTaskFacts)?`\n${browserVerifierNote(phaseTaskFacts)}`:""}\n${verifierRoundLines(s,codeReviewScopeKey("speckit-phase",s.phaseIndex)).join("\n")}\n${readOnlyHandoffNoteReminder({mission: missionIdentity, ref: verifyRef, noteLimit: resolveHandoffNoteMaxChars(c.policy)})}${verdictOnlyLine}`,
-          cVerify,s,{readOnly:true,review:true,requirements:phaseRequirements,taskFacts:phaseTaskFacts,taskRef:verifyRef,timeoutMs:verifyBudget.timeoutMs,capEnabled:true});
+          cVerify,s,{readOnly:true,review:true,requirements:phaseRequirements,taskFacts:phaseTaskFacts,taskRef:verifyRef,timeoutMs:verifyBudget.timeoutMs,capEnabled:true,deltaPaths:speckitVerifyDeltaPaths});
         noteRoleDeadlineOutcome(s,"verifier",vv,verifyBudget.derived);
         {
           // Backlog #91: a red phase gate forces the recorded verdict to FAIL.
@@ -12774,6 +14715,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
             console.log(`SpecKit verification stopped voluntarily as incomplete; continuing as session ${cont.used+1} of ${cont.limit+1}.`);
           continue;
         }
+        clearHandoffNote(missionIdentity, verifyRef);
         if(vv.review){
           const {moved}=moveManualCheckFindings(vv.review);
           if(vv.verdict) moveManualCheckFindings(vv.verdict);
@@ -12794,6 +14736,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         if(vv.status==="completed"&&(vv.review?.decision==="PASS"||vv.review?.decision==="FAIL")){
           clearContinuationRound(s,`task:speckit:phase-${s.phaseIndex}:verifier`);
           deleteCarriedScratch(repo,missionIdentity,verifyRef);
+          resetAdapterRetryBudget(s, vv?.adapter, "verifier");
         }
         if(g.ok&&vv.status==="completed"&&vv.review?.decision==="PASS"){
           { const bn=filterUnrecordedManualChecks(s,phase?.name||String(s.phaseIndex),browserCheckNotes(vv.review)); if(bn.length){ const mdir=missionDir; if(appendManualChecks(mdir,{phaseName:phase?.name||String(s.phaseIndex),notes:bn,at:new Date().toISOString()})) console.log(`Manual UI check recorded in MANUAL-CHECKS.md (${bn.length} note(s)).`); } }
@@ -12825,9 +14768,12 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
           const transition=decideTransition(checkpoint,{stage:"verifier",status:"completed",decision:"PASS",runId:vv.sessionId??null,findings:vv.review?.findings??[]});
           checkpoint=applyCheckpointTransition(transition);
           checkpoint.verifier={runId:vv.sessionId??null,decision:"PASS",findings:vv.review?.findings??[]};
+          resetAdapterRetryBudget(s, vv?.adapter, "verifier");
           s[CHECKPOINT_STATE_KEY]=checkpoint;saveState(s);
+          try{ cleanAllMissionsBrowserArtifacts(repo); }catch{}
           continue;
         }
+        try{ cleanAllMissionsBrowserArtifacts(repo); }catch{}
         feedback=feedbackText(saveReviewFeedback(s,speckitPhaseFeedbackKey(s.phaseIndex),vv.review?.findings||[]))||(g.ok?"Verification failed.":`Verification gate failed: ${g.command}`);
         // TASK-20 step 1: same record as the review FAIL site. A gate failure
         // with no findings at all lands here as `entries:[]` +
@@ -12887,6 +14833,7 @@ const taskImpl=await relay("implementer",`${promptBuilt.text}${taskRetryFindings
         // TASK-20: the finding→task record is cleared with the findings it
         // describes — a PASS must never leave a FAIL's map readable.
         clearReviewFeedback(s,speckitPhaseFeedbackKey(s.phaseIndex));
+        clearReviewOpenFindings(s,speckitPhaseFeedbackKey(s.phaseIndex));
         clearFindingTasks(s,speckitPhaseFeedbackKey(s.phaseIndex));clearCodeReviewHistory(s,codeReviewScopeKey("speckit-phase",s.phaseIndex));clearVerifierHistory(s,codeReviewScopeKey("speckit-phase",s.phaseIndex));
         clearBudgetEscalation(s,`speckit:${phase.name}`);
         // TASK-23: this phase's per-review snapshots are only ever read by
@@ -13156,6 +15103,11 @@ async function main(){
     // Flags are parsed inside the handler (--note/--yes), so the whole
     // arg list is passed through rather than a pre-joined string.
     const code=rebaseCommand(commandArgs);
+    process.exitCode=code;
+    return code;
+  }
+  if(command==="note"){
+    const code=noteCommand(commandArgs);
     process.exitCode=code;
     return code;
   }

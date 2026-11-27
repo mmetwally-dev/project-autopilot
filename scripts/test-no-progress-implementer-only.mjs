@@ -134,9 +134,16 @@ function check(name, cond, detail) {
   check("wiring: stopOnNoProgress builds its subject via noProgressDisplayLabel",
     /noProgressDisplayLabel\(\{taskId,taskRef,framework\}\)/.test(stopBody));
   const stopCode = stopBody.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+  const escSrc = fs.readFileSync(new URL("./escalation-model.mjs", import.meta.url), "utf8");
+  const fmtStart = escSrc.indexOf("export function formatNoProgressStopMessage(");
+  const fmtBody = fmtStart >= 0 ? escSrc.slice(fmtStart, escSrc.indexOf("\n}", fmtStart) + 2) : "";
+  const fmtCode = fmtBody.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
   check("wiring: stopOnNoProgress never interpolates bare taskId (no task null)",
     !/task \$\{taskId\} changed no file/.test(stopCode) && !/task null/i.test(stopCode)
-    && /die\(`\$\{noProgSubject\} changed no file/.test(stopCode));
+    && /die\(formatNoProgressStopMessage\(\{subject:noProgSubject,/.test(stopCode)
+    && !/\$\{taskId\}/.test(fmtCode) && !/task null/i.test(fmtCode)
+    && [...fmtCode.matchAll(/\$\{subject\} changed no file/g)].length === 2
+    && [...fmtCode.matchAll(/Resume: ap reset --scope \$\{contScope\} then ap run`/g)].length === 2);
   check("wiring: implementer sites unchanged (3 standalone + 3 speckit)",
     count(/stopOnNoProgress\(s,c,\{framework:"standalone",contScope,taskId,missionName:mission,taskRef:taskDisplayRef\(phaseTasks\[taskIndex\],taskIndex\),touchedFiles:taskImpl\.touchedFiles,checkpoint\}\)/g) === 3
     && count(/stopOnNoProgress\(s,c,\{framework:"speckit",contScope,taskId,missionName:missionIdentity,taskRef:taskDisplayRef\(phaseTasks\[taskIndex\],taskIndex\),touchedFiles:taskImpl\.touchedFiles,checkpoint\}\)/g) === 3);

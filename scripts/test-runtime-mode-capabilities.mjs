@@ -22,6 +22,8 @@ import {
 } from "./runtime-mode-capabilities.mjs";
 import {PLATFORM_KINDS} from "./platform-capabilities.mjs";
 
+const AP_TEST_TIMEOUT_FACTOR = (() => { const value = Number(process.env.AP_TEST_TIMEOUT_FACTOR); return Number.isFinite(value) && value > 0 ? value : 1; })();
+
 let failures = 0;
 function check(name, condition, detail) {
   if (!condition) {
@@ -575,7 +577,7 @@ check("classifies generic linux as native-linux", classifyWslKernelEvidence("6.8
     );
     let readyTime = null;
     try {
-      const readyDeadline = Date.now() + 8000;
+      const readyDeadline = Date.now() + Math.ceil(10000 * AP_TEST_TIMEOUT_FACTOR);
       while (!fs.existsSync(readyFile)) {
         if (Date.now() > readyDeadline) break;
         await new Promise(r => setTimeout(r, 50));

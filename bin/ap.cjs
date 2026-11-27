@@ -33,6 +33,7 @@ function usage() {
     '  ap uninstall [--dry-run] [--yes] [--keep-missions] [--repo <path>]   remove Autopilot from this project: deletes .autopilot/ (--keep-missions archives missions/ at the repo root instead); --dry-run previews, --yes skips the y/N',
     '  ap reset [--scope <key>] [--dry-run] [--repo <path>]   bare: clear ALL spent counters; --scope: one key (failure key, continuation scope, standalone-plan-revision, or fallback:<role>; resume after)',
     '  ap rebase [--note "<why>"] [--yes] [--repo <path>]   accept a phase-checkpoint drift after an operator edit (keeps the stage position)',
+    '  ap note "<decision>" [--yes] [--repo <path>]   record a binding operator decision every role brief carries (planner, reviewers, implementer, verifier); works while a run is live; --clear removes them',
     '  ap finding list [--scope <key>] [--repo <path>]   list the open review findings the mission is carrying',
     '  ap finding drop <n> [--scope <key>] [--note "<why>"] [--yes] [--repo <path>]   drop finding number <n> (recorded with the note)',
     '  ap config [--repo <path>] [--role <role>]',
@@ -439,7 +440,52 @@ async function adhocRoute(command, rest) {
   return 0;
 }
 
+function maybeShowUpdateNotice() {
+  try {
+    const {
+      updateCheckDisabled,
+      defaultCachePath,
+      readCache,
+      updateNotice,
+      needsRefresh,
+    } = require(path.join(skillRoot, 'scripts', 'update-check-core.cjs'));
+
+    const disabled = updateCheckDisabled({
+      env: process.env,
+      isTTY: Boolean(process.stderr && process.stderr.isTTY),
+    });
+    if (disabled) return;
+
+    const pkgPath = path.join(skillRoot, 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    const current = pkg && pkg.version;
+    const homedir = require('node:os').homedir();
+    const cachePath = defaultCachePath(process.env, homedir);
+    const cache = readCache(cachePath);
+
+    const notice = updateNotice({ current, cache });
+    if (notice) {
+      console.error(notice);
+    }
+
+    const now = Date.now();
+    if (needsRefresh({ cache, now })) {
+      const updateScript = path.join(skillRoot, 'scripts', 'update-check.mjs');
+      const child = spawn(process.execPath, [updateScript, '--refresh', cachePath], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      if (child && typeof child.unref === 'function') {
+        child.unref();
+      }
+    }
+  } catch {
+    // never break or delay a command
+  }
+}
+
 function main(argv) {
+  maybeShowUpdateNotice();
   const command = argv[0];
   const rest = argv.slice(1);
   if (!command || command === 'help' || command === '--help' || command === '-h') {
@@ -475,6 +521,7 @@ function main(argv) {
   if (command === 'stop') return stopCommand(rest);
   if (command === 'reset') return runScript('scripts/autopilot.mjs', ['reset', ...rest]);
   if (command === 'rebase') return runScript('scripts/autopilot.mjs', ['rebase', ...rest]);
+  if (command === 'note') return runScript('scripts/autopilot.mjs', ['note', ...rest]);
   if (command === 'finding') return runScript('scripts/autopilot.mjs', ['finding', ...rest]);
   if (command === 'run') return runCommand(rest);
   if (command === 'plan-review' || command === 'code-review' || command === 'verify-file') return adhocRoute(command, rest);

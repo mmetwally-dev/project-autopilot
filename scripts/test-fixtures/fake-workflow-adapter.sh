@@ -128,6 +128,12 @@ is_rereview_prompt() {
   printf '%s\n' "$PROMPT" | grep -q 'Re-review the SpecKit gate'
 }
 
+# Backlog sk5: true when this plan_reviewer call is SpecKit's one-shot
+# verdict-only retry after an unusable/missing review sentinel.
+is_verdict_only_retry_prompt() {
+  printf '%s\n' "$PROMPT" | grep -q 'VERDICT-ONLY RETRY for SpecKit gate'
+}
+
 # TASK-14 Phase 3: true when this plan_reviewer call is
 # reviewExistingPlanning()'s validation of already-present planning
 # artifacts (autopilot.mjs's reviewExistingPlanning sends "Validate the
@@ -156,6 +162,30 @@ review_output() {
   finding="$2"
   if [ -n "$finding" ]; then
     printf 'AUTOPILOT_REVIEW={"decision":"%s","findings":["%s"]}\n' "$decision" "$finding"
+  elif [ "$ROLE" = "code_reviewer" ] && [ "$decision" = "PASS" ]; then
+    _PREV_JSON=$(printf '%s\n' "$PROMPT" | awk '
+      /^(FEEDBACK TO ADDRESS|Unconfirmed earlier findings):$/ { in_fb=1; out=""; next }
+      in_fb && /^[[:space:]]*$/ { in_fb=0; next }
+      in_fb {
+        line=$0
+        sub(/^[[:space:]]*[0-9]+\.[[:space:]]*/, "", line)
+        sub(/^[[:space:]]+/, "", line)
+        sub(/[[:space:]]+$/, "", line)
+        if (line != "") {
+          gsub(/\\/, "\\\\", line)
+          gsub(/"/, "\\\"", line)
+          gsub(/\t/, "\\t", line)
+          entry = "{\"finding\":\"" line "\",\"status\":\"fixed\"}"
+          out = (out == "" ? entry : out "," entry)
+        }
+      }
+      END { print out }
+    ')
+    if [ -n "$_PREV_JSON" ]; then
+      printf 'AUTOPILOT_REVIEW={"decision":"PASS","findings":[],"previous":[%s]}\n' "$_PREV_JSON"
+    else
+      printf 'AUTOPILOT_REVIEW={"decision":"%s","findings":[]}\n' "$decision"
+    fi
   else
     printf 'AUTOPILOT_REVIEW={"decision":"%s","findings":[]}\n' "$decision"
   fi
@@ -804,6 +834,10 @@ case "$ROLE" in
       review_output FAIL "Phase 1 has no Git-observable deliverable: creating an empty directory is git-invisible, so this phase could never be verified"
     elif scoped_delta_contains_forbidden_marker; then
       review_output FAIL "forbidden baseline marker present in scoped delta"
+    elif [ "$SCENARIO" = "plan_reviewer_hang" ] && [ "$(unfinished_role_runs plan_reviewer)" -le 1 ]; then
+      sleep 45
+      echo "plan_reviewer_hang: hang window elapsed without interruption" >&2
+      exit 124
     elif [ "$SCENARIO" = "speckit_rereview_gate_fail_twice" ] && [ "$(role_result_count plan_reviewer)" -lt 2 ]; then
       # Item 5: the FIRST TWO plan_reviewer results FAIL (the initial gate
       # review and the first post-revision re-review), then the third PASSes.
@@ -949,11 +983,12 @@ case "$ROLE" in
         review_output PASS ""
       fi
     elif [ "$SCENARIO" = "speckit_rereview_output_contract" ]; then
-      # TASK-14 Phase 3 call site 3: initial FAIL once functionally, then
-      # the re-review returns no sentinel at all (output-contract failure)
-      # — passes through unrecorded and escalates unchanged, exactly like
-      # the functional-FAIL shape at this position.
-      if is_rereview_prompt; then
+      # TASK-14 Phase 3 call site 3 + backlog sk5: initial FAIL once
+      # functionally, then the post-revision re-review AND its one-shot
+      # verdict-only retry return no sentinel at all (output-contract
+      # failure) — passes through unrecorded and escalates with the
+      # no-verdict message without starting a second revision.
+      if is_rereview_prompt || is_verdict_only_retry_prompt; then
         echo "cat: docs/does-not-exist-yet.md: No such file or directory"
         echo "I looked at everything and it looks fine."
       elif ! has_feedback; then
@@ -1525,10 +1560,9 @@ case "$ROLE" in
         review_output PASS ""
       fi
     elif [ "$SCENARIO" = "carry_forward_phasewide" ] && phase_review_call; then
-      # TASK-22: FAIL once with one finding tagged ["T2"] and one explicitly
-      # phase-wide (`tasks: []`), hang once, then PASS. The phase-wide
-      # finding forces allMapped false, so the retry must re-launch all 3
-      # tasks despite the T2 tag.
+      # TASK-22 / Backlog #8: FAIL once with one finding tagged ["T2"] and one
+      # explicitly phase-wide (`tasks: []`), hang once, then PASS. The phase-wide
+      # finding routes to T1, T2 gets the tagged finding, and T3 is carried.
       if ! prior_role_result code_reviewer; then
         printf 'AUTOPILOT_REVIEW={"decision":"FAIL","findings":[{"tasks":["T2"],"location":"docs/carry-forward.md","problem":"Task T2 ships a stub with no implementation.","correction":"Replace the stub with the real implementation."},{"tasks":[],"location":"docs/carry-forward.md","problem":"The cross-task wiring is inconsistent.","correction":"Make the wiring consistent across tasks."}]}\n'
       elif [ "$(unfinished_role_runs code_reviewer)" -le 1 ]; then

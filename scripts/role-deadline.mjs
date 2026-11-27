@@ -63,7 +63,23 @@ export function deriveRoleDeadline({samplesMs, relayTimeoutMs, floorMs, override
   };
 }
 
-function samplesFromDir(runsDir, role, io) {
+// A run is a final (whole-mission) review when its recorded taskRef is
+// `final-review-<site>` (set by runFinalReviewSessions). Old run records
+// carry the same taskRef, so no new marker is needed.
+export function isFinalReviewRun(status) {
+  return typeof status?.taskRef === "string" && status.taskRef.startsWith("final-review-");
+}
+
+// scope: "phase" drops final-review runs (a long whole-mission review must not
+// inflate per-phase deadlines); undefined keeps every run (legacy behaviour).
+// The final (whole-mission) review is never measured: its sessions vary from
+// short verdict-only turns to full reads, so any sample would under-size the
+// next big session. Deadline = policy override if set, else relay_timeout_ms.
+export function deriveFinalReviewDeadline({relayTimeoutMs, override} = {}) {
+  return deriveRoleDeadline({samplesMs: [], relayTimeoutMs, override});
+}
+
+function samplesFromDir(runsDir, role, io, scope) {
   let names;
   try { names = io.listDirs(runsDir); }
   catch { return []; }
@@ -79,6 +95,7 @@ function samplesFromDir(runsDir, role, io) {
     if (status?.role !== role) continue;
     if (status?.status !== "completed") continue;
     if (status?.exit_code !== 0) continue;
+    if (scope === "phase" && isFinalReviewRun(status)) continue;
     // Timed-out, capped, failed and interrupted runs are never samples:
     // only a clean completed run with a positive measured duration counts.
     const ms = status?.duration_ms;
@@ -95,12 +112,12 @@ function samplesFromDir(runsDir, role, io) {
 // never inflates a simple one. The fallback set is merged newest-first by
 // started_at; with no samples anywhere the result is [], which derives the
 // default (today's behaviour).
-export function collectRoleSamples(runsDir, role, fallbackDirs = [], io = defaultIo) {
-  const primary = samplesFromDir(runsDir, role, io);
+export function collectRoleSamples(runsDir, role, fallbackDirs = [], io = defaultIo, scope = undefined) {
+  const primary = samplesFromDir(runsDir, role, io, scope);
   if (primary.length) return primary.map((sample) => sample.ms);
   const merged = [];
   for (const dir of Array.isArray(fallbackDirs) ? fallbackDirs : []) {
-    merged.push(...samplesFromDir(dir, role, io));
+    merged.push(...samplesFromDir(dir, role, io, scope));
   }
   merged.sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
   return merged.map((sample) => sample.ms);

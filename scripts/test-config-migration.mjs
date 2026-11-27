@@ -65,7 +65,7 @@ const impl = reread.caps?.implementer;
 if(!impl) throw new Error('caps.implementer missing');
 if(impl.max_turns!==40 || impl.max_tokens!==200000 || impl.extra_sessions!==5 || impl.wrap_up_at_tokens!==180000) throw new Error(`implementer caps not backfilled from code defaults: ${JSON.stringify(impl)}`);
 if(reread.advanced.handoff_max_chars!==2000 || reread.advanced.handoff_note_max_chars!==4000) throw new Error(`handoff chars not mapped: ${JSON.stringify(reread.advanced)}`);
-if(reread.retries.no_progress_sessions!==2 || reread.retries.final_review_fix_rounds!==2) throw new Error(`retries not mapped: ${JSON.stringify(reread.retries)}`);
+if(reread.retries.no_progress_sessions!==2 || reread.retries.final_review_fix_rounds!==3) throw new Error(`retries not mapped: ${JSON.stringify(reread.retries)}`);
 
 // Per-role caps backfilled for review roles with defaults from per-task-budget.mjs.
 const caps = reread.caps;
@@ -209,16 +209,16 @@ if (turnsKept.caps.verifier.max_turns !== 18) throw new Error(`operator verifier
 // Mission 051 Phase 1 task 1.1: final_review_fix_rounds backfilled when
 // absent, operator values never overwritten, migrated configs validate, and
 // the resolver maps unset to the default.
-if (FINAL_REVIEW_FIX_ROUNDS_DEFAULT !== 2) throw new Error(`FINAL_REVIEW_FIX_ROUNDS_DEFAULT !== 2: ${FINAL_REVIEW_FIX_ROUNDS_DEFAULT}`);
+if (FINAL_REVIEW_FIX_ROUNDS_DEFAULT !== 3) throw new Error(`FINAL_REVIEW_FIX_ROUNDS_DEFAULT !== 3: ${FINAL_REVIEW_FIX_ROUNDS_DEFAULT}`);
 const fixBackfill = runtimeOf({schema_version:'1.4',project:{planning_framework:'gsd'},roles:{},policy:{}});
-if (fixBackfill.policy.final_review_fix_rounds !== 2) throw new Error(`final_review_fix_rounds not backfilled to 2: ${fixBackfill.policy.final_review_fix_rounds}`);
+if (fixBackfill.policy.final_review_fix_rounds !== 3) throw new Error(`final_review_fix_rounds not backfilled to 3: ${fixBackfill.policy.final_review_fix_rounds}`);
 const fixKept = runtimeOf({schema_version:'1.4',project:{planning_framework:'gsd'},roles:{},policy:{final_review_fix_rounds:4}});
 if (fixKept.policy.final_review_fix_rounds !== 4) throw new Error(`operator final_review_fix_rounds overwritten: ${fixKept.policy.final_review_fix_rounds}`);
 const fixInvalid = validatePolicyConfig({final_review_fix_rounds: 0});
 if (fixInvalid.valid) throw new Error('invalid final_review_fix_rounds 0 accepted');
-if (resolveFinalReviewFixRounds({}) !== 2) throw new Error('unset config must resolve to 2');
+if (resolveFinalReviewFixRounds({}) !== 3) throw new Error('unset config must resolve to 3');
 if (resolveFinalReviewFixRounds({final_review_fix_rounds: 4}) !== 4) throw new Error('operator value 4 not preserved by resolver');
-if (resolveFinalReviewFixRounds({final_review_fix_rounds: 0}) !== 2) throw new Error('invalid value must degrade to 2');
+if (resolveFinalReviewFixRounds({final_review_fix_rounds: 0}) !== 3) throw new Error('invalid value must degrade to 3');
 validateMigrated({schema_version:'1.4',project:{planning_framework:'gsd'},roles:{},policy:{}}, 'fix-rounds backfill');
 
 // Operator policy.per_task_timeout_ms and policy.fallback_retry_primary_minutes

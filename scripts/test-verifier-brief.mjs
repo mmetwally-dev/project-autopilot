@@ -237,7 +237,7 @@ console.log("PASS gate/scratch contract preserved");
   const hiddenName = `__${"playwright"}Runtime`;
   assert.ok(!autoSrc.includes(hiddenName), "production autopilot source still references a hidden runtime property");
   assert.ok(!briefSrc.includes(hiddenName), "production brief source still references a hidden runtime property");
-  assert.match(autoSrc, /verifierTask\(task,promptRepository,promptScratch,c,playwrightRuntimeForVerifier\)/);
+  assert.match(autoSrc, /verifierTask\(task,promptRepository,promptScratch,c,playwrightRuntimeForVerifier,Boolean\(phaseApp\)\)/);
   console.log("PASS no hidden runtime property remains in production sources and the explicit call shape is present");
 }
 

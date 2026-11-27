@@ -89,6 +89,86 @@ export function speckitTaskDenylistFindings(tasksMdText, denylist) {
   }
   return findings;
 }
+// Task-TEXT full-suite scan. The verify denylist only looks at `verify:`, so a
+// task whose text tells the implementer to run the whole suite (or the gate
+// commands) slipped through. Matcher (simple on purpose): a task text is
+// flagged when it contains (a) test-all.mjs or a gates.commands entry
+// (fullSuiteEntries), or (b) a bare whole-suite runner with no file/pattern
+// argument: `npm test`, `npm run test`, `pnpm test`, `yarn test`,
+// `npx vitest run` / `vitest run`, `npx jest` / `jest`. Arguments are read up to
+// the next backtick / ; , ( ) or period+space; a path-like token (contains `/`,
+// `.test.`/`.spec.`, or a source-file extension) or -t/--grep/--testNamePattern
+// makes the command file-scoped, so it is not flagged. `npm run test:unit`
+// (script variants) is not flagged. A match preceded by "do not" / "don't" /
+// "never" in the same clause is skipped (same rule as the SpecKit scan).
+export function fullSuiteTaskEntries(c) {
+  return [FULL_SUITE_VERIFY_ENTRY, ...normalizeList(c?.gates?.commands)].filter((x, i, a) => a.indexOf(x) === i);
+}
+
+const BARE_RUNNER_RE = /(?<![\w./-])(?:npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test|(?:npx\s+)?vitest\s+run|(?:npx\s+)?jest)(?![\w:.-])/g;
+
+function bareRunnerIsScoped(rest) {
+  const args = String(rest || "").split(/[`;,()\n]|\.\s|\.$/)[0];
+  return args.split(/\s+/).some((t) => /[\/]|\.(?:test|spec)\b|\.[cm]?[jt]sx?$/.test(t) || /^(?:-t|--grep|--testNamePattern)(?:=|$)/.test(t));
+}
+
+function fullSuiteTextMatches(text, fullSuiteEntries) {
+  const t = String(text || "");
+  const hits = [];
+  for (const entry of normalizeList(fullSuiteEntries)) {
+    const idx = t.indexOf(entry);
+    if (idx !== -1 && !isNegatedProse(t.slice(0, idx))) hits.push(entry);
+  }
+  for (const m of t.matchAll(BARE_RUNNER_RE)) {
+    if (isNegatedProse(t.slice(0, m.index))) continue;
+    if (bareRunnerIsScoped(t.slice(m.index + m[0].length))) continue;
+    if (!hits.includes(m[0])) hits.push(m[0]);
+  }
+  return hits;
+}
+
+function fullSuiteTextCorrection(hit) {
+  return `a task must not run the full suite or the gate commands ("${hit}") in its text or verify: the orchestrator runs them as a gate after code review; a task that records the full-suite result must take the numbers from the gate's own output, or be dropped`;
+}
+
+// Standalone / GSD: `entries` are {taskLabel, text[, file]} (text = the task
+// line before `verify:`, or the GSD task action).
+export function taskTextFullSuiteFindings(entries, fullSuiteEntries) {
+  const findings = [];
+  for (const e of entries || []) {
+    for (const hit of fullSuiteTextMatches(e?.text, fullSuiteEntries)) {
+      findings.push({
+        location: `${e.file || "TASKS.md"} ${e.taskLabel}`,
+        problem: `task text runs the full suite or a gate command "${hit}" (${String(e.text).slice(0, 200)})`,
+        correction: fullSuiteTextCorrection(hit),
+      });
+    }
+  }
+  return findings;
+}
+
+// SpecKit tasks.md: text = the checklist line before `; verify:`.
+export function speckitTaskTextFullSuiteFindings(tasksMdText, fullSuiteEntries) {
+  if (!tasksMdText) return [];
+  const findings = [];
+  let heading = "";
+  for (const rawLine of String(tasksMdText).split(/\r?\n/)) {
+    const h = rawLine.match(/^\s*#{1,6}\s+(.*\S)\s*$/);
+    if (h) { heading = h[1].trim(); continue; }
+    if (!/^\s*[-*]\s*\[[ xX]\]/.test(rawLine)) continue;
+    const line = rawLine.trim();
+    const text = line.split(/(?:;\s*|\.\s+)verify:/)[0];
+    for (const hit of fullSuiteTextMatches(text, fullSuiteEntries)) {
+      findings.push({
+        location: heading ? `tasks.md "${heading}" ${line.slice(0, 120)}` : `tasks.md ${line.slice(0, 120)}`,
+        problem: `task text runs the full suite or a gate command "${hit}" (${text.slice(0, 200)})`,
+        correction: fullSuiteTextCorrection(hit),
+      });
+    }
+  }
+  return findings;
+}
+
 // Mission 054 task 1.2: plan-time verify-length gate. The recorded verify is
 // re-run verbatim downstream (taskLocalCheck.command is bounded to
 // ROLE_PROGRESS_COMMAND_MAX_CHARS in scripts/phase-stage-checkpoint.mjs),

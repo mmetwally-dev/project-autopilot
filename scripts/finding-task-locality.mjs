@@ -32,6 +32,7 @@ import path from "node:path";
 import {
   normalizeFindingsWithSource,
   loadReviewFeedback,
+  DEFECT_PATTERN_FIX_INSTRUCTION,
 } from "./review-feedback.mjs";
 import {
   handoffNoteCitedExcerpts,
@@ -47,6 +48,8 @@ import {
 import { stableTaskId } from "./role-progress-ids.mjs";
 import { taskDisplayRef } from "./role-progress-prompt.mjs";
 import { sanitizeKeySegment } from "./implementation-baseline.mjs";
+import { prepareTaskInvocation, commitTaskResult } from "./role-progress-commit.mjs";
+import { parseTaskResultContract } from "./task-result-contract.mjs";
 
 export {isManualCheckMarker, splitManualCheckFindings};
 
@@ -58,10 +61,11 @@ export const TASK_OWNERSHIP_STATE_KEY = "taskOwnership";
 const SOURCES = Object.freeze(["declared", "file", "cross-phase", "phase", "none"]);
 
 // Sources that attribute a finding to named tasks. Anything else —
-// `"phase"`, `"none"`, and any future source — fails `allMapped` closed in
+// `"none"` and any future source — fails `allMapped` closed in
 // `affectedTaskIds`, so a finding that is not mapped to a task can never
-// silently narrow the retry to a subset of tasks.
-const MAPPED_SOURCES = Object.freeze(["declared", "file", "cross-phase"]);
+// silently narrow the retry to a subset of tasks. Backlog #8: `"phase"` is
+// mapped because phase-wide findings route to exactly one task.
+const MAPPED_SOURCES = Object.freeze(["declared", "file", "cross-phase", "phase"]);
 
 // "T<index+1>". The index is a 0-based position in the reviewer's task list.
 export function taskLabel(index) {
@@ -129,17 +133,38 @@ function declaredTaskIds(raw, taskIds) {
   return taskIds.filter(id => chosen.has(id)).slice(0, 1);
 }
 
+function taskFilesForId(id, factsByTask, taskOwnership) {
+  const f1 = factsByTask?.[id]?.files;
+  const f2 = taskOwnership?.[id]?.files;
+  const set = new Set();
+  if (Array.isArray(f1)) {
+    for (const f of f1) { const c = comparablePath(f); if (c) set.add(c); }
+  }
+  if (Array.isArray(f2)) {
+    for (const f of f2) { const c = comparablePath(f); if (c) set.add(c); }
+  }
+  return set;
+}
+
+function taskThatChangedFile(file, taskIds, factsByTask, taskOwnership) {
+  if (!file || !Array.isArray(taskIds)) return null;
+  for (const id of taskIds) {
+    const files = taskFilesForId(id, factsByTask, taskOwnership);
+    if (files.has(file)) return id;
+  }
+  return null;
+}
+
 // Resolution step 2 — file. Exact match only: a location that does not name a
 // file some completed task actually owns maps to nothing (step 3), because a
 // wrong attribution is worse than none. When several tasks own the cited file
 // the FIRST in taskIds order owns the finding, exactly like the declared path.
-function fileTaskIds(raw, taskIds, factsByTask) {
+function fileTaskIds(raw, taskIds, factsByTask, taskOwnership) {
   const file = comparablePath(findingLocation(raw));
   if (!file) return [];
   return taskIds.filter(id => {
-    const files = factsByTask?.[id]?.files;
-    if (!Array.isArray(files)) return false;
-    return files.some(owned => comparablePath(owned) === file);
+    const files = taskFilesForId(id, factsByTask, taskOwnership);
+    return files.has(file);
   }).slice(0, 1);
 }
 
@@ -389,8 +414,14 @@ export function rebuildTaskOwnership(state, options = {}) {
   return rebuiltCount;
 }
 
-// Find a unique task outside the current phase that owned the exact cited file.
+// Find a unique task outside the current phase that owned the exact cited file,
+// or when several tasks outside the current phase owned the exact cited file
+// (and none in the current phase), return a synthetic targeted repair owner.
 // Never infers an owner from fuzzy or partial filename matching.
+//
+// NOTE (backlog #8 (c)): A gate failure that is only hook/test timeouts in a
+// file the current phase did not touch is a candidate for the pre-existing/flaky
+// path (re-run that file once on the pre-phase code) before blaming the phase.
 export function findExactFileOwner(location, taskOwnership, currentTaskIds = []) {
   const file = comparablePath(location);
   if (!file) return null;
@@ -399,13 +430,37 @@ export function findExactFileOwner(location, taskOwnership, currentTaskIds = [])
   const matches = [];
   for (const entry of Object.values(ownership)) {
     if (!entry || typeof entry !== "object" || !entry.taskId) continue;
-    if (currentSet.has(entry.taskId)) continue;
     if (Array.isArray(entry.files) && entry.files.some(f => comparablePath(f) === file)) {
+      if (currentSet.has(entry.taskId)) {
+        // An owner exists in the current phase — not a cross-phase repair.
+        return null;
+      }
       matches.push(entry);
     }
   }
   if (matches.length === 1) {
     return matches[0];
+  }
+  if (matches.length > 1) {
+    // Backlog #8 (b): multiple earlier owners and none in current phase.
+    // Deterministic synthetic repair id: cross-phase-file:<path>. Runs once
+    // per file and provides all owner tasks as context.
+    const sorted = [...matches].sort((a, b) => {
+      const pDiff = (a.phaseIndex ?? 0) - (b.phaseIndex ?? 0);
+      if (pDiff !== 0) return pDiff;
+      return String(a.taskId).localeCompare(String(b.taskId));
+    });
+    const mostRecent = sorted[sorted.length - 1];
+    return {
+      taskId: `cross-phase-file:${file}`,
+      file,
+      synthetic: true,
+      phaseIndex: mostRecent.phaseIndex,
+      phaseNumber: mostRecent.phaseNumber,
+      phaseName: mostRecent.phaseName,
+      ownerTasks: sorted.map(m => m.taskId),
+      allOwners: sorted,
+    };
   }
   return null;
 }
@@ -420,10 +475,10 @@ export function findExactFileOwner(location, taskOwnership, currentTaskIds = [])
 function resolveFinding(raw, taskIds, factsByTask, taskOwnership) {
   const declared = declaredTaskIds(raw, taskIds);
   if (declared.length) return {taskIds: declared, source: "declared"};
-  const byFile = fileTaskIds(raw, taskIds, factsByTask);
+  const byFile = fileTaskIds(raw, taskIds, factsByTask, taskOwnership);
   if (byFile.length) return {taskIds: byFile, source: "file"};
-  if (taskOwnership) {
-    const loc = findingLocation(raw);
+  const loc = findingLocation(raw);
+  if (taskOwnership && loc) {
     const owner = findExactFileOwner(loc, taskOwnership, taskIds);
     if (owner) {
       return {
@@ -433,11 +488,19 @@ function resolveFinding(raw, taskIds, factsByTask, taskOwnership) {
         ownerPhaseIndex: owner.phaseIndex,
         ownerPhaseName: owner.phaseName,
         file: comparablePath(loc),
+        ...(Array.isArray(owner.ownerTasks) ? {ownerTasks: [...owner.ownerTasks]} : {}),
       };
     }
   }
-  if (raw && typeof raw === "object" && !Array.isArray(raw) && Array.isArray(raw.tasks) && raw.tasks.length === 0) {
-    return {taskIds: [], source: "phase"};
+  const isExplicitPhase = raw && typeof raw === "object" && !Array.isArray(raw) && Array.isArray(raw.tasks) && raw.tasks.length === 0;
+  const isUnownedFile = Boolean(loc);
+  if (isExplicitPhase || isUnownedFile) {
+    const preferredId = (loc ? taskThatChangedFile(comparablePath(loc), taskIds, factsByTask, taskOwnership) : null)
+      ?? (taskIds.length ? taskIds[0] : null);
+    return {
+      taskIds: preferredId ? [preferredId] : [],
+      source: "phase",
+    };
   }
   return {taskIds: [], source: "none"};
 }
@@ -498,6 +561,7 @@ export function affectedTaskIds(entries, taskIds) {
             ownerPhaseIndex: entry.ownerPhaseIndex ?? null,
             ownerPhaseName: entry.ownerPhaseName ?? "",
             file: entry.file ?? "",
+            ...(Array.isArray(entry.ownerTasks) ? {ownerTasks: [...entry.ownerTasks]} : {}),
           });
         }
       }
@@ -642,6 +706,7 @@ export function loadFindingTasks(state, key, {phaseTaskDigest} = {}) {
       ...(entry.ownerPhaseIndex != null ? {ownerPhaseIndex: entry.ownerPhaseIndex} : {}),
       ...(entry.ownerPhaseName ? {ownerPhaseName: entry.ownerPhaseName} : {}),
       ...(entry.file ? {file: entry.file} : {}),
+      ...(Array.isArray(entry.ownerTasks) ? {ownerTasks: [...entry.ownerTasks]} : {}),
     })),
     affected: [...slot.affected],
     crossPhase: Array.isArray(slot.crossPhase) ? JSON.parse(JSON.stringify(slot.crossPhase)) : [],
@@ -722,7 +787,8 @@ export function findingsForTask({findings, record, taskId, revision} = {}) {
       if (typeof id !== "string" || !id) continue;
       const index = known.indexOf(id);
       if (index < 0) { labels.push(id); continue; }
-      labels.push(taskLabel(index));
+      const pos = taskLabel(index);
+      labels.push(id === pos ? pos : `${pos} (${id})`);
     }
     return labels.join(", ");
   };
@@ -730,7 +796,7 @@ export function findingsForTask({findings, record, taskId, revision} = {}) {
     const entry = record.entries[i];
     const source = entry && typeof entry === "object" ? entry.source : undefined;
     const taskIds = entry && typeof entry === "object" && Array.isArray(entry.taskIds) ? entry.taskIds : [];
-    if (MAPPED_SOURCES.includes(source)) {
+    if (MAPPED_SOURCES.includes(source) && taskIds.length > 0) {
       if (typeof taskId === "string" && taskId && taskIds.includes(taskId)) own.push(list[i]);
       // Another task owns this finding: it belongs to that task's brief
       // and to nobody else's work. It is kept as read-only context so
@@ -890,14 +956,25 @@ export function markCrossPhaseRepairCompleted(state, key, taskId, {files} = {}) 
   return true;
 }
 
-export function buildCrossPhaseRepairPrompt({owner, findingText, file, taskRef} = {}) {
+export function buildCrossPhaseRepairPrompt({owner, findingText, file, taskRef, ownerTasks} = {}) {
   const fileStr = file ? `File: ${file}\n` : "";
   const taskRefStr = taskRef ? ` [${taskRef}]` : "";
+  const tasks = Array.isArray(ownerTasks) && ownerTasks.length > 0
+    ? ownerTasks
+    : (Array.isArray(owner?.ownerTasks) && owner.ownerTasks.length > 0
+        ? owner.ownerTasks
+        : (owner?.taskId ? [owner.taskId] : []));
+  let regressionIntro;
+  if (tasks.length > 1) {
+    regressionIntro = `A regression was detected in a file owned by earlier tasks: ${tasks.join(", ")}.`;
+  } else {
+    regressionIntro = `A regression was detected in a file owned by earlier task ${owner?.taskId || tasks[0] || "unknown"}.`;
+  }
   return [
     `Cross-phase targeted repair${taskRefStr}:`,
-    `A regression was detected in a file owned by earlier task ${owner?.taskId || "unknown"}.`,
+    regressionIntro,
     fileStr,
-    `Reviewer feedback from the previous attempt that MUST be addressed — fix this finding in the cited file:`,
+    `Reviewer feedback from the previous attempt that MUST be addressed — fix this finding in the cited file (${DEFECT_PATTERN_FIX_INSTRUCTION}):`,
     findingText || "Fix the reported regression.",
   ].filter(Boolean).join("\n\n");
 }
@@ -936,10 +1013,11 @@ export async function executePendingCrossPhaseRepairs({
       .filter(Boolean)
       .join("\n");
     const repairPrompt = buildCrossPhaseRepairPrompt({
-      owner: repairOwnership || {taskId: repair.taskId},
+      owner: repairOwnership || {taskId: repair.taskId, ownerTasks: repair.ownerTasks},
       findingText: repairFindingsText || feedback,
       file: repair.file,
       taskRef: repairRef,
+      ownerTasks: repair.ownerTasks,
     });
     const repairImpl = await relay("implementer", repairPrompt, config, state, {
       resume: false,
@@ -969,6 +1047,21 @@ export async function executePendingCrossPhaseRepairs({
         files: [...new Set([...(repairOwnership.files || []), ...touched])],
         summary: repairOwnership.summary,
       });
+    } else if (Array.isArray(repair.ownerTasks) && repair.ownerTasks.length > 0) {
+      for (const ownerId of repair.ownerTasks) {
+        const o = ownership[ownerId];
+        if (o) {
+          recordTaskOwnership(state, {
+            taskId: ownerId,
+            phaseIndex: o.phaseIndex,
+            phaseNumber: o.phaseNumber,
+            phaseName: o.phaseName,
+            taskText: o.taskText,
+            files: [...new Set([...(o.files || []), ...touched])],
+            summary: o.summary,
+          });
+        }
+      }
     }
     if (typeof saveState === "function") {
       saveState(state);
@@ -1060,4 +1153,252 @@ export function fixPassBriefExcerpts(findings, readFile, options = {}) {
   return excerpts
     ? `${excerpts}\n${FIX_PASS_EDIT_FIRST_INSTRUCTION}`
     : FIX_PASS_EDIT_FIRST_INSTRUCTION;
+}
+
+// ── Backlog rv #3: Combined overlap re-verify session ───────────────────────
+// When a code-review fix revision would re-run >=2 tasks ONLY for reason
+// "overlap" (no own/phase-wide/unlinked findings, not local-check-failed),
+// group them into ONE combined re-verify session instead of launching one
+// implementer session per task. A single overlap task keeps today's
+// single-session path. Scanning stops at any affected / local-check-failed /
+// finding-bearing / skipped task so roleProgress's strict sequential cursor
+// is never violated; intervening carry:true tasks are carried in-order inside
+// `span` and trailing carry:true tasks are trimmed for normal loop handling.
+export function collectOverlapReverifyBatch({
+  phaseTaskIds,
+  startIndex,
+  findingRecord,
+  taskFindings,
+  progress,
+  revision,
+  phaseTaskDigest,
+  skipTaskIds = null,
+} = {}) {
+  const empty = {eligible: false, overlapTasks: [], span: [], fixingTaskIds: [], changedFiles: []};
+  if (!Array.isArray(phaseTaskIds) || !Number.isInteger(startIndex) || startIndex < 0 || startIndex >= phaseTaskIds.length) {
+    return empty;
+  }
+  if (!findingRecord || !Array.isArray(taskFindings) || taskFindings.length === 0) {
+    return empty;
+  }
+  const overlapTasks = [];
+  const span = [];
+  for (let i = startIndex; i < phaseTaskIds.length; i += 1) {
+    const tid = phaseTaskIds[i];
+    if (skipTaskIds && skipTaskIds.has(tid)) break;
+    const d = carryDecision({
+      record: findingRecord,
+      taskId: tid,
+      progress,
+      revision,
+      phaseTaskDigest,
+    });
+    if (d.carry) {
+      span.push({kind: "carry", taskId: tid, taskIndex: i, decision: d});
+      continue;
+    }
+    if (d.reason === "overlap" && d.overlap) {
+      const grouped = findingsForTask({
+        findings: taskFindings,
+        record: findingRecord,
+        taskId: tid,
+        revision,
+      });
+      if (!grouped.fallback && grouped.own.length === 0 && grouped.phaseWide.length === 0 && grouped.unlinked.length === 0) {
+        const entry = {kind: "overlap", taskId: tid, taskIndex: i, decision: d, grouped};
+        overlapTasks.push(entry);
+        span.push(entry);
+        continue;
+      }
+      break;
+    }
+    break;
+  }
+  while (span.length > 0 && span[span.length - 1].kind === "carry") {
+    span.pop();
+  }
+  if (overlapTasks.length < 2) {
+    return {eligible: false, overlapTasks, span: [], fixingTaskIds: [], changedFiles: []};
+  }
+  const fixingTaskIds = [];
+  const changedFiles = [];
+  const seenFiles = new Set();
+  for (const entry of overlapTasks) {
+    for (const fid of (entry.decision?.overlap?.taskIds || [])) {
+      if (!fixingTaskIds.includes(fid)) fixingTaskIds.push(fid);
+    }
+    for (const file of (entry.decision?.overlap?.files || [])) {
+      const norm = comparablePath(file) || file;
+      if (norm && !seenFiles.has(norm)) {
+        seenFiles.add(norm);
+        changedFiles.push(file);
+      }
+    }
+  }
+  return {eligible: true, overlapTasks, span, fixingTaskIds, changedFiles};
+}
+
+export function buildCombinedOverlapReverifyBrief({
+  framework = "standalone",
+  phaseNumber = 1,
+  phaseName = "",
+  phaseTotal = null,
+  phaseBriefPath = "",
+  phaseTaskIds = [],
+  phaseTasks = [],
+  overlapTasks = [],
+  fixingTaskIds = [],
+  changedFiles = [],
+  handledBlock = "",
+  earlierCodeRounds = "",
+  handoffNotePath = "",
+  anchoredTestsNote = "",
+  operatorNote = "",
+  resumeNote = "",
+  autoRejectNote = "",
+} = {}) {
+  const fixLabels = (fixingTaskIds || []).map((id) => {
+    const idx = Array.isArray(phaseTaskIds) ? phaseTaskIds.indexOf(id) : -1;
+    if (idx < 0) return id;
+    const pos = taskLabel(idx);
+    return id === pos ? pos : `${pos} (${id})`;
+  }).join(", ");
+  const filesList = (changedFiles || []).join(", ");
+  const taskLines = (overlapTasks || []).map((entry) => {
+    const idx = entry.taskIndex;
+    const task = Array.isArray(phaseTasks) ? phaseTasks[idx] : null;
+    const ref = taskDisplayRef(task, idx);
+    const text = typeof task?.text === "string" && task.text.trim() ? task.text.trim() : entry.taskId;
+    return `- ${ref} (${entry.taskId}): ${text}`;
+  }).join("\n");
+
+  const header = `Combined overlap re-verify (${framework} — Phase ${phaseNumber}${phaseTotal ? ` of ${phaseTotal}` : ""}${phaseName ? `: ${phaseName}` : ""})`;
+  const sections = [
+    header,
+    phaseBriefPath ? `Phase brief: ${phaseBriefPath}` : "",
+    `The fix for task(s) ${fixLabels || "(prior fix)"} changed file(s) owned by ${overlapTasks.length} tasks: ${filesList}. That fix is already done — do not redo it. Re-verify each listed task; repair only what the change broke; do not redo the fix.`,
+    `Tasks to re-verify (each with its acceptance criteria / verify line):\n${taskLines}`,
+    handoffNotePath ? `Shared hand-off note path (if needed): ${handoffNotePath}` : "",
+    handledBlock || "",
+    earlierCodeRounds || "",
+    anchoredTestsNote || "",
+    operatorNote || "",
+    resumeNote ? resumeNote.trim() : "",
+    autoRejectNote ? autoRejectNote.trim() : "",
+    `When done, end your final response line with a single-line JSON sentinel:\nAUTOPILOT_TASK_RESULT={"summary":"<brief summary of re-verification and any repairs>","taskLocalCheck":{"command":"<verify command run>","status":"passed","exitCode":0,"summary":"<check result>"}}`,
+  ].filter(Boolean);
+  return sections.join("\n\n");
+}
+
+export async function runCombinedOverlapReverify({
+  overlapBatch,
+  initialPrep,
+  progress,
+  runId,
+  revision,
+  phaseTaskDigest,
+  phaseTaskIds,
+  invokeRelay,
+  computeAttributedFiles,
+  onCommitTask,
+  onCarryTask,
+} = {}) {
+  const relayResult = await invokeRelay();
+  if (relayResult?.policyViolation) {
+    return {ok: false, policyViolation: relayResult.policyViolation, relayResult};
+  }
+  if (!relayResult || relayResult.capped || relayResult.status !== "completed") {
+    const reason = relayResult?.capped
+      ? `capped:${relayResult.capped.type || "cap"}`
+      : `status:${relayResult?.status || "unknown"}`;
+    return {ok: false, fallback: true, reason, relayResult};
+  }
+  const parsed = parseTaskResultContract(relayResult.finalMessage ?? "");
+  if (!parsed.ok) {
+    return {ok: false, fallback: true, reason: `parse:${parsed.code || "invalid"}`, relayResult};
+  }
+  if (parsed.taskLocalCheck?.status === "attempted") {
+    return {ok: false, fallback: true, reason: "voluntary_stop", relayResult};
+  }
+  let attributed = [];
+  if (typeof computeAttributedFiles === "function") {
+    attributed = computeAttributedFiles();
+  }
+  let currentProgress = progress;
+  for (let sIdx = 0; sIdx < overlapBatch.span.length; sIdx += 1) {
+    const item = overlapBatch.span[sIdx];
+    let itemPrep;
+    if (sIdx === 0 && initialPrep?.ok) {
+      itemPrep = initialPrep;
+      currentProgress = initialPrep.progress;
+    } else {
+      itemPrep = prepareTaskInvocation({
+        progress: currentProgress,
+        role: "implementer",
+        runId,
+        revision,
+        phaseTaskDigest,
+        taskId: item.taskId,
+        taskIds: phaseTaskIds,
+      });
+      if (!itemPrep.ok) {
+        return {ok: false, commitError: itemPrep, stage: "prepare", taskId: item.taskId, relayResult};
+      }
+      currentProgress = itemPrep.progress;
+    }
+    if (item.kind === "carry") {
+      const normalized = {
+        role: "implementer",
+        runId,
+        revision,
+        phaseTaskDigest,
+        taskId: item.taskId,
+        status: "completed",
+        facts: item.decision.facts,
+      };
+      const committed = commitTaskResult({
+        progress: currentProgress,
+        expected: itemPrep.expected,
+        result: normalized,
+      });
+      if (!committed.ok) {
+        return {ok: false, commitError: committed, stage: "carry", taskId: item.taskId, relayResult};
+      }
+      currentProgress = committed.progress;
+      if (typeof onCarryTask === "function") onCarryTask(item, normalized, currentProgress);
+    } else {
+      const normalized = {
+        role: "implementer",
+        runId,
+        revision,
+        phaseTaskDigest,
+        taskId: item.taskId,
+        status: "completed",
+        facts: {
+          summary: parsed.summary,
+          files: attributed,
+          taskLocalCheck: parsed.taskLocalCheck,
+          ...(parsed.trailingNote ? {trailingNote: parsed.trailingNote} : {}),
+        },
+      };
+      const committed = commitTaskResult({
+        progress: currentProgress,
+        expected: itemPrep.expected,
+        result: normalized,
+      });
+      if (!committed.ok) {
+        return {ok: false, commitError: committed, stage: "commit", taskId: item.taskId, relayResult};
+      }
+      currentProgress = committed.progress;
+      if (typeof onCommitTask === "function") onCommitTask(item, normalized, attributed, currentProgress);
+    }
+  }
+  return {
+    ok: true,
+    progress: currentProgress,
+    relayResult,
+    parsed,
+    attributed,
+    coveredTaskIds: overlapBatch.overlapTasks.map((t) => t.taskId),
+  };
 }

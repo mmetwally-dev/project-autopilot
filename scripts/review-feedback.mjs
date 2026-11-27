@@ -36,6 +36,27 @@ export const MAX_FINDING_CHARS = 1000;
 export const MAX_CORRECTION_CHARS = 700;
 export const MAX_TOTAL_CHARS = 10000;
 
+// Backlog #9 / #8: defect pattern instruction for reviewer/verifier and implementer
+export const REVIEW_DEFECT_PATTERN_INSTRUCTION =
+  "When you find a defect, search the phase's changed files for the same pattern and list EVERY location as its own finding in this verdict; if the defect is a weak rule in a check (such as an arbitrary size, length, or file-type limit that lets bad input through), report the root flaw and every boundary of it in ONE finding with the correction for the whole rule rather than one edge case per round";
+export const DEFECT_PATTERN_REVIEW_INSTRUCTION = REVIEW_DEFECT_PATTERN_INSTRUCTION;
+
+export const DEFECT_PATTERN_FIX_INSTRUCTION =
+  "fix this pattern everywhere it occurs in the phase's files, not only at the cited line, and fix the underlying rule rather than adding another limit that only covers the named case";
+export const IMPLEMENTER_DEFECT_PATTERN_INSTRUCTION = DEFECT_PATTERN_FIX_INSTRUCTION;
+
+// Backlog #11: root-flaw rule and matching fix rule for plan/spec reviews
+export {
+  PLAN_REVIEW_DEFECT_PATTERN_INSTRUCTION,
+  PLAN_REVIEW_ROOT_FLAW_INSTRUCTION,
+  DEFECT_PATTERN_PLAN_REVIEW_INSTRUCTION,
+  PLAN_REVIEW_DEFECT_PATTERN_FIX_INSTRUCTION,
+  PLAN_DEFECT_PATTERN_FIX_INSTRUCTION,
+  PLAN_REVIEW_ROOT_FLAW_FIX_INSTRUCTION,
+  PLANNER_DEFECT_PATTERN_FIX_INSTRUCTION,
+  PLANNER_ROOT_FLAW_FIX_INSTRUCTION,
+} from "./plan-review-rounds.mjs";
+
 const STATE_KEY = "reviewFeedback";
 
 // A finding may arrive as a plain string (the long-standing contract) or as
@@ -215,3 +236,309 @@ function clampFindingString(collapsed) {
   }
   return clampWithCorrection(head, correction);
 }
+
+// ── Backlog item #4: Still-open findings tracking across review rounds ──
+
+export const OPEN_FINDINGS_STATE_KEY = "reviewOpenFindings";
+
+function normMatchText(text) {
+  return String(text || "")
+    .replace(/^\s*\d+\.\s+/, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[.。]+$/g, "")
+    .trim();
+}
+
+function matchTokens(text) {
+  return normMatchText(text)
+    .split(/[^a-z0-9_./:-]+/)
+    .filter(t => t.length >= 3 || t.includes("/") || t.includes(".") || t.includes("_"));
+}
+
+function sameOrOverlappingFinding(listedText, prevText, allowTokenOverlap = false) {
+  const a = normMatchText(listedText);
+  const b = normMatchText(prevText);
+  if (!a || !b) return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+  if (!allowTokenOverlap) return false;
+  const ta = new Set(matchTokens(listedText));
+  const tb = matchTokens(prevText);
+  if (!ta.size || !tb.length) return false;
+  let shared = 0;
+  for (const t of tb) if (ta.has(t)) shared++;
+  const needed = tb.length === 1 ? 1 : Math.max(2, Math.ceil(tb.length * 0.5));
+  return shared >= needed;
+}
+
+function normalizePreviousEntries(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const text = String(entry.finding ?? entry.problem ?? entry.text ?? "").replace(/\s+/g, " ").trim().slice(0, 500);
+    const st = String(entry.status ?? "").toLowerCase().replace(/[\s-]+/g, "_");
+    const status = st === "fixed"
+      ? "fixed"
+      : (st === "not_fixed" || st === "notfixed" || st === "unfixed")
+        ? "not_fixed"
+        : (st === "needs_run" || st === "needsrun")
+          ? "needs_run"
+          : null;
+    if (text && status) out.push({ finding: text, status });
+    if (out.length >= 40) break;
+  }
+  return out;
+}
+
+// Normalized location: problem key used for deduplicating re-raised findings.
+export function normalizeFindingKey(f) {
+  if (!f) return "";
+  if (typeof f === "object" && !Array.isArray(f)) {
+    const loc = String(f.location ?? f.file ?? f.path ?? "").replace(/\s+/g, " ").trim();
+    const text = String(f.text ?? f.problem ?? f.issue ?? f.message ?? f.finding ?? "").replace(/\s+/g, " ").trim();
+    let combined = "";
+    if (loc && text) {
+      combined = text.startsWith(loc) ? text : `${loc}: ${text}`;
+    } else {
+      combined = loc || text;
+    }
+    const s = combined.replace(/\s+/g, " ").trim();
+    const markerIdx = s.indexOf(CORRECTION_MARKER);
+    if (markerIdx !== -1) {
+      const head = s.slice(0, markerIdx).trim();
+      if (head) return head;
+    }
+    return s;
+  }
+  const s = String(f).replace(/\s+/g, " ").trim();
+  const markerIdx = s.indexOf(CORRECTION_MARKER);
+  if (markerIdx !== -1) {
+    const head = s.slice(0, markerIdx).trim();
+    if (head) return head;
+  }
+  return s;
+}
+
+export function loadReviewOpenFindings(state, key) {
+  const slot = state?.[OPEN_FINDINGS_STATE_KEY]?.[key];
+  if (!Array.isArray(slot)) return [];
+  return slot.filter(e => e && typeof e === "object" && typeof e.id === "string" && typeof e.text === "string");
+}
+
+export function saveReviewOpenFindings(state, key, findings) {
+  if (!state || typeof state !== "object" || !key) return [];
+  if (!Array.isArray(findings) || !findings.length) {
+    clearReviewOpenFindings(state, key);
+    return [];
+  }
+  if (!state[OPEN_FINDINGS_STATE_KEY] || typeof state[OPEN_FINDINGS_STATE_KEY] !== "object") {
+    state[OPEN_FINDINGS_STATE_KEY] = {};
+  }
+  state[OPEN_FINDINGS_STATE_KEY][key] = findings;
+  return findings;
+}
+
+export function clearReviewOpenFindings(state, key) {
+  if (state?.[OPEN_FINDINGS_STATE_KEY] && typeof state[OPEN_FINDINGS_STATE_KEY] === "object") {
+    if (key) delete state[OPEN_FINDINGS_STATE_KEY][key];
+    else delete state[OPEN_FINDINGS_STATE_KEY];
+    if (state[OPEN_FINDINGS_STATE_KEY] && !Object.keys(state[OPEN_FINDINGS_STATE_KEY]).length) {
+      delete state[OPEN_FINDINGS_STATE_KEY];
+    }
+  }
+}
+
+export function clearReviewOpenFindingsByPrefix(state, prefix) {
+  if (!state?.[OPEN_FINDINGS_STATE_KEY] || typeof state[OPEN_FINDINGS_STATE_KEY] !== "object") return;
+  if (!prefix || typeof prefix !== "string") return;
+  for (const k of Object.keys(state[OPEN_FINDINGS_STATE_KEY])) {
+    if (k.startsWith(prefix)) delete state[OPEN_FINDINGS_STATE_KEY][k];
+  }
+  if (state[OPEN_FINDINGS_STATE_KEY] && !Object.keys(state[OPEN_FINDINGS_STATE_KEY]).length) {
+    delete state[OPEN_FINDINGS_STATE_KEY];
+  }
+}
+
+// Deduplication check: match a new finding against an earlier open finding
+// either by explicit finding ID or identical location+problem.
+export function matchFinding(newItem, existing) {
+  if (!newItem || !existing) return false;
+  const newRaw = typeof newItem === "object" && "raw" in newItem ? newItem.raw : newItem;
+  const newText = typeof newItem === "object" && "text" in newItem ? newItem.text : String(newItem || "");
+
+  // 1. Same ID: explicit citation in text or raw
+  const exId = String(existing.id || "").trim();
+  if (exId) {
+    if (typeof newRaw === "object" && newRaw && String(newRaw.id || "").trim().toUpperCase() === exId.toUpperCase()) {
+      return true;
+    }
+    const idRegex = new RegExp(`(^|[\\[\\s(])${exId}([\\]\\s:)-]|$)`, "i");
+    if (idRegex.test(newText) || (typeof newRaw === "string" && idRegex.test(newRaw))) {
+      return true;
+    }
+  }
+
+  // 2. Identical location + problem
+  const kNew = normalizeFindingKey(newRaw || newText);
+  const kEx = normalizeFindingKey(existing.raw || existing.text);
+  if (kNew && kEx && kNew === kEx) {
+    return true;
+  }
+
+  return false;
+}
+
+// Compute the merged open findings after a review round driven by reviewer's "previous" statuses:
+// On FAIL:
+// - dropped if reviewer's "previous" marks it fixed (or needs_run).
+// - carried (kept in openFindings) if marked not_fixed OR missing from "previous".
+// - re-raised duplicates in newFindings deduplicate with existing entries.
+export function updateReviewOpenFindings(state, key, { newFindings = [], previous = [] } = {}) {
+  const earlierOpen = loadReviewOpenFindings(state, key);
+  const normalizedPrev = normalizePreviousEntries(previous);
+
+  const matchedPrevIdx = new Set();
+  const dropped = [];
+  const remainingEarlier = [];
+
+  for (let i = 0; i < earlierOpen.length; i++) {
+    const ef = earlierOpen[i];
+    let matchedEntry = null;
+
+    // Pass 1: exact, ID, location+problem, or substring match
+    for (let j = 0; j < normalizedPrev.length; j++) {
+      if (matchedPrevIdx.has(j)) continue;
+      const prev = normalizedPrev[j];
+      const pText = String(prev.finding || "").trim();
+      const exId = String(ef.id || "").trim();
+      const efText = String(ef.text || "").trim();
+      const efFull = exId ? `${exId}: ${efText}` : efText;
+
+      let hit = false;
+      if (exId) {
+        if (pText.toUpperCase() === exId.toUpperCase()) hit = true;
+        else {
+          const idRegex = new RegExp(`(^|[\\[\\s(])${exId}([\\]\\s:)-]|$)`, "i");
+          if (idRegex.test(pText)) hit = true;
+        }
+      }
+      if (!hit && matchFinding(pText, ef)) hit = true;
+      if (!hit && sameOrOverlappingFinding(efText, pText, false)) hit = true;
+      if (!hit && sameOrOverlappingFinding(efFull, pText, false)) hit = true;
+
+      if (hit) {
+        matchedPrevIdx.add(j);
+        matchedEntry = prev;
+        break;
+      }
+    }
+
+    // Pass 2: token overlap for shortened/paraphrased text
+    if (!matchedEntry) {
+      for (let j = 0; j < normalizedPrev.length; j++) {
+        if (matchedPrevIdx.has(j)) continue;
+        const prev = normalizedPrev[j];
+        const pText = String(prev.finding || "").trim();
+        const efText = String(ef.text || "").trim();
+        const efFull = ef.id ? `${ef.id}: ${efText}` : efText;
+
+        if (sameOrOverlappingFinding(efText, pText, true) || sameOrOverlappingFinding(efFull, pText, true)) {
+          matchedPrevIdx.add(j);
+          matchedEntry = prev;
+          break;
+        }
+      }
+    }
+
+    // Pass 3: positional fallback when lengths match
+    if (!matchedEntry && i < normalizedPrev.length && !matchedPrevIdx.has(i)) {
+      matchedPrevIdx.add(i);
+      matchedEntry = normalizedPrev[i];
+    }
+
+    if (matchedEntry && (matchedEntry.status === "fixed" || matchedEntry.status === "needs_run")) {
+      dropped.push(ef);
+    } else {
+      // not_fixed or missing -> CARRIED
+      remainingEarlier.push(ef);
+    }
+  }
+
+  const normalizedNew = normalizeFindingsWithSource(newFindings);
+
+  let maxSeq = 0;
+  for (const f of earlierOpen) {
+    const m = String(f.id || "").match(/^F(\d+)$/i);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (Number.isFinite(n) && n > maxSeq) maxSeq = n;
+    }
+  }
+
+  const reRaised = [];
+  const newlyAdded = [];
+  const updatedOpen = [...remainingEarlier];
+
+  for (const item of normalizedNew) {
+    const rendered = item.text;
+    const raw = (item.raw && typeof item.raw === "object") ? JSON.parse(JSON.stringify(item.raw)) : item.raw;
+    const matchIdx = updatedOpen.findIndex(ef => matchFinding(item, ef));
+    if (matchIdx !== -1) {
+      const existing = updatedOpen[matchIdx];
+      const tasks = (Array.isArray(raw?.tasks) && raw.tasks.length)
+        ? raw.tasks.map(String)
+        : ((Array.isArray(raw?.taskIds) && raw.taskIds.length) ? raw.taskIds.map(String) : existing.tasks || []);
+      const updated = {
+        ...existing,
+        text: rendered,
+        raw: (raw && typeof raw === "object") ? { ...raw, tasks } : raw,
+        tasks,
+      };
+      updatedOpen[matchIdx] = updated;
+      reRaised.push(updated);
+    } else {
+      maxSeq += 1;
+      const id = `F${maxSeq}`;
+      const tasks = (Array.isArray(raw?.tasks) && raw.tasks.length)
+        ? raw.tasks.map(String)
+        : ((Array.isArray(raw?.taskIds) && raw.taskIds.length) ? raw.taskIds.map(String) : []);
+      const newEntry = {
+        id,
+        text: rendered,
+        raw: (raw && typeof raw === "object") ? { ...raw, tasks } : raw,
+        tasks,
+      };
+      updatedOpen.push(newEntry);
+      newlyAdded.push(newEntry);
+    }
+  }
+
+  saveReviewOpenFindings(state, key, updatedOpen);
+
+  return {
+    openFindings: updatedOpen,
+    dropped,
+    remainingEarlier,
+    reRaised,
+    newlyAdded,
+  };
+}
+
+// Format still-open findings for re-review briefs with short stable IDs.
+// Capped at max (default 20) with a count of the rest to prevent unbounded prompts.
+export function formatReviewOpenFindingsBrief(openFindings, { max = 20 } = {}) {
+  if (!Array.isArray(openFindings) || !openFindings.length) return "";
+  const shown = openFindings.slice(0, max);
+  const remainingCount = openFindings.length - shown.length;
+  const lines = [
+    'Still-open findings from earlier review rounds (for each, verify if fixed; report in "previous" with status "fixed", "not_fixed", or "needs_run"):',
+    ...shown.map(f => `${f.id}: ${f.text}`),
+  ];
+  if (remainingCount > 0) {
+    lines.push(`(...and ${remainingCount} more earlier open finding(s))`);
+  }
+  return lines.join("\n");
+}
+
+

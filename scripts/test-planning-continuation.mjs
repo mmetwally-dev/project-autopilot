@@ -119,11 +119,14 @@ function check(name, cond, detail) {
       [backstopLedgerKey(implScope)]: [{generation: 1}],
     },
     lastContinuation: {key: continuationBudgetKey(plannerScope), scope: plannerScope, taskId: null},
+    // Backlog #9(d): consecutive capped plan_reviewer sessions without a
+    // verdict are planning-round debris too.
+    planReviewCappedNoVerdict: {[reviewerScope]: 1},
     failureBudgets: {"task:standalone:phase-1:T1.1": 2},
   };
   check("clear: spent predicate true before clear", hasSpentPlanningContinuations(s) === true, s);
   const cleared = clearPlanningContinuations(s);
-  check("clear: drops 10 planning entries (2 budgets + 1 noProgress + 2 deadEnds + 2 digests + 2 backstop + lastContinuation)", cleared === 10, cleared);
+  check("clear: drops 11 planning entries (2 budgets + 1 noProgress + 2 deadEnds + 2 digests + 2 backstop + lastContinuation + capped streak)", cleared === 11, cleared);
   check("clear: planning continuationBudgets dropped", !(continuationBudgetKey(plannerScope) in s.continuationBudgets) && !(continuationBudgetKey(reviewerScope) in s.continuationBudgets), s.continuationBudgets);
   check("clear: implementer continuationBudget survives", s.continuationBudgets[continuationBudgetKey(implScope)] === 3, s.continuationBudgets);
   check("clear: planning noProgress dropped, implementer survives", !(continuationBudgetKey(plannerScope) in s.noProgressGenerations) && s.noProgressGenerations[continuationBudgetKey(implScope)] === 2, s.noProgressGenerations);
@@ -131,6 +134,7 @@ function check(name, cond, detail) {
   check("clear: planning digests dropped", Object.keys(s.planningProgressDigests).length === 0, s.planningProgressDigests);
   check("clear: planning backstop ledgers dropped, implementer survives", !(backstopLedgerKey(plannerScope) in s.backstopFirings) && !(backstopLedgerKey(reviewerScope) in s.backstopFirings) && Array.isArray(s.backstopFirings[backstopLedgerKey(implScope)]), s.backstopFirings);
   check("clear: planning lastContinuation dropped", s.lastContinuation === undefined, s.lastContinuation);
+  check("clear: plan_reviewer capped-without-verdict streak dropped", !(reviewerScope in s.planReviewCappedNoVerdict), s.planReviewCappedNoVerdict);
   check("clear: failureBudgets untouched", s.failureBudgets["task:standalone:phase-1:T1.1"] === 2, s.failureBudgets);
   check("clear: spent predicate false after clear", hasSpentPlanningContinuations(s) === false, s);
   check("clear: second clear drops nothing", clearPlanningContinuations(s) === 0, null);

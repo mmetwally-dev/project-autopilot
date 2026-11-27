@@ -573,6 +573,9 @@ export function readObservedEvents(repo) {
       status: data.status ?? null,
       startedAt: data.startedAt,
       finishedAt: data.finishedAt,
+      // Backlog #8: a capped role's resumed note-writing turn is its own run
+      // dir (status.json note "wrap-up"); generation counts must exclude it.
+      wrapUp: (() => { try { return JSON.parse(fs.readFileSync(path.join(path.dirname(file), "status.json"), "utf8")).note === "wrap-up"; } catch { return false; } })(),
       file
     };
   });

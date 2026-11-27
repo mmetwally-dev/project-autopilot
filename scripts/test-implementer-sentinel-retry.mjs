@@ -132,7 +132,7 @@ function speckitSentinelTasksFile(repo) {
 // ══════════════════════════════════════════════════════════════════════
 // 2. Recovers: T1 omits the sentinel once, the relaunch prints it.
 // Exactly 3 launches (T1, T1 again, T2); the relaunch carries resumeNote;
-// the adapter budget shows one implementer use; the mission completes with
+// the adapter budget is reset after success; the mission completes with
 // no escalation (hence no *_task_result_invalid step was ever set).
 // ══════════════════════════════════════════════════════════════════════
 async function runRecoverCase(label, framework, scenario) {
@@ -172,8 +172,10 @@ async function runRecoverCase(label, framework, scenario) {
 
     const state = readState(repo);
     const budgetKey = "adapterRetryBudget:adapter:cursor:implementer";
-    check(`${tag}: one adapterRetryBudget use for the implementer scope`,
-      state.failureBudgets?.[budgetKey] === 1, state.failureBudgets);
+    const t1Launches = launched.filter((id) => id === launched[0]).length;
+    check(`${tag}: adapterRetryBudget reset after implementer success (T1 launched twice)`,
+      !state.failureBudgets?.[budgetKey] && t1Launches === 2,
+      {failureBudgets: state.failureBudgets, t1Launches});
     check(`${tag}: no escalation and no task_result_invalid step was ever set`,
       state.phase !== "escalated" && !/task_result_invalid/.test(state.step ?? ""), {phase: state.phase, step: state.step});
   } finally {

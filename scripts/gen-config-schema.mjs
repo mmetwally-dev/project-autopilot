@@ -75,6 +75,7 @@ const DESCRIPTIONS = {
   "roles.free_models": "The free-model fallback pool.",
   "roles.free_models.auto_fallback": "When the effective model is free and the configured fallbacks are used up, try another free model from the same CLI (true) or not (false).",
   "roles.free_models.max_turns": "Most turns a role running a free model may use; 0 turns this extra cap off, and at the limit the run is cut and may continue in a new session.",
+  "roles.free_models.exclude": "Free models the automatic fallback must never use, as \"adapter/model\" strings with \"*\" wildcards (for example \"opencode/beam-free\"); empty means none excluded.",
 
   caps: "Per-role turn, token and session caps plus the mission token backstop.",
   "caps.planner": "Caps for the planner role.",
@@ -88,8 +89,10 @@ const DESCRIPTIONS = {
   "caps.*.max_turns": "Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
   "caps.*.max_tokens": "Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue.",
   "caps.*.extra_sessions": "Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap.",
-  "caps.*.wrap_up_at_tokens": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
+  "caps.*.wrap_up_at_tokens": "Token count at which this role must wrap up: at the limit the session is stopped and resumed for one short turn that writes the hand-off note (skipped when the note is fresh; Autopilot writes a fallback note if the session cannot be resumed or the turn fails).",
+  "caps.plan_reviewer.first_round_reasoning": "Optional reasoning/effort level for the plan_reviewer on the first full review round of a gate (e.g. \"high\"); null or unset uses the role's normal reasoning.",
   "caps.mission_token_backstop": "Cumulative raw tokens (input, cached input and output) allowed across one task; when exceeded the role wraps up and continues in a new backstop session, and two firings in a row stop the task with BACKSTOP_CONSECUTIVE_FIRINGS.",
+  "caps.final_review_max_turns": "Most model turns the final (whole-mission) code review may use in one session; null (default) uses 2x caps.code_reviewer.max_turns.",
 
   retries: "How many times each stage may retry or revise before it stops and asks you.",
   "retries.plan_revisions": "Plan-review escalation point, not a revision count. In standalone, 0 escalates at the first plan-review FAIL without a Planner revision and it runs one fewer revision than the number (the number is one higher than the revisions run), so 1 behaves like 0; SpecKit runs at most one revision per gate for any value above 0; GSD planning still treats 0 or an absent value as 8; an absent value uses the built-in default of 8.",
@@ -107,8 +110,8 @@ const DESCRIPTIONS = {
   "time_limits.role_timeout_minutes": "Per-role session time limits in minutes, keyed by role name (for example verifier); past a role's limit that role call is stopped.",
   "time_limits.role_timeout_minutes.default": "Time limit in minutes for one implementer task; past the limit the implementer call is stopped.",
   "time_limits.role_timeout_minutes.verifier": "Session time limit for the verifier role, in minutes; past the limit the verifier call is stopped.",
-  "time_limits.call_backstop_minutes": "Hard wall-clock backstop for one role call, in minutes (not a mission limit); a call that runs past it is stopped. The old name mission_timeout_minutes is still read and migrated.",
-  "time_limits.role_timeout_floor_minutes": "Lowest session limit that measured run times may produce, in minutes; null or 0 uses the built-in 10-minute floor.",
+  "time_limits.call_backstop_minutes": "Hard wall-clock backstop for one role call, in minutes (not a mission limit); a call that runs past it is stopped. The final (whole-mission) review always gets this limit; it is not measured from per-phase reviews. The old name mission_timeout_minutes is still read and migrated.",
+  "time_limits.role_timeout_floor_minutes": "Lowest session limit that measured run times may produce for per-phase reviews and verifiers, in minutes; null or 0 uses the built-in 10-minute floor.",
   "time_limits.silent_run_minutes": "Minutes without any output before an active run is treated as hung and stopped; 0 turns this watchdog off.",
   "time_limits.no_first_output_minutes": "Minutes a new session may run without producing any output before it is stopped; 0 turns this check off.",
   "time_limits.read_only_max_silence_minutes": "Maximum minutes a read-only role may stay silent even while a tool runs before it is stopped; 0 turns this cap off.",
@@ -116,7 +119,7 @@ const DESCRIPTIONS = {
 
   workflow: "Which review and approval stages run, and how work is committed.",
   "workflow.plan_review": "Run the GSD plan-review stage before implementation (true) or skip it (false); only GSD reads this setting. (GSD is not yet reviewed in this version).",
-  "workflow.plan_review_rounds_converge": "Make the first plan-review round review the whole plan and later rounds check only the requested fixes (true), or re-review the whole plan every round (false); default true. Applies to standalone and SpecKit planning; GSD uses its own plan-review settings. The legacy name plan_review_convergence is still read and migrated.",
+  "workflow.plan_review_rounds_converge": "Make the first plan-review round review the whole plan and later rounds check only the requested fixes (true), or re-review the whole plan every round (false); default true. When true, a PASS from a fix-only round gets one fresh full confirmation review; if that fails, later rounds run as full reviews that also re-check previous findings, so their PASS is accepted without another confirmation. Applies to standalone and SpecKit planning; GSD uses its own plan-review settings. The legacy name plan_review_convergence is still read and migrated.",
   "workflow.standalone_spec": "Standalone only, off by default: set true to add a spec stage for big features — the planner first reads the related code and writes SPEC.md (user stories, numbered FR-### requirements, success criteria) and CODEMAP.md (code map), reviewed until they pass; then PLAN.md and TASKS.md, where every task cites the FRs it covers and the plan fails review while any FR has no task; the mission-final code review checks every FR. Costs more planning tokens; set false for small requests to keep the cheaper plan-only path. Default false.",
   "workflow.gsd_planning_review": "Use the GSD planning-review stages (true) or skip them (false). (GSD is not yet reviewed in this version).",
   "workflow.spec_review": "Intended to run a spec review stage before planning. Controlled by your SpecKit workflow.yml — add or remove the step there; this setting has no effect.",
@@ -139,6 +142,17 @@ const DESCRIPTIONS = {
   "tests.not_run_in_missions[].reason": "Plain reason the files were excluded, for example server not reachable on 127.0.0.1:3000 or missing environment variable DATABASE_URL.",
   "tests.not_run_in_missions[].command": "Exact command that runs these files by hand after the mission.",
   "tests.not_run_in_missions_original_command": "The full test command setup ran before excluding not_run_in_missions files; empty when no files were excluded.",
+  "tests.app_server": "Optional app/dev server the gate starts before the gate commands and always stops afterwards; off while start_command is empty. Gate commands then see APP_BASE_URL (and PORT). The server, the gate commands and the verifier's browser command share one isolated network namespace (loopback only); the server is kept for the verifier run of the same phase and stopped afterwards.",
+  "tests.app_server.start_command": "Command that starts the server, run through sh in its own process group; {port} is replaced by the chosen port, for example npx next dev --webpack -p {port} -H 127.0.0.1. Empty = no server.",
+  "tests.app_server.cwd": "Repository-relative folder the start command runs in; empty = the repository root.",
+  "tests.app_server.port": "auto picks a free port for every gate run; or a fixed port number.",
+  "tests.app_server.ready_url": "Path requested until the server answers with an HTTP status below 500, for example /login.",
+  "tests.app_server.warmup_urls": "Paths requested once after the server is ready (dev servers compile each page on first request, which can take a minute).",
+  "tests.app_server.ready_timeout_ms": "How long to wait for the server to become ready, in milliseconds; on timeout the gate fails with the server output.",
+  "tests.app_server.env_file": "Repository-relative env file (for example apps/web/.env.local) whose values go to the server process and the verifier's ap-browser-check wrapper only (the verifier brief lists only variable names); its values never reach briefs, logs, state or reports.",
+  "tests.app_server.allow_hosts": "Host names the server and the verifier's browser need on the outside network (for example the project's Supabase and PowerSync domains). Empty = no outside network at all. When set, the server runs on the host network (per-host filtering is not possible without root) while gate commands and the verifier's browser stay in the closed namespace: they reach the server through a unix-socket bridge, and the browser reaches only allow_hosts on port 443 through an allowlisting HTTP CONNECT proxy on the host (every other host or port is refused with 403 and logged).",
+  "tests.app_server.credential_vars": "Environment variable names from env_file/env exposed to the verifier's ap-browser-check script and listed in the verifier brief. Empty = names starting with E2E_ or TEST_ and ending with EMAIL, USER, USERNAME or PASSWORD. Only these credential values are injected into the browser script env; other secrets remain server-only and are never exposed (all secrets are still masked in output).",
+  "tests.app_server.env": "Extra fixed environment variables for the server process only (name: value); use test values, never production secrets.",
   "tests.require_reviewer": "Intended to require a reviewer verdict before a phase passes. Fixed in this version; changing it has no effect.",
   "tests.browser": "Browser capability used for verification: native (the agent's own browser), playwright or both.",
   "tests.require_browser": "How browser capabilities are required for the verifier: always adds them to every call; when-task-requires and never add them only when the task itself needs a browser.",
@@ -150,6 +164,7 @@ const DESCRIPTIONS = {
   "safety.allow_git_commit": "Setting this true is rejected; Autopilot never commits, so keep it false.",
   "safety.allow_git_push": "Setting this true is rejected; Autopilot never pushes, so keep it false.",
   "safety.allow_destructive_operations": "Setting this true is rejected; destructive operations stay blocked, so keep it false.",
+  "safety.allow_docker": "Opt-in: mount /var/run/docker.sock and the docker/supabase CLI binaries into the agent sandbox. WARNING: access to the Docker socket is root-equivalent access to this machine; enable only for projects that need a local database stack.",
   "safety.stop_on_sandbox_violation": "Setting this false is rejected; a sandbox or relay violation always stops the mission, so keep it true.",
   "safety.block_git_in_roles": "Blocks git commit and push inside role sessions. Always on — cannot be turned off; changing it has no effect.",
   "safety.check_read_only_roles": "Checks that read-only roles changed no file by comparing before and after snapshots. Always on — cannot be turned off; changing it has no effect.",
@@ -192,6 +207,9 @@ const DESCRIPTIONS = {
   "advanced.handoff_note_max_chars": "Maximum characters in a hand-off note; longer text is cut, and values below 1000 are rejected.",
   "advanced.handoff_wrapup_tokens": "Token count at which a role is told to wrap up its hand-off; it must be below the implementer token cap.",
   "advanced.fallback_retry_primary_minutes": "Minutes to wait before retrying the primary model after a fallback took over; 0 uses the built-in 60-minute wait.",
+  "advanced.rate_limit_wait_max_minutes": "Maximum minutes to wait for a provider rate-limit reset before escalating; 0 disables waiting and escalates immediately; defaults to 60.",
+  "advanced.network_wait_minutes": "Maximum minutes to wait with backoff when the network is unavailable before escalating; 0 disables waiting and escalates immediately; defaults to 60.",
+  "advanced.daily_reset_time": "Local time of day (HH:MM) when providers reset daily free quota limits; defaults to '03:00'.",
   "advanced.checkpoint_after_task": "Intended to write a checkpoint after each task. Fixed in this version; changing it has no effect.",
   "advanced.checkpoint_after_phase": "Intended to write a checkpoint after each phase. Fixed in this version; changing it has no effect.",
   "advanced.capabilities": "Project-level capability defaults and denials.",
@@ -252,6 +270,8 @@ export const ENUMS = {
 // Numeric lower bounds documented in the shipped schema and enforced by
 // config-validation.mjs.
 export const MINIMUMS = {
+  "tests.app_server.port": 1,
+  "tests.app_server.ready_timeout_ms": 1000,
   "roles.free_models.max_turns": 0,
   "caps.task_size_target_turns": 1,
   "caps.max_phase_tasks": 1,
@@ -261,6 +281,7 @@ export const MINIMUMS = {
   "caps.*.extra_sessions": 0,
   "caps.*.wrap_up_at_tokens": 1,
   "caps.mission_token_backstop": 1,
+  "caps.final_review_max_turns": 1,
   "retries.plan_revisions": 0,
   "retries.spec_revisions": 0,
   "retries.implementation": 0,
@@ -287,9 +308,14 @@ export const MINIMUMS = {
   "advanced.handoff_note_max_chars": HANDOFF_NOTE_MIN_CHARS,
   "advanced.handoff_wrapup_tokens": 1,
   "advanced.fallback_retry_primary_minutes": 0,
+  "advanced.rate_limit_wait_max_minutes": 0,
+  "advanced.network_wait_minutes": 0,
 };
 
 const NULLABLE_TYPES = {
+  "tests.app_server.port": ["string", "integer"],
+  "caps.plan_reviewer.first_round_reasoning": ["string", "null"],
+  "caps.final_review_max_turns": ["integer", "null"],
   "time_limits.role_timeout_minutes.default": ["number", "null"],
   "time_limits.role_timeout_minutes.verifier": ["number", "null"],
   "time_limits.call_backstop_minutes": ["number", "null"],
@@ -416,6 +442,10 @@ function buildSchema(value, path) {
     if (path === ROLE_REQUIREMENTS_PATH) {
       schema.patternProperties[ROLE_REQUIREMENTS_PATTERN] = {type: "array", items: {type: "string"}};
     }
+    if (path === "tests.app_server.env") {
+      // Free-form name -> value map that stays closed: only valid variable names.
+      schema.patternProperties["^[A-Za-z_][A-Za-z0-9_]*$"] = {type: "string"};
+    }
     if (path === "time_limits.role_timeout_minutes") {
       schema.type = ["object", "number", "null"];
       schema.minimum = minimumFor(path);
@@ -455,8 +485,13 @@ export function buildConfigSchema() {
   for (const role of ESCALATION_MODEL_ROLES) {
     properties.roles.properties[role].properties.escalation_model = escalationModelSchema();
   }
-  // Schema-only keys: not in DEFAULTS, so they stay out of config.example.json.
+  // Schema-only keys: not in DEFAULTS, so setup/fill omit unset optional keys.
   // Unset (null) means never asked; setup/config asks the operator once.
+  properties.caps.properties.plan_reviewer.properties.first_round_reasoning = {
+    type: ["string", "null"],
+    description: descriptionFor("caps.plan_reviewer.first_round_reasoning"),
+    default: null,
+  };
   properties.tests.properties.e2e = {type: ["string", "null"], description: descriptionFor("tests.e2e"), default: null, enum: [...enumFor("tests.e2e"), null]};
   properties.tests.properties.e2e_setup_pending = {type: "boolean", description: descriptionFor("tests.e2e_setup_pending"), default: false};
   return {

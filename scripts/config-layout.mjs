@@ -87,6 +87,7 @@ export const DEFAULTS = {
     free_models: {
       auto_fallback: true,
       max_turns: FREE_MODEL_TURNS_CAP_DEFAULT,
+      exclude: [],
     },
   },
   caps: {
@@ -124,6 +125,7 @@ export const DEFAULTS = {
       wrap_up_at_tokens: PER_ROLE_WRAPUP_TOKENS_DEFAULT.verifier,
     },
     mission_token_backstop: BACKSTOP_RAW_TOKENS_DEFAULT,
+    final_review_max_turns: null,
   },
   retries: {
     plan_revisions: 8,
@@ -135,7 +137,7 @@ export const DEFAULTS = {
     infrastructure: 3,
     no_progress_sessions: NO_PROGRESS_GENERATIONS_DEFAULT,
     extra_sessions_per_task: CONTINUATION_ALLOWANCE_DEFAULT,
-    escalate_after_not_fixed: 2,
+    escalate_after_not_fixed: 3,
   },
   time_limits: {
     role_timeout_minutes: {default: PER_TASK_TIMEOUT_DEFAULT_MS / MINUTE_MS, verifier: 180},
@@ -172,6 +174,20 @@ export const DEFAULTS = {
     // with the reason and the exact command to run them by hand.
     not_run_in_missions: [],
     not_run_in_missions_original_command: "",
+    // Backlog #3: off while start_command is empty. The gate starts this
+    // server before the gate commands and always stops it afterwards.
+    app_server: {
+      start_command: "",
+      cwd: "",
+      port: "auto",
+      ready_url: "/",
+      warmup_urls: [],
+      ready_timeout_ms: 180000,
+      env_file: "",
+      env: {},
+      allow_hosts: [],
+      credential_vars: [],
+    },
     require_reviewer: true,
     browser: "native",
     require_browser: "when-task-requires",
@@ -181,6 +197,7 @@ export const DEFAULTS = {
     allow_git_commit: false,
     allow_git_push: false,
     allow_destructive_operations: false,
+    allow_docker: false,
     stop_on_sandbox_violation: true,
     block_git_in_roles: true,
     check_read_only_roles: true,
@@ -227,6 +244,9 @@ export const DEFAULTS = {
     handoff_note_max_chars: HANDOFF_NOTE_MAX_CHARS_DEFAULT,
     handoff_wrapup_tokens: HANDOFF_WRAPUP_TOKENS_DEFAULT,
     fallback_retry_primary_minutes: FALLBACK_RETRY_PRIMARY_MINUTES,
+    rate_limit_wait_max_minutes: 60,
+    network_wait_minutes: 60,
+    daily_reset_time: "03:00",
     checkpoint_after_task: true,
     checkpoint_after_phase: true,
     capabilities: {
@@ -394,6 +414,7 @@ const GATES_MAP = [
   ["offline_test_tools", "offline_test_tools"],
   ["not_run_in_missions", "not_run_in_missions"],
   ["not_run_in_missions_original_command", "not_run_in_missions_original_command"],
+  ["app_server", "app_server"],
   ["require_reviewer", "require_reviewer"],
 ];
 
@@ -544,10 +565,12 @@ export function toRuntimeConfig(layout = {}) {
     if (isObject(layout.roles.free_models)) {
       if (has(layout.roles.free_models, "max_turns")) policy.free_model_turns_cap = layout.roles.free_models.max_turns;
       if (has(layout.roles.free_models, "auto_fallback")) out.freeModelAutoFallback = layout.roles.free_models.auto_fallback;
+      if (has(layout.roles.free_models, "exclude")) out.freeModelExclude = Array.isArray(layout.roles.free_models.exclude) ? [...layout.roles.free_models.exclude] : [];
     }
   }
   // Legacy fallback: top-level freeModelAutoFallback and policy.free_model_turns_cap
   if (!has(layout.roles?.free_models || {}, "auto_fallback") && has(layout, "freeModelAutoFallback")) out.freeModelAutoFallback = layout.freeModelAutoFallback;
+  if (!has(layout.roles?.free_models || {}, "exclude") && Array.isArray(layout.freeModelExclude)) out.freeModelExclude = [...layout.freeModelExclude];
   if (!has(layout.roles?.free_models || {}, "max_turns") && has(legacyPolicy, "free_model_turns_cap")) policy.free_model_turns_cap = legacyPolicy.free_model_turns_cap;
 
   const caps = isObject(layout.caps) ? layout.caps : {};
@@ -580,6 +603,10 @@ export function toRuntimeConfig(layout = {}) {
     // DEFAULTS entry (mission 096 PLAN.md:108,113-115 — behaviour must not change).
     if (has(roleCaps, "backstop_raw_tokens")) entry.backstop_raw_tokens = roleCaps.backstop_raw_tokens;
     else if (has(legacyRoleCaps, "backstop_raw_tokens")) entry.backstop_raw_tokens = legacyRoleCaps.backstop_raw_tokens;
+    if (role === "plan_reviewer") {
+      if (has(roleCaps, "first_round_reasoning")) entry.first_round_reasoning = roleCaps.first_round_reasoning;
+      else if (has(legacyRoleCaps, "first_round_reasoning")) entry.first_round_reasoning = legacyRoleCaps.first_round_reasoning;
+    }
     if (Object.keys(entry).length) runtimeCaps[role] = entry;
   }
   if (Object.keys(runtimeCaps).length) policy.caps = runtimeCaps;
@@ -604,6 +631,8 @@ export function toRuntimeConfig(layout = {}) {
   else if (has(legacyPolicy, "min_phase_tasks")) policy.min_phase_tasks = legacyPolicy.min_phase_tasks;
   if (has(caps, "mission_token_backstop")) policy.backstop_raw_tokens = caps.mission_token_backstop;
   else if (has(legacyPolicy, "backstop_raw_tokens")) policy.backstop_raw_tokens = legacyPolicy.backstop_raw_tokens;
+  if (has(caps, "final_review_max_turns")) policy.final_review_max_turns = caps.final_review_max_turns;
+  else if (has(legacyPolicy, "final_review_max_turns")) policy.final_review_max_turns = legacyPolicy.final_review_max_turns;
 
   // retries.* -> policy.failure_budgets.* / revisions / continuation / no-progress / fix rounds
   const failureBudgets = {};
@@ -664,6 +693,12 @@ export function toRuntimeConfig(layout = {}) {
   else if (has(legacyPolicy, "handoff_note_max_chars")) policy.handoff_note_max_chars = legacyPolicy.handoff_note_max_chars;
   if (has(advanced, "fallback_retry_primary_minutes")) policy.fallback_retry_primary_minutes = advanced.fallback_retry_primary_minutes;
   else if (has(legacyPolicy, "fallback_retry_primary_minutes")) policy.fallback_retry_primary_minutes = legacyPolicy.fallback_retry_primary_minutes;
+  if (has(advanced, "rate_limit_wait_max_minutes")) policy.rate_limit_wait_max_minutes = advanced.rate_limit_wait_max_minutes;
+  else if (has(legacyPolicy, "rate_limit_wait_max_minutes")) policy.rate_limit_wait_max_minutes = legacyPolicy.rate_limit_wait_max_minutes;
+  if (has(advanced, "network_wait_minutes")) policy.network_wait_minutes = advanced.network_wait_minutes;
+  else if (has(legacyPolicy, "network_wait_minutes")) policy.network_wait_minutes = legacyPolicy.network_wait_minutes;
+  if (has(advanced, "daily_reset_time")) policy.daily_reset_time = advanced.daily_reset_time;
+  else if (has(legacyPolicy, "daily_reset_time")) policy.daily_reset_time = legacyPolicy.daily_reset_time;
   if (has(advanced, "checkpoint_after_task")) policy.checkpoint_after_task = advanced.checkpoint_after_task;
   else if (has(legacyPolicy, "checkpoint_after_task")) policy.checkpoint_after_task = legacyPolicy.checkpoint_after_task;
   if (has(advanced, "checkpoint_after_phase")) policy.checkpoint_after_phase = advanced.checkpoint_after_phase;
@@ -677,18 +712,22 @@ export function toRuntimeConfig(layout = {}) {
   if (has(safety, "stop_on_sandbox_violation")) policy.fail_closed_on_relay_violation = safety.stop_on_sandbox_violation;
   else if (has(legacyPolicy, "fail_closed_on_relay_violation")) policy.fail_closed_on_relay_violation = legacyPolicy.fail_closed_on_relay_violation;
 
+  // safety.allow_docker -> policy.allow_docker (also preserved in runtimeSafety below)
+  if (has(safety, "allow_docker")) policy.allow_docker = safety.allow_docker;
+  else if (has(legacyPolicy, "allow_docker")) policy.allow_docker = legacyPolicy.allow_docker;
+
   // Carry unmapped legacy policy keys through (without overriding v4-derived values)
   if (isObject(legacyPolicy)) {
     for (const [key, value] of Object.entries(legacyPolicy)) {
       const knownKeys = new Set([
         "caps", "free_model_turns_cap", "per_task_max_turns", "per_task_max_tokens",
         "continuation_allowance", "handoff_wrapup_tokens", "handoff_max_chars",
-        "handoff_note_max_chars", "fallback_retry_primary_minutes", "task_size_target_turns",
+        "handoff_note_max_chars", "fallback_retry_primary_minutes", "rate_limit_wait_max_minutes", "network_wait_minutes", "daily_reset_time", "task_size_target_turns",
         "max_phase_tasks", "min_phase_tasks",
         "backstop_raw_tokens", "relay_timeout_ms", "role_timeout_ms", "role_deadline_floor_ms",
         "idle_hang_ms", "first_output_ms", "max_silence_ms", "retry_delay_ms",
-        "checkpoint_after_task", "checkpoint_after_phase", "fail_closed_on_relay_violation",
-        "max_plan_revisions", "max_spec_revisions", "no_progress_generations", "final_review_fix_rounds",
+        "checkpoint_after_task", "checkpoint_after_phase", "fail_closed_on_relay_violation", "allow_docker",
+        "max_plan_revisions", "max_spec_revisions", "no_progress_generations", "final_review_fix_rounds", "final_review_max_turns",
         "failure_budgets", "require_human_commit", "per_task_timeout_ms"
       ]);
       if (!knownKeys.has(key) && !has(policy, key)) policy[key] = value;
@@ -736,7 +775,7 @@ export function toRuntimeConfig(layout = {}) {
 
   // safety (allow_* stay in safety)
   const runtimeSafety = {};
-  for (const key of ["allow_git_commit", "allow_git_push", "allow_destructive_operations"]) {
+  for (const key of ["allow_git_commit", "allow_git_push", "allow_destructive_operations", "allow_docker"]) {
     if (has(safety, key)) runtimeSafety[key] = safety[key];
   }
   if (Object.keys(runtimeSafety).length) out.safety = runtimeSafety;
@@ -855,6 +894,9 @@ export function toNewLayoutConfig(runtimeConfig = {}, schemaRef = "./config.sche
   if (has(policy, "free_model_turns_cap")) {
     layout.roles.free_models.max_turns = policy.free_model_turns_cap;
   }
+  if (Array.isArray(runtimeConfig.freeModelExclude)) {
+    layout.roles.free_models.exclude = [...runtimeConfig.freeModelExclude];
+  }
 
   // caps
   if (has(policy, "task_size_target_turns")) layout.caps.task_size_target_turns = policy.task_size_target_turns;
@@ -870,18 +912,23 @@ export function toNewLayoutConfig(runtimeConfig = {}, schemaRef = "./config.sche
     if (has(entry, "wrap_up_tokens_threshold")) layout.caps[role].wrap_up_at_tokens = entry.wrap_up_tokens_threshold;
     else if (has(entry, "wrap_up_at_tokens")) layout.caps[role].wrap_up_at_tokens = entry.wrap_up_at_tokens;
     if (has(entry, "backstop_raw_tokens")) layout.caps[role].backstop_raw_tokens = entry.backstop_raw_tokens;
+    if (role === "plan_reviewer" && has(entry, "first_round_reasoning") && entry.first_round_reasoning != null) {
+      layout.caps[role].first_round_reasoning = entry.first_round_reasoning;
+    }
   }
   if (has(policy, "per_task_max_turns")) layout.caps.implementer.max_turns = policy.per_task_max_turns;
   if (has(policy, "per_task_max_tokens")) layout.caps.implementer.max_tokens = policy.per_task_max_tokens;
   if (has(policy, "continuation_allowance")) layout.caps.implementer.extra_sessions = policy.continuation_allowance;
   if (has(policy, "handoff_wrapup_tokens")) layout.caps.implementer.wrap_up_at_tokens = policy.handoff_wrapup_tokens;
   if (has(policy, "backstop_raw_tokens")) layout.caps.mission_token_backstop = policy.backstop_raw_tokens;
+  if (has(policy, "final_review_max_turns")) layout.caps.final_review_max_turns = policy.final_review_max_turns;
 
   // retries
   if (has(policy, "max_plan_revisions")) layout.retries.plan_revisions = policy.max_plan_revisions;
   if (has(policy, "max_spec_revisions")) layout.retries.spec_revisions = policy.max_spec_revisions;
   if (has(policy, "no_progress_generations")) layout.retries.no_progress_sessions = policy.no_progress_generations;
   if (has(policy, "final_review_fix_rounds")) layout.retries.final_review_fix_rounds = policy.final_review_fix_rounds;
+  if (has(policy, "escalate_after_not_fixed")) layout.retries.escalate_after_not_fixed = policy.escalate_after_not_fixed;
   if (has(policy, "continuation_allowance")) layout.retries.extra_sessions_per_task = policy.continuation_allowance;
   const failureBudgets = isObject(policy.failure_budgets) ? policy.failure_budgets : {};
   for (const [layoutKey, runtimeKey] of FAILURE_BUDGET_MAP) {
@@ -922,7 +969,8 @@ export function toNewLayoutConfig(runtimeConfig = {}, schemaRef = "./config.sche
   if (has(planning, "verify_denylist")) layout.tests.verify_denylist = planning.verify_denylist;
 
   // safety
-  for (const key of ["allow_git_commit", "allow_git_push", "allow_destructive_operations"]) {
+  if (has(policy, "allow_docker")) layout.safety.allow_docker = policy.allow_docker;
+  for (const key of ["allow_git_commit", "allow_git_push", "allow_destructive_operations", "allow_docker"]) {
     if (has(safety, key)) layout.safety[key] = safety[key];
   }
   if (has(policy, "fail_closed_on_relay_violation")) layout.safety.stop_on_sandbox_violation = policy.fail_closed_on_relay_violation;
@@ -944,6 +992,10 @@ export function toNewLayoutConfig(runtimeConfig = {}, schemaRef = "./config.sche
   if (has(policy, "handoff_note_max_chars")) layout.advanced.handoff_note_max_chars = policy.handoff_note_max_chars;
   if (has(policy, "handoff_wrapup_tokens")) layout.advanced.handoff_wrapup_tokens = policy.handoff_wrapup_tokens;
   if (has(policy, "fallback_retry_primary_minutes")) layout.advanced.fallback_retry_primary_minutes = policy.fallback_retry_primary_minutes;
+  if (has(policy, "rate_limit_wait_max_minutes")) layout.advanced.rate_limit_wait_max_minutes = policy.rate_limit_wait_max_minutes;
+  if (has(policy, "network_wait_minutes")) layout.advanced.network_wait_minutes = policy.network_wait_minutes;
+  if (has(policy, "daily_reset_time")) layout.advanced.daily_reset_time = policy.daily_reset_time;
+  else if (has(runtimeConfig, "daily_reset_time")) layout.advanced.daily_reset_time = runtimeConfig.daily_reset_time;
   if (has(policy, "checkpoint_after_task")) layout.advanced.checkpoint_after_task = policy.checkpoint_after_task;
   if (has(policy, "checkpoint_after_phase")) layout.advanced.checkpoint_after_phase = policy.checkpoint_after_phase;
   const advCapabilities = {};
@@ -954,7 +1006,7 @@ export function toNewLayoutConfig(runtimeConfig = {}, schemaRef = "./config.sche
 
   // Lossless: carry forward operator-added keys that belong to no v4 section.
   // Mirrors the logic in toRuntimeConfig (spec rule 8: accept old layout for one release).
-  const SECTION_KEYS = new Set(["$schema", "schema_version", "project", "roles", "caps", "retries", "time_limits", "workflow", "tests", "safety", "runtime", "frameworks", "advanced", "policy", "gates", "execution", "planning", "capabilities", "freeModelAutoFallback"]);
+  const SECTION_KEYS = new Set(["$schema", "schema_version", "project", "roles", "caps", "retries", "time_limits", "workflow", "tests", "safety", "runtime", "frameworks", "advanced", "policy", "gates", "execution", "planning", "capabilities", "freeModelAutoFallback", "freeModelExclude"]);
   for (const [key, value] of Object.entries(runtimeConfig)) {
     if (!SECTION_KEYS.has(key) && !key.startsWith("_")) layout[key] = value;
   }

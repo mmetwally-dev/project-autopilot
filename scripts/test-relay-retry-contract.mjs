@@ -29,8 +29,8 @@ const INVALID_CASES = [
     expectedClass: "STRUCTURED_OUTPUT_INVALID",
   },
   {
-    name: "line-47 valid record with trailing non-empty text",
-    output: `${SENTINEL}\ntrailing response content`,
+    name: "line-47 valid record followed by a JSON verdict-looking tail",
+    output: `${SENTINEL}\n{"decision":"PASS","findings":[]}`,
     expectedClass: "STRUCTURED_OUTPUT_INVALID",
   },
   {

@@ -86,7 +86,7 @@ export function toolTarget(info) {
 
 // Denial phrasing only — narrow on purpose (mirrors the driver modules: match
 // an actual denial, never bare "denied"/"blocked" prose).
-const AGY_DENIAL_TEXT = /permission denied|rejected permission|not permitted|denied by policy|blocked by policy|requires approval|soft-denied|needs approval/i;
+const AGY_DENIAL_TEXT = /permission denied|rejected permission|not permitted|denied by policy|blocked by policy|requires approval|soft-denied|needs approval|auto-?denied|cannot prompt for/i;
 
 // Rate-limit shapes: the CLI surfaces quota/429 pressure as a terminal ERROR
 // result (error text) — never prose. 429 plus the documented quota/credit and
@@ -98,16 +98,279 @@ function isRateLimitedResult(result) {
   return AGY_RATE_LIMIT_TEXT.test(`${result.error || ""}\n${result.status || ""}`);
 }
 
+export function extractAgyDeniedActionPaths(deniedActions, events = []) {
+  const paths = [];
+  const actionsWithPaths = [];
+  let allResolved = true;
+
+  for (const rawAction of Array.isArray(deniedActions) ? deniedActions : []) {
+    const action = String(rawAction || "");
+    const match = action.match(/\(([^)]+)\)/);
+    let resolvedPath = null;
+    if (match) {
+      const candidate = match[1].trim().replace(/^['"]|['"]$/g, "");
+      if (candidate.startsWith("/") || candidate.startsWith("./") || candidate.startsWith("../") || candidate.startsWith("~") || /^[a-zA-Z]:[\\/]/.test(candidate)) {
+        resolvedPath = candidate;
+      }
+    }
+
+    if (!resolvedPath && Array.isArray(events)) {
+      for (const event of events) {
+        const step = stepOf(event);
+        if (!step || String(step.step_type || "") !== "tool") continue;
+        const toolName = String(step.tool_name || step.tool_info?.name || "");
+        if (!toolName) continue;
+        if (action === toolName || action.startsWith(toolName) || action.includes(toolName) || toolName.includes(action)) {
+          const target = toolTarget(step.tool_info);
+          if (target) {
+            resolvedPath = target;
+            break;
+          }
+        }
+      }
+    }
+
+    if (resolvedPath) {
+      paths.push(resolvedPath);
+      actionsWithPaths.push({action, path: resolvedPath});
+    } else {
+      allResolved = false;
+      actionsWithPaths.push({action, path: null});
+    }
+  }
+
+  return {paths, allResolved, actionsWithPaths};
+}
+
+export function isPathInsideRepo(targetPath, repoRoot) {
+  if (!targetPath || !repoRoot) return false;
+  try {
+    const home = process.env.HOME || process.env.USERPROFILE || "";
+    let expanded = String(targetPath);
+    if (home && (expanded.startsWith("~/") || expanded === "~")) {
+      expanded = path.join(home, expanded.slice(1));
+    }
+    const absTarget = path.resolve(repoRoot, expanded);
+    const absRepo = path.resolve(repoRoot);
+    const rel = path.relative(absRepo, absTarget);
+    return !rel.startsWith("..") && !path.isAbsolute(rel);
+  } catch {
+    return false;
+  }
+}
+
+export function isPathAllowedWorkspace(targetPath, {root = null, scratchDir = null, handoffDir = null} = {}) {
+  if (!targetPath || !root) return false;
+  if (isPathInsideRepo(targetPath, root)) return true;
+  if (scratchDir && isPathInsideRepo(targetPath, scratchDir)) return true;
+  if (handoffDir && isPathInsideRepo(targetPath, handoffDir)) return true;
+  return false;
+}
+
+export function agyPathInstruction(repoRoot) {
+  const rootStr = String(repoRoot || "").trim();
+  return `Write files only with absolute paths inside ${rootStr}; never build paths relative to your own brain/ or app-data directory.`;
+}
+
+export function resolveHandoffPathsInBrief(text, {repoRoot = null, scratchDir = null, useSandboxPaths = false} = {}) {
+  if (typeof text !== "string" || !text) return text;
+  let out = text;
+  const repoBase = useSandboxPaths ? "/workspace/repository" : (repoRoot ? String(repoRoot).replace(/\/+$/, "") : null);
+  if (repoBase) {
+    out = out.replace(/(^|[\s`"'(\[])(\.autopilot\/missions\/[^\s`"')\].,;:]+?\/handoff\/[^\s`"')\].,;:]+\.md)/g, (m, prefix, rel) => {
+      return `${prefix}${repoBase}/${rel}`;
+    });
+  }
+  if (!useSandboxPaths && scratchDir) {
+    const scratchNorm = String(scratchDir).replace(/\/+$/, "");
+    out = out.replace(/\/workspace\/scratch(?=\/|[\s`"')\].,;:]|$)/g, scratchNorm);
+  }
+  return out;
+}
+
+export function isPathInCliDataDir(targetPath, cliDataDir = null, repoRoot = null) {
+  if (!targetPath) return false;
+  try {
+    const home = process.env.HOME || process.env.USERPROFILE || "";
+    const dataDir = cliDataDir ? path.resolve(cliDataDir) : path.resolve(home, ".gemini", "antigravity-cli");
+    const geminiDir = path.resolve(home, ".gemini");
+
+    let expanded = targetPath;
+    if (expanded.startsWith("~/") || expanded === "~") {
+      expanded = path.join(home, expanded.slice(1));
+    }
+    const absTarget = path.isAbsolute(expanded)
+      ? path.resolve(expanded)
+      : path.resolve(repoRoot || process.cwd(), expanded);
+
+    const rel = path.relative(dataDir, absTarget);
+    if (!rel.startsWith("..") && !path.isAbsolute(rel)) return true;
+    const relGemini = path.relative(geminiDir, absTarget);
+    return !relGemini.startsWith("..") && !path.isAbsolute(relGemini);
+  } catch {
+    return false;
+  }
+}
+
+function collectDeniedWritePaths(result, events = []) {
+  const evidence = Array.isArray(result?.failure?.evidence) ? result.failure.evidence : [];
+  const observations = Array.isArray(result?.observations) ? result.observations : [];
+  const allEvents = Array.isArray(events) ? events : [];
+  const allObs = [...evidence, ...observations];
+
+  const deniedPaths = [];
+  let hasDenial = false;
+  let hasUnknownAction = false;
+
+  for (const obs of allObs) {
+    if (obs?.type !== "permission_denied" && obs?.type !== "path_outside_workspace") continue;
+    hasDenial = true;
+
+    let obsResolved = false;
+    if (obs.allActionsResolved === false) {
+      hasUnknownAction = true;
+    } else if (obs.allActionsResolved === true) {
+      obsResolved = true;
+    }
+
+    if (Array.isArray(obs.paths) && obs.paths.length > 0) {
+      deniedPaths.push(...obs.paths);
+    }
+    if (Array.isArray(obs.targets) && obs.targets.length > 0) {
+      deniedPaths.push(...obs.targets);
+    }
+    if (typeof obs.path === "string" && obs.path) {
+      deniedPaths.push(obs.path);
+    }
+
+    if (!obsResolved && Array.isArray(obs.actions) && obs.actions.length > 0) {
+      if (Array.isArray(obs.paths) && obs.paths.length === obs.actions.length) {
+        obsResolved = true;
+      } else {
+        const extracted = extractAgyDeniedActionPaths(obs.actions, allEvents);
+        deniedPaths.push(...extracted.paths);
+        if (!extracted.allResolved) {
+          hasUnknownAction = true;
+        }
+      }
+    } else if (obs.actions && !Array.isArray(obs.actions)) {
+      hasUnknownAction = true;
+    }
+
+    const step = obs.event?.step_update || obs.event?.step;
+    if (step && typeof step === "object") {
+      const target = toolTarget(step.tool_info);
+      if (target) deniedPaths.push(target);
+    }
+  }
+
+  for (const ev of allEvents) {
+    const res = ev?.result;
+    if (res && Array.isArray(res.denied_actions) && res.denied_actions.length > 0) {
+      hasDenial = true;
+      const extracted = extractAgyDeniedActionPaths(res.denied_actions, allEvents);
+      deniedPaths.push(...extracted.paths);
+      if (!extracted.allResolved) {
+        hasUnknownAction = true;
+      }
+    }
+  }
+
+  return {deniedPaths, hasDenial, hasUnknownAction};
+}
+
+export function isOutOfRepoWritePermissionDenied(result, repoRoot, events = [], allowedDirs = {}) {
+  const isPermDenied = result?.failure?.class === "PERMISSION_DENIED" && result?.failure?.domain === "adapter";
+  const isPathSlip = result?.failure?.class === "PATH_OUTSIDE_WORKSPACE" && result?.failure?.domain === "model";
+  if (!result || (!isPermDenied && !isPathSlip)) {
+    return false;
+  }
+
+  const {deniedPaths, hasDenial, hasUnknownAction} = collectDeniedWritePaths(result, events);
+
+  if (!hasDenial) return false;
+  if (hasUnknownAction || deniedPaths.length === 0) return false;
+
+  const dirs = {
+    root: repoRoot,
+    scratchDir: allowedDirs?.scratchDir || null,
+    handoffDir: allowedDirs?.handoffDir || null,
+  };
+
+  for (const p of deniedPaths) {
+    if (!p) return false;
+    if (isPathAllowedWorkspace(p, dirs)) return false;
+  }
+
+  return true;
+}
+
+export function decideDeniedWriteRetry({
+  result,
+  repo,
+  events = [],
+  retries = {},
+  taskKey = null,
+  scratch = null,
+  handoffNotePath = null,
+  handoffDir = null,
+  readOnly = false,
+} = {}) {
+  if (readOnly) {
+    return {retry: false, note: null, nextRetries: retries || {}};
+  }
+  const isPermDenied = result?.failure?.class === "PERMISSION_DENIED" && result.failure?.domain === "adapter";
+  const isPathSlip = result?.failure?.class === "PATH_OUTSIDE_WORKSPACE" && result.failure?.domain === "model";
+  if (!isPermDenied && !isPathSlip) {
+    return {retry: false, note: null, nextRetries: retries || {}};
+  }
+  const isOutOfRepo = isOutOfRepoWritePermissionDenied(result, repo, events, {scratchDir: scratch, handoffDir});
+  const key = taskKey || "default";
+  const retriedCount = (retries && typeof retries === "object") ? (retries[key] || 0) : 0;
+  if (isOutOfRepo && retriedCount === 0) {
+    const scratchDir = scratch || "";
+    const {deniedPaths} = collectDeniedWritePaths(result, events);
+    const badPath = deniedPaths[0] || "";
+    let note;
+    if (isPathSlip || handoffNotePath) {
+      const matchesHandoff = Boolean(handoffNotePath && badPath && path.basename(badPath) === path.basename(handoffNotePath));
+      const correctPath = matchesHandoff
+        ? handoffNotePath
+        : (scratchDir && badPath ? path.join(scratchDir, path.basename(badPath)) : (handoffNotePath || scratchDir || repo || ""));
+      note = `Write only inside the repository; your write to ${badPath} was outside the workspace; the correct path is ${correctPath}.${scratchDir ? ` Your scratch dir is ${scratchDir}.` : ""}`;
+    } else {
+      note = scratchDir
+        ? `Write only inside the repository; your scratch dir is ${scratchDir}.`
+        : `Write only inside the repository.`;
+    }
+    const nextRetries = {...(retries || {}), [key]: 1};
+    return {retry: true, note, nextRetries};
+  }
+  return {retry: false, note: null, nextRetries: retries || {}};
+}
+
 // A denied_actions loud failure: the terminal result carries a non-empty
 // denied_actions list (scripted fixture shape), or an ERROR result whose error
 // is denial-shaped. Either is the CLI's own structured outcome — never model
 // prose — so it maps to permission_denied regardless of exit code.
-export function agyDeniedActions(events) {
+// Backlog #3: when EVERY denied action's target path resolves outside the
+// workspace (repo, scratch, mission handoff dir), classify it as
+// path_outside_workspace (model path slip) instead of permission_denied.
+export function agyDeniedActions(events, probe = {}) {
   const denied = [];
+  const checkOutside = Boolean(probe?.root && !probe?.outsideWritePath);
   for (const event of events) {
     const result = resultOf(event);
     if (result && Array.isArray(result.denied_actions) && result.denied_actions.length > 0) {
-      denied.push(observation("permission_denied", event, {reason: "denied_actions", actions: result.denied_actions}));
+      const {paths, allResolved} = extractAgyDeniedActionPaths(result.denied_actions, events);
+      const allOutside = checkOutside && allResolved && paths.length > 0
+        && paths.every((p) => !isPathAllowedWorkspace(p, probe));
+      denied.push(observation(allOutside ? "path_outside_workspace" : "permission_denied", event, {
+        reason: allOutside ? "denied_actions_outside_workspace" : "denied_actions",
+        actions: result.denied_actions,
+        ...(paths.length > 0 ? {paths, targets: paths} : {}),
+        allActionsResolved: allResolved
+      }));
       continue;
     }
     if (result && String(result.status || "").toUpperCase() !== "SUCCESS" && AGY_DENIAL_TEXT.test(String(result.error || ""))) {
@@ -133,6 +396,31 @@ export function detectAgyRateLimited(events) {
     if (err && AGY_RATE_LIMIT_TEXT.test(typeof err === "string" ? err : `${err.type || ""}\n${err.message || ""}`)) {
       observations.push(observation("rate_limited", event, {reason: "agy_tool_error_rate_limit"}));
     }
+  }
+  return observations;
+}
+
+// Auth-required shapes: agy emits a terminal ERROR result with
+// "authentication failed or timed out" when logged out. Produces a structured
+// auth_required observation with adapter "antigravity" so the classifier marks
+// it AUTH_REQUIRED (non-retryable) instead of PROCESS_EXIT_NONZERO.
+const AGY_AUTH_REQUIRED_TEXT = /authentication failed or timed out/i;
+
+export function detectAgyAuthRequired(events) {
+  const observations = [];
+  for (const event of events) {
+    if (!event || typeof event !== "object") continue;
+    const result = resultOf(event);
+    if (!result) continue;
+    if (String(result.status || "").toUpperCase() !== "ERROR") continue;
+    const errorText = typeof result.error === "string" ? result.error : "";
+    const match = errorText.match(AGY_AUTH_REQUIRED_TEXT);
+    if (!match) continue;
+    observations.push(observation("auth_required", event, {
+      adapter: "antigravity",
+      reason: match[0],
+      message: errorText.slice(0, 200),
+    }));
   }
   return observations;
 }
@@ -176,8 +464,9 @@ export function detectAgyInvalidModel(events) {
 // DONE emits attempted plus the completed marker; ERROR emits attempted, the
 // failed marker, and permission_denied when the tool error is denial-shaped.
 export function observeAgyEvents(events, probe = {}) {
-  const observations = [...detectAgyRateLimited(events), ...agyDeniedActions(events), ...detectAgyInvalidModel(events)];
+  const observations = [...detectAgyRateLimited(events), ...detectAgyAuthRequired(events), ...agyDeniedActions(events, probe), ...detectAgyInvalidModel(events)];
   const emit = (type, event, details = {}) => observations.push(observation(type, event, details));
+  const checkOutside = Boolean(probe?.root && !probe?.outsideWritePath);
   for (const event of events) {
     const step = stepOf(event);
     if (!step) continue;
@@ -195,7 +484,7 @@ export function observeAgyEvents(events, probe = {}) {
       const command = String(info.parameters?.CommandLine ?? info.parameters?.command ?? text);
       emit("command_attempted", event);
       if (errored) emit("command_failed", event);
-      if (denied) emit("permission_denied", event, {tool: toolName});
+      if (denied) emit("permission_denied", event, {tool: toolName, path: target || undefined, targets: target ? [target] : []});
       if (probe.timeoutScriptPath && eventReferencesPath(command, probe.timeoutScriptPath, probe.root)) {
         if (state === "ACTIVE") emit("timeout_child_command_started", event);
       }
@@ -220,14 +509,30 @@ export function observeAgyEvents(events, probe = {}) {
           else if (errored) emit("write_failed", event);
         }
       }
-      if (denied) emit("permission_denied", event, {tool: toolName});
+      if (denied) {
+        const isOutside = checkOutside && target && !isPathAllowedWorkspace(target, probe);
+        emit(isOutside ? "path_outside_workspace" : "permission_denied", event, {
+          tool: toolName,
+          path: target || undefined,
+          targets: target ? [target] : [],
+          ...(isOutside ? {reason: "tool_denied_outside_workspace"} : {}),
+        });
+      }
       continue;
     }
 
     if (AGY_READ_TOOLS.has(toolName)) {
       emit("file_read_attempted", event);
       if (state === "DONE" && !errored) emit("file_read_observed", event, {output: String(info.output ?? "")});
-      if (denied) emit("permission_denied", event, {tool: toolName});
+      if (denied) {
+        const isOutside = checkOutside && target && !isPathAllowedWorkspace(target, probe);
+        emit(isOutside ? "path_outside_workspace" : "permission_denied", event, {
+          tool: toolName,
+          path: target || undefined,
+          targets: target ? [target] : [],
+          ...(isOutside ? {reason: "tool_denied_outside_workspace"} : {}),
+        });
+      }
       continue;
     }
 

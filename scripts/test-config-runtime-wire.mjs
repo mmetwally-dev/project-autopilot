@@ -45,7 +45,7 @@ const v4 = {
     verifier: { max_turns: 30, max_tokens: 200000, extra_sessions: 2, wrap_up_at_tokens: 180000 },
     mission_token_backstop: 6000000,
   },
-  retries: { plan_revisions: 8, implementation: 4, verification: 4, final_review_fix_rounds: 2, cli_errors: 3, infrastructure: 3, no_progress_sessions: 2, extra_sessions_per_task: 5 },
+  retries: { plan_revisions: 8, implementation: 5, verification: 5, final_review_fix_rounds: 3, cli_errors: 3, infrastructure: 3, no_progress_sessions: 2, extra_sessions_per_task: 5, escalate_after_not_fixed: 3 },
   time_limits: { call_backstop_minutes: 160, silent_run_minutes: 10 },
   workflow: { plan_review: true, commit_by_human: true },
   tests: { gate_commands: [], gate_network: false, require_reviewer: true },

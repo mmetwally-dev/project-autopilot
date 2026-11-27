@@ -63,6 +63,11 @@ export function decideEscalationName({failureClass, retryable, used, limit, budg
           // idle-hang-watchdog.mjs.
           if (entry.reason === "provider_balance_exhausted") balanceExhausted = true;
           if (retryAt == null && typeof entry.retryAt === "string" && entry.retryAt !== "") retryAt = entry.retryAt;
+          if (retryAt == null && (entry.resetsAt != null || entry.event?.rate_limit_info?.resetsAt != null)) {
+            const raw = entry.resetsAt ?? entry.event?.rate_limit_info?.resetsAt;
+            const ms = typeof raw === "number" ? (raw < 1e11 ? raw * 1000 : raw) : globalThis.Date.parse(raw);
+            if (Number.isFinite(ms)) retryAt = new globalThis.Date(ms).toISOString();
+          }
         }
       }
       const where = [provider, model].filter(Boolean).join("/");
@@ -77,12 +82,30 @@ export function decideEscalationName({failureClass, retryable, used, limit, budg
         };
       }
       const resume = retryAt
-        ? `resume after ${formatLocalTime(retryAt)}`
+        ? `resume with \`ap run\` after ${formatLocalTime(retryAt)}`
         : "resume with `ap run` after the limit lifts";
       const detail = where !== ""
         ? `RATE_LIMITED is not retryable (${where}); ${resume}`
         : `RATE_LIMITED is not retryable; ${resume}`;
       return {step: "rate_limited_escalation", detail};
+    }
+    if (failureClass === "NETWORK_UNAVAILABLE") {
+      let maxWaitMin = 60;
+      let evidenceText = "network error";
+      if (Array.isArray(evidence)) {
+        for (const entry of evidence) {
+          if (!entry || typeof entry !== "object") continue;
+          if (typeof entry.maxWaitMin === "number" && Number.isFinite(entry.maxWaitMin)) maxWaitMin = entry.maxWaitMin;
+          if (evidenceText === "network error") {
+            const candidate = entry.text ?? entry.message ?? entry.match;
+            if (typeof candidate === "string" && candidate.trim()) evidenceText = candidate.trim();
+          }
+        }
+      }
+      return {
+        step: "network_unavailable_escalation",
+        detail: `network unavailable for ${maxWaitMin} min: ${evidenceText}; resume with \`ap run\``,
+      };
     }
     // The CLI's own credentials are unusable. Same-adapter retry (and any
     // same-adapter fallback) cannot fix it; the operator must log the CLI in
@@ -99,12 +122,18 @@ export function decideEscalationName({failureClass, retryable, used, limit, budg
           if (adapter != null && reason != null) break;
         }
       }
-      const cli = adapter || "the CLI";
+      const cli = adapter === "antigravity" ? "agy" : (adapter || "the CLI");
       const why = reason ? ` (${reason})` : "";
       // Backlog #12(b): a provider-key rejection in OpenCode is not a generic
       // logout — name the bad/expired key and OpenCode's own re-auth commands.
       if (adapter === "opencode") {
         return {step: "auth_required_escalation", detail: `opencode is not authenticated${why} — the provider key in the OpenCode CLI is invalid or expired; run \`opencode auth logout\` then \`opencode auth login\`, then \`ap run\``};
+      }
+      if (adapter === "codex") {
+        return {step: "auth_required_escalation", detail: `codex is not authenticated${why} — run \`codex login\`, then \`ap run\``};
+      }
+      if (adapter === "antigravity" || adapter === "agy") {
+        return {step: "auth_required_escalation", detail: `agy is logged out${why} — run \`agy\` and log in, then \`ap run\``};
       }
       if (reason === "provider_key_invalid") {
         return {step: "auth_required_escalation", detail: `the provider key in ${cli} is invalid or expired${why} — re-authenticate the CLI (for OpenCode: \`opencode auth logout\` then \`opencode auth login\`) and then \`ap run\``};

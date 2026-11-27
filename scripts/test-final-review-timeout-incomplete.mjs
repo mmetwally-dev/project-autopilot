@@ -227,7 +227,7 @@ for (const [label, extra] of [
     },
   }));
   check("acceptance: timeout-only re-review after a fix pass is never accepted",
-    result.outcome === "escalate" && reviews === 2, JSON.stringify({outcome: result.outcome, reviews}));
+    result.outcome === "escalate" && reviews === 3, JSON.stringify({outcome: result.outcome, reviews}));
   check("acceptance: re-review path logs no acceptance line",
     lines.every((line) => !/accepted via gate green/.test(line)), JSON.stringify(lines));
 }

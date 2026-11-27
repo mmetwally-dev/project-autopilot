@@ -94,28 +94,149 @@ function retryWindowMinutes(policy) {
   return Number.isFinite(mins) && mins > 0 ? mins : FALLBACK_RETRY_PRIMARY_MINUTES;
 }
 
+export const DEFAULT_DAILY_RESET_TIME = "03:00";
+
+export function nextResetTime(sinceMs, resetTimeStr = DEFAULT_DAILY_RESET_TIME) {
+  const timeStr = typeof resetTimeStr === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(resetTimeStr)
+    ? resetTimeStr
+    : DEFAULT_DAILY_RESET_TIME;
+  const [hourStr, minStr] = timeStr.split(":");
+  const hour = parseInt(hourStr, 10);
+  const min = parseInt(minStr, 10);
+  const d = new Date(sinceMs);
+  const reset = new Date(d.getFullYear(), d.getMonth(), d.getDate(), hour, min, 0, 0);
+  if (d.getTime() >= reset.getTime()) {
+    reset.setDate(reset.getDate() + 1);
+  }
+  return reset.getTime();
+}
+
+function nextLocal0300(sinceMs) {
+  return nextResetTime(sinceMs, DEFAULT_DAILY_RESET_TIME);
+}
+
+function parseResetTimestampMs(raw) {
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
+    return raw < 1e11 ? raw * 1000 : raw;
+  }
+  if (typeof raw === "string" && raw.trim()) {
+    const trimmed = raw.trim();
+    const num = Number(trimmed);
+    if (Number.isFinite(num) && num > 0 && String(num) === trimmed) {
+      return num < 1e11 ? num * 1000 : num;
+    }
+    const ms = Date.parse(trimmed);
+    if (Number.isFinite(ms)) return ms;
+  }
+  return null;
+}
+
+// Backlog #4: extract an explicit exhaustion expiry ISO timestamp from
+// rate-limit evidence (opencode FreeUsageLimitError retryAfterMs in structured
+// event or stderr text, claude rate_limit_event resetsAt in epoch seconds, or
+// codex retryAt ISO). Returns an ISO string or null.
+export function extractExhaustedUntilIso(evidence, nowMs = Date.now()) {
+  const baseMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+  const list = Array.isArray(evidence) ? evidence : (evidence ? [evidence] : []);
+  for (const item of list) {
+    if (!isRecord(item)) continue;
+    const rawRetryAfter = item.retryAfterMs
+      ?? item.event?.error?.retryAfterMs
+      ?? item.event?.error?.data?.retryAfterMs
+      ?? item.event?.retryAfterMs;
+    if (rawRetryAfter != null) {
+      const ms = Number(rawRetryAfter);
+      if (Number.isFinite(ms) && ms > 0) {
+        return new Date(baseMs + ms).toISOString();
+      }
+    }
+    for (const txt of [item.message, item.text, item.event?.text, item.event?.error?.message, item.event?.error?.data?.message]) {
+      if (typeof txt !== "string" || !txt) continue;
+      const m = txt.match(/["']?retryAfterMs["']?\s*[:=]\s*(\d+)/i);
+      if (m) {
+        const ms = Number(m[1]);
+        if (Number.isFinite(ms) && ms > 0) {
+          return new Date(baseMs + ms).toISOString();
+        }
+      }
+    }
+    const rawResetsAt = item.resetsAt
+      ?? item.event?.resetsAt
+      ?? item.rate_limit_info?.resetsAt
+      ?? item.event?.rate_limit_info?.resetsAt;
+    if (rawResetsAt != null) {
+      const ms = parseResetTimestampMs(rawResetsAt);
+      if (ms != null) return new Date(ms).toISOString();
+    }
+    const rawRetryAt = item.retryAt ?? item.event?.retryAt;
+    if (rawRetryAt != null) {
+      const ms = parseResetTimestampMs(rawRetryAt);
+      if (ms != null) return new Date(ms).toISOString();
+    }
+  }
+  return null;
+}
+
 // Record a RATE_LIMITED model in the mission map. Returns a fresh map; the
 // input is never mutated.
-export function markExhausted(map, entry, role, nowIso) {
+export function markExhausted(map, entry, role, nowIso, reasonOrOpts = null) {
   const out = isRecord(map) ? {...map} : {};
   const key = modelKey(entry);
   if (!key) return out;
+  const atIso = typeof nowIso === "string" ? nowIso : new Date().toISOString();
+  const baseMs = Date.parse(atIso);
+  const effectiveNowMs = Number.isFinite(baseMs) ? baseMs : Date.now();
+  const isFree = reasonOrOpts === FREE_QUOTA_REASON
+    || reasonOrOpts === "free"
+    || (isRecord(reasonOrOpts) && (reasonOrOpts.quota === "free" || reasonOrOpts.reason === FREE_QUOTA_REASON || reasonOrOpts.freeQuota));
+  let untilIso = null;
+  if (isRecord(reasonOrOpts)) {
+    if (reasonOrOpts.until != null) {
+      const ms = parseResetTimestampMs(reasonOrOpts.until);
+      if (ms != null) untilIso = new Date(ms).toISOString();
+    }
+    if (!untilIso && reasonOrOpts.retryAfterMs != null) {
+      const ms = Number(reasonOrOpts.retryAfterMs);
+      if (Number.isFinite(ms) && ms > 0) untilIso = new Date(effectiveNowMs + ms).toISOString();
+    }
+    if (!untilIso && reasonOrOpts.resetsAt != null) {
+      const ms = parseResetTimestampMs(reasonOrOpts.resetsAt);
+      if (ms != null) untilIso = new Date(ms).toISOString();
+    }
+    if (!untilIso && reasonOrOpts.evidence) {
+      untilIso = extractExhaustedUntilIso(reasonOrOpts.evidence, effectiveNowMs);
+    }
+  }
   out[key] = {
-    at: typeof nowIso === "string" ? nowIso : new Date().toISOString(),
+    at: atIso,
     reason: RATE_LIMITED_FAILURE_CLASS,
     by: typeof role === "string" && role ? role : "unknown",
+    ...(isFree ? {quota: "free"} : {}),
+    ...(untilIso ? {until: untilIso} : {}),
   };
   return out;
 }
 
-// True while the entry exists and is younger than the retry window.
+function isExhaustedRecordActive(record, policy, nowMs) {
+  if (!isRecord(record)) return false;
+  if (record.until != null) {
+    const untilMs = Date.parse(record.until);
+    if (Number.isFinite(untilMs)) return nowMs < untilMs;
+  }
+  const at = Date.parse(record.at);
+  if (!Number.isFinite(at)) return false;
+  if (record.quota === "free" || record.reason === FREE_QUOTA_REASON) {
+    const resetTimeStr = policy?.daily_reset_time ?? DEFAULT_DAILY_RESET_TIME;
+    return nowMs < nextResetTime(at, resetTimeStr);
+  }
+  return nowMs - at < retryWindowMinutes(policy) * 60000;
+}
+
+// True while the entry exists and is younger than its `until` or retry window.
 export function isExhausted(map, entry, policy, nowMs = Date.now()) {
   if (!isRecord(map) || !isRecord(entry)) return false;
   const record = map[modelKey(entry)];
-  if (!isRecord(record)) return false;
-  const at = Date.parse(record.at);
-  if (!Number.isFinite(at)) return false;
-  return nowMs - at < retryWindowMinutes(policy) * 60000;
+  return isExhaustedRecordActive(record, policy, nowMs);
 }
 
 // Drop expired entries. Returns a fresh map; the input is never mutated.
@@ -123,10 +244,7 @@ export function pruneExhausted(map, policy, nowMs = Date.now()) {
   const out = {};
   if (!isRecord(map)) return out;
   for (const [key, record] of Object.entries(map)) {
-    if (!isRecord(record)) continue;
-    const at = Date.parse(record.at);
-    if (!Number.isFinite(at)) continue;
-    if (nowMs - at < retryWindowMinutes(policy) * 60000) out[key] = record;
+    if (isExhaustedRecordActive(record, policy, nowMs)) out[key] = record;
   }
   return out;
 }
@@ -303,15 +421,6 @@ export const FREE_QUOTA_REASON = "free_quota_exhausted"; // same value as idle-h
 
 const primaryId = (roleConfig) => canonicalModelId(roleConfig);
 
-function nextLocal0300(sinceMs) {
-  const d = new Date(sinceMs);
-  const reset = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 3, 0, 0, 0);
-  if (d.getTime() >= reset.getTime()) {
-    reset.setDate(reset.getDate() + 1);
-  }
-  return reset.getTime();
-}
-
 // Stamp a fresh sticky entry (the chosen fallback) with its provenance.
 export function stampStickyFallback(next, roleConfig, nowIso, reasonOrOpts = null) {
   const out = copyModelEntry(next);
@@ -320,6 +429,9 @@ export function stampStickyFallback(next, roleConfig, nowIso, reasonOrOpts = nul
   out.since = nowIso;
   const reason = typeof reasonOrOpts === "string" ? reasonOrOpts : reasonOrOpts?.reason;
   if (reason) out.reason = reason;
+  if (isRecord(reasonOrOpts) && typeof reasonOrOpts.until === "string" && reasonOrOpts.until) {
+    out.until = reasonOrOpts.until;
+  }
   return out;
 }
 
@@ -360,10 +472,21 @@ export function staleStickyFallback({role, roleConfig, activeModel, policy, nowM
   }
   const mins = Number(policy?.fallback_retry_primary_minutes);
   const windowMin = Number.isFinite(mins) && mins > 0 ? mins : FALLBACK_RETRY_PRIMARY_MINUTES;
+  if (activeModel.until != null) {
+    const untilMs = Date.parse(activeModel.until);
+    if (Number.isFinite(untilMs)) {
+      if (nowMs < untilMs) return null;
+      return {why: "age", message: `fallback cleared: ${role} retrying primary ${describeModel(roleConfig)} (quota reset at ${activeModel.until})`};
+    }
+  }
   const since = Date.parse(activeModel.since);
   if (Number.isFinite(since)) {
-    if (activeModel.reason === FREE_QUOTA_REASON && nowMs < nextLocal0300(since)) {
-      return null;
+    if (activeModel.quota === "free" || activeModel.reason === FREE_QUOTA_REASON) {
+      const resetTimeStr = policy?.daily_reset_time ?? DEFAULT_DAILY_RESET_TIME;
+      if (nowMs < nextResetTime(since, resetTimeStr)) {
+        return null;
+      }
+      return {why: "age", message: `fallback cleared: ${role} retrying primary ${describeModel(roleConfig)} (daily quota reset at ${resetTimeStr})`};
     }
     if (nowMs - since >= windowMin * 60000) {
       // Backlog #5: opencode model ids already carry their `opencode/`

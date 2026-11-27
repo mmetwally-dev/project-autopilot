@@ -77,7 +77,7 @@ function runSetupWizard({repo, binDir}) {
     child.on('close', status => { clearTimeout(watchdog); resolve({status, out}); });
     // Wizard answers: continue, (adapter, fallback) x 5, framework, gates
     // All defaults: '' for continue, '1' for adapter (claude), '1' for fallback (No), '1' for framework (standalone), '' for gates (accept detected)
-    child.stdin.write(['', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1', ''].map(a => `${a}\n`).join(''));
+    child.stdin.write(['', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1', '', '1', '1', ''].map(a => `${a}\n`).join(''));
     child.stdin.end();
   });
 }
@@ -177,7 +177,7 @@ async function main() {
     check('retries.plan_revisions', config.retries.plan_revisions === 8);
     check('retries.implementation', config.retries.implementation === 5);
     check('retries.verification', config.retries.verification === 5);
-    check('retries.final_review_fix_rounds', config.retries.final_review_fix_rounds === 2);
+    check('retries.final_review_fix_rounds', config.retries.final_review_fix_rounds === 3);
     check('retries.cli_errors', config.retries.cli_errors === 3);
     check('retries.infrastructure', config.retries.infrastructure === 3);
     check('retries.no_progress_sessions', config.retries.no_progress_sessions === 2);

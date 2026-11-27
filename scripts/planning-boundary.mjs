@@ -111,26 +111,34 @@ function specifyAllowed(rel, featureDir) {
   if (rel.startsWith(`${base}checklists/`) && rel.length > `${base}checklists/`.length) return true;
   return false;
 }
-function planAllowed(rel, featureDir, revision = false) {
-  if (rel === "CLAUDE.md") return true;
+export function isPlanFeatureArtifact(rel, featureDir) {
   if (!featureDir) return false;
   const base = `specs/${featureDir}/`;
   if ([`${base}plan.md`, `${base}research.md`, `${base}data-model.md`, `${base}quickstart.md`].includes(rel)) return true;
   if (rel.startsWith(`${base}contracts/`) && rel.length > `${base}contracts/`.length) return true;
-  // A gate revision answering review findings may also repair an EARLIER
-  // stage's artifact that a finding cites (spec.md during plan). Same feature
-  // dir only; never a later stage's artifact (tasks.md) nor feature.json.
-  if (revision && rel === `${base}spec.md`) return true;
   return false;
 }
-function tasksAllowed(rel, featureDir, revision = false) {
+function planAllowed(rel, featureDir, revision = false, allowCarriedEarlierStage = false) {
+  if (rel === "CLAUDE.md") return true;
+  if (!featureDir) return false;
+  if (isPlanFeatureArtifact(rel, featureDir)) return true;
+  // A gate revision answering review findings (or a fresh plan round carrying
+  // open spec findings forward) may also repair spec.md in the same feature
+  // dir; never a later stage's artifact (tasks.md) nor feature.json.
+  if ((revision || allowCarriedEarlierStage) && rel === `specs/${featureDir}/spec.md`) return true;
+  return false;
+}
+function tasksAllowed(rel, featureDir, revision = false, allowCarriedEarlierStage = false) {
   if (!featureDir) return false;
   const base = `specs/${featureDir}/`;
   if (rel === `${base}tasks.md`) return true;
   // A gate revision answering review findings may also repair earlier stages'
-  // artifacts that a finding cites (spec.md, plan.md during tasks). Same
-  // feature dir only; never feature.json nor CLAUDE.md.
-  if (revision && (rel === `${base}spec.md` || rel === `${base}plan.md`)) return true;
+  // artifacts that a finding cites (spec.md plus every plan-stage feature
+  // artifact during tasks). A fresh tasks round carrying open plan findings
+  // forward may repair plan-stage feature artifacts. Same feature dir only;
+  // never feature.json nor CLAUDE.md.
+  if (revision && (rel === `${base}spec.md` || isPlanFeatureArtifact(rel, featureDir))) return true;
+  if (allowCarriedEarlierStage && isPlanFeatureArtifact(rel, featureDir)) return true;
   return false;
 }
 const STAGE_ALLOW = { specify: specifyAllowed, plan: planAllowed, tasks: tasksAllowed };
@@ -293,7 +301,7 @@ function reasonForRejection(rel, stage, featureDir, preexistingFeatureDirs) {
 // claudeMdBaseline: CLAUDE.md content captured at session start, or null.
 export function evaluatePlanningWriteBoundary({
   stage, touchedFiles = [], preexistingFeatureDirs = [], resolvedFeatureDir = null,
-  readFile = () => null, claudeMdBaseline = null, revision = false
+  readFile = () => null, claudeMdBaseline = null, revision = false, allowCarriedEarlierStage = false
 } = {}) {
   const matcher = STAGE_ALLOW[stage];
   if (!matcher) throw new Error(`Unknown planning stage: ${stage}`);
@@ -332,7 +340,7 @@ export function evaluatePlanningWriteBoundary({
       violations.push({ path: rel, reason: "multiple_new_feature_directories" });
       continue;
     }
-    if (!matcher(rel, featureDir, revision)) {
+    if (!matcher(rel, featureDir, revision, allowCarriedEarlierStage)) {
       violations.push({ path: rel, reason: reasonForRejection(rel, stage, featureDir, preexistingFeatureDirs) });
       continue;
     }

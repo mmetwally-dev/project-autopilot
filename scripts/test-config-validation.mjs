@@ -239,12 +239,12 @@ for (const [label, policy, expected] of capsCases) {
 // to the default (2); valid operator values pass through; invalid values
 // degrade to the default (validation rejects them at load; this covers
 // hand-built policies that bypass validation).
-if (FINAL_REVIEW_FIX_ROUNDS_DEFAULT !== 2) throw new Error(`FINAL_REVIEW_FIX_ROUNDS_DEFAULT !== 2: ${FINAL_REVIEW_FIX_ROUNDS_DEFAULT}`);
-if (resolveFinalReviewFixRounds({}) !== 2) throw new Error("unset config must resolve to 2");
-if (resolveFinalReviewFixRounds() !== 2) throw new Error("absent policy must resolve to 2");
-if (resolveFinalReviewFixRounds({final_review_fix_rounds: 3}) !== 3) throw new Error("operator value 3 not preserved");
-if (resolveFinalReviewFixRounds({final_review_fix_rounds: 0}) !== 2) throw new Error("zero must degrade to 2");
-if (resolveFinalReviewFixRounds({final_review_fix_rounds: 1.5}) !== 2) throw new Error("non-integer must degrade to 2");
+if (FINAL_REVIEW_FIX_ROUNDS_DEFAULT !== 3) throw new Error(`FINAL_REVIEW_FIX_ROUNDS_DEFAULT !== 3: ${FINAL_REVIEW_FIX_ROUNDS_DEFAULT}`);
+if (resolveFinalReviewFixRounds({}) !== 3) throw new Error("unset config must resolve to 3");
+if (resolveFinalReviewFixRounds() !== 3) throw new Error("absent policy must resolve to 3");
+if (resolveFinalReviewFixRounds({final_review_fix_rounds: 4}) !== 4) throw new Error("operator value 4 not preserved");
+if (resolveFinalReviewFixRounds({final_review_fix_rounds: 0}) !== 3) throw new Error("zero must degrade to 3");
+if (resolveFinalReviewFixRounds({final_review_fix_rounds: 1.5}) !== 3) throw new Error("non-integer must degrade to 3");
 
 // Backlog #15 (089 Phase 1 task 1.1): windows-compatibility is valid for
 // SpecKit and standalone; gsd and null/undetermined are rejected clearly.

@@ -47,10 +47,27 @@ export const NETWORK_TEST_NOTE_PREFIX = "NETWORK TEST MANUAL RUN:";
 
 export const NETWORK_GATED_TEST_LINE = `When the task text itself asks for a network or env-gated test (an env flag such as RUN_INTEGRATION, a dev/remote database, a real JWT or auth provider, a running server), judge that test's code statically. Do not fail it for needing the network or for being skipped in the offline gate, and do not ask for an in-process/offline rewrite; add one note that starts with "${NETWORK_TEST_NOTE_PREFIX}" giving the command and the env it needs. A test whose task did not ask for the network is still a finding.`;
 
+// Shared helper: a manual-check note prefix matches when it appears at the
+// very start of the text OR immediately after a leading location part that
+// ends in ": " (e.g. "path/a.tsx: BROWSER CHECK NOT POSSIBLE: ..."). The
+// match is case-insensitive. The prefix must NOT be matched in the middle of
+// an ordinary sentence (no leading ": " before it).
+export function isManualCheckPrefixNote(text, prefix) {
+  if (typeof text !== "string" || typeof prefix !== "string") return false;
+  const trimmed = text.trim();
+  const p = prefix.toLowerCase();
+  const t = trimmed.toLowerCase();
+  const idx = t.indexOf(p);
+  if (idx === -1) return false;
+  if (idx === 0) return true;
+  const head = trimmed.slice(0, idx);
+  return head.endsWith(": ");
+}
+
 export function isBrowserCheckFinding(text) {
   if (typeof text !== "string") return false;
   const trimmed = text.trim();
-  if (trimmed.toLowerCase().startsWith(BROWSER_CHECK_NOTE_PREFIX.toLowerCase())) {
+  if (isManualCheckPrefixNote(trimmed, BROWSER_CHECK_NOTE_PREFIX)) {
     return true;
   }
   if (/^(?:manual (?:check|test) (?:required|needed|run)|browser (?:check|test) (?:required|not possible|manual run))/i.test(trimmed)) {
@@ -61,7 +78,7 @@ export function isBrowserCheckFinding(text) {
 
 export function isNetworkGatedTestFinding(text) {
   if (typeof text !== "string") return false;
-  return text.trim().toLowerCase().startsWith(NETWORK_TEST_NOTE_PREFIX.toLowerCase());
+  return isManualCheckPrefixNote(text.trim(), NETWORK_TEST_NOTE_PREFIX);
 }
 
 const MANUAL_FINDING_FIELDS = ["problem", "finding", "text", "summary", "message"];
@@ -210,7 +227,6 @@ export function browserVerifierNote(facts = {}) {
 
 function extractPrefixedNotes(review, prefix) {
   try {
-    const p = prefix.toLowerCase();
     const result = [];
     const candidates = [];
     if (Array.isArray(review?.notes)) candidates.push(...review.notes);
@@ -218,7 +234,7 @@ function extractPrefixedNotes(review, prefix) {
     for (const item of candidates) {
       if (typeof item === "string") {
         const trimmed = item.trim();
-        if (trimmed.toLowerCase().startsWith(p)) {
+        if (isManualCheckPrefixNote(trimmed, prefix)) {
           result.push(item);
         }
       }

@@ -214,9 +214,20 @@ process.stdin.on("end", () => {
     const isPhaseReview = stdin.includes("Review the whole phase");
     const isRetry = stdin.includes("FEEDBACK TO ADDRESS:");
     const decision = (isPhaseReview && !isRetry) ? "FAIL" : "PASS";
-    const sentinel = "AUTOPILOT_REVIEW=" + JSON.stringify(decision === "FAIL"
+    let previous;
+    if (decision === "PASS") {
+      const m = stdin.match(/(?:FEEDBACK TO ADDRESS|Unconfirmed earlier findings):\\r?\\n([\\s\\S]*?)(?:\\r?\\n\\r?\\n|$)/);
+      if (m) {
+        const items = m[1].split(/\\r?\\n/).map(l => l.trim()).filter(Boolean)
+          .map(l => l.replace(/^\\d+\\.\\s*/, ""))
+          .map(f => ({finding: f, status: "fixed"}));
+        if (items.length) previous = items;
+      }
+    }
+    const payload = decision === "FAIL"
       ? {decision, findings: ["fix the implementation"]}
-      : {decision, findings: []});
+      : (previous ? {decision, findings: [], previous} : {decision, findings: []});
+    const sentinel = "AUTOPILOT_REVIEW=" + JSON.stringify(payload);
     return finish("fake-code-reviewer-session", sentinel);
   }
 

@@ -195,7 +195,7 @@ const FACTS = {
     declaredMany.length === 1 && declaredMany[0].source === "declared" &&
     JSON.stringify(declaredMany[0].taskIds) === JSON.stringify([IDS[0]]), declaredMany);
 
-  const unknown = map([{...FINDING, tasks: ["T9", "nope"]}]);
+  const unknown = map([{problem: "invented labels", tasks: ["T9", "nope"]}]);
   check("resolve: invented labels are dropped, not guessed",
     unknown[0].source === "none" && unknown[0].taskIds.length === 0, unknown);
 
@@ -212,8 +212,8 @@ const FACTS = {
     single[0].source === "file" && JSON.stringify(single[0].taskIds) === JSON.stringify([IDS[1]]), single);
 
   const unowned = map([{location: "nope.js", problem: "nobody owns this"}]);
-  check("resolve: a location no task owns maps to none, never a near-miss",
-    unowned[0].source === "none" && unowned[0].taskIds.length === 0, unowned);
+  check("resolve: a location no mission task owns routes to first task as phase",
+    unowned[0].source === "phase" && JSON.stringify(unowned[0].taskIds) === JSON.stringify([IDS[0]]), unowned);
 
   const noLocation = map([{problem: "nowhere in particular"}]);
   check("resolve: an object with no location maps to none", noLocation[0].source === "none", noLocation);
@@ -238,7 +238,7 @@ const FACTS = {
   check("affected: fully mapped entries yield allMapped true", allMapped === true, {entries, allMapped});
 
   const withNone = mapFindingsToTasks({
-    findings: [{...FINDING, tasks: ["T1"]}, {location: "nope.js", problem: "unattributable"}],
+    findings: [{...FINDING, tasks: ["T1"]}, {problem: "unattributable"}],
     taskIds: IDS, factsByTask: FACTS,
   });
   const partial = affectedTaskIds(withNone, IDS);
@@ -619,18 +619,21 @@ const FACTS = {
       phase.length === 1 && phase[0].source === "file" &&
       JSON.stringify(phase[0].taskIds) === JSON.stringify([IDS[0]]), phase);
     const bare = map([{tasks: [], problem: "wiring"}]);
-    check("phase: an explicit empty tag with no location stays phase",
-      bare.length === 1 && bare[0].source === "phase" && bare[0].taskIds.length === 0, bare);
+    check("phase: an explicit empty tag with no location stays phase and goes to first task",
+      bare.length === 1 && bare[0].source === "phase" && JSON.stringify(bare[0].taskIds) === JSON.stringify([IDS[0]]), bare);
     const unowned = map([{tasks: [], location: "nope.js", problem: "wiring"}]);
-    check("phase: an explicit empty tag with a file no task owns stays phase",
-      unowned.length === 1 && unowned[0].source === "phase" && unowned[0].taskIds.length === 0, unowned);
+    check("phase: an explicit empty tag with a file no task owns stays phase and goes to first task",
+      unowned.length === 1 && unowned[0].source === "phase" && JSON.stringify(unowned[0].taskIds) === JSON.stringify([IDS[0]]), unowned);
   }
 
-  // 2. Missing `tasks`: no file match → "none"; file match → "file".
-  // Unknown-only labels fall through to the file fallback, then to "none".
+  // 2. Missing `tasks`: file match → "file"; unowned file → "phase" (first task); no location → "none".
+  // Unknown-only labels fall through to the file fallback, then to unowned-file/none.
   {
-    check("phase: missing tag with no file match is reviewer error (none)",
-      map([{location: "nope.js", problem: "x"}])[0].source === "none");
+    check("phase: missing tag with unowned file goes to first task as phase",
+      map([{location: "nope.js", problem: "x"}])[0].source === "phase" &&
+      JSON.stringify(map([{location: "nope.js", problem: "x"}])[0].taskIds) === JSON.stringify([IDS[0]]));
+    check("phase: missing tag with no location is reviewer error (none)",
+      map([{problem: "x"}])[0].source === "none");
     check("phase: missing tag with a file match still resolves by file",
       JSON.stringify(map([{location: "other.js", problem: "x"}])[0]) ===
       JSON.stringify({taskIds: [IDS[1]], source: "file"}));
@@ -639,8 +642,8 @@ const FACTS = {
       unknownFile[0].source === "file" &&
       JSON.stringify(unknownFile[0].taskIds) === JSON.stringify([IDS[1]]), unknownFile);
     const unknownNone = map([{tasks: ["T5"], location: "nope.js", problem: "x"}]);
-    check("phase: unknown-only labels with no file match resolve to none",
-      unknownNone[0].source === "none" && unknownNone[0].taskIds.length === 0, unknownNone);
+    check("phase: unknown-only labels with unowned file resolve to first task as phase",
+      unknownNone[0].source === "phase" && JSON.stringify(unknownNone[0].taskIds) === JSON.stringify([IDS[0]]), unknownNone);
   }
 
   // 4c. `["T5"]` in a 3-task phase is "none"; `["T1","T5"]` is declared T1.
@@ -678,9 +681,9 @@ const FACTS = {
     ]);
     const loaded = loadFindingTasks(st, KEY, {phaseTaskDigest: DIGEST});
     check("phase: a record containing a phase entry loads",
-      loaded !== null && loaded.allMapped === false &&
+      loaded !== null && loaded.allMapped === true &&
       loaded.entries[1].source === "phase" &&
-      JSON.stringify(loaded.affected) === JSON.stringify([IDS[1]]), loaded);
+      JSON.stringify(loaded.affected) === JSON.stringify([IDS[0], IDS[1]]), loaded);
 
     const unknown = JSON.parse(JSON.stringify(st));
     unknown[FINDING_TASKS_STATE_KEY][KEY].entries[1].source = "someday";
@@ -688,6 +691,7 @@ const FACTS = {
       loadFindingTasks(unknown, KEY, {phaseTaskDigest: DIGEST}) === null);
 
     const liedPhase = JSON.parse(JSON.stringify(st));
+    liedPhase[FINDING_TASKS_STATE_KEY][KEY].entries[1].taskIds = [];
     liedPhase[FINDING_TASKS_STATE_KEY][KEY].allMapped = true;
     check("phase: stored allMapped:true next to a phase entry returns null",
       loadFindingTasks(liedPhase, KEY, {phaseTaskDigest: DIGEST}) === null);
@@ -699,12 +703,12 @@ const FACTS = {
       loadFindingTasks(liedNone, KEY, {phaseTaskDigest: DIGEST}) === null);
 
     const reordered = JSON.parse(JSON.stringify(st));
-    reordered[FINDING_TASKS_STATE_KEY][KEY].affected = [IDS[1]];
+    reordered[FINDING_TASKS_STATE_KEY][KEY].affected = [IDS[0], IDS[1]];
     check("phase: a matching recompute still loads (sanity)",
       loadFindingTasks(reordered, KEY, {phaseTaskDigest: DIGEST}) !== null);
   }
 
-  // 4b (unit). One declared-T1 entry plus one phase entry carries nothing.
+  // 4b (unit). One declared-T1 entry plus one phase entry carries unaffected tasks.
   {
     const {st} = record([
       {tasks: ["T1"], location: "docs/x.md", problem: "t1", correction: "fix"},
@@ -715,15 +719,21 @@ const FACTS = {
       [IDS[2]]: {summary: "t3", files: ["docs/readme.md"]},
     });
     const loaded = loadFindingTasks(st, KEY, {phaseTaskDigest: DIGEST});
-    check("phase: declared+phase records empty carry",
-      loaded !== null && JSON.stringify(loaded.carry) === JSON.stringify({}), loaded?.carry);
-    for (const id of IDS) {
+    check("phase: declared+phase records carry for unflagged tasks",
+      loaded !== null && loaded.allMapped === true && !!loaded.carry?.[IDS[1]] && !!loaded.carry?.[IDS[2]], loaded?.carry);
+    const d0 = carryDecision({
+      record: loaded, taskId: IDS[0],
+      progress: {implementer: {completedTaskIds: [], factsByTask: {}}},
+      revision: 2, phaseTaskDigest: DIGEST,
+    });
+    check("phase: affected task 0 does not carry", d0.carry === false && d0.reason === "affected", d0);
+    for (const id of [IDS[1], IDS[2]]) {
       const d = carryDecision({
         record: loaded, taskId: id,
         progress: {implementer: {completedTaskIds: [], factsByTask: {}}},
         revision: 2, phaseTaskDigest: DIGEST,
       });
-      check(`phase: declared+phase carries nothing (task ${id})`, d.carry === false, d);
+      check(`phase: declared+phase carries unflagged task ${id}`, d.carry === true, d);
     }
   }
 
@@ -858,35 +868,56 @@ const FACTS = {
       check(`per-task: a non-owner (${id}) sees the shared file finding as read-only handled`,
         other.fallback === false && other.own.length === 0 && other.phaseWide.length === 0 &&
         other.unlinked.length === 0 && other.handled.length === 1 &&
-        other.handled[0].taskLabel === "T1" && other.handled[0].finding === findings[0], other);
+        other.handled[0].taskLabel === `T1 (${IDS[0]})` && other.handled[0].finding === findings[0], other);
     }
   }
 
-  // "phase" lands in phaseWide and "none" lands in unlinked, never swapped,
-  // and every task gets both; an unknown source lands in unlinked.
+  // Phase-wide findings route to one task (own); other tasks see them in handled.
+  // Genuinely unlinked findings ("none" or unknown source) land in unlinked for every task.
   {
     const raw = [
       {tasks: [], location: "docs/w.md", problem: "wiring", correction: "rewire"},
       {location: "nope.js", problem: "nowhere"},
     ];
     const {findings, record} = makeRecord(raw);
-    check("per-task: fixture sources are phase then none",
-      record.entries[0].source === "phase" && record.entries[1].source === "none", record.entries);
-    for (const id of IDS) {
+    check("per-task: both unowned findings route as phase",
+      record.entries[0].source === "phase" && record.entries[1].source === "phase", record.entries);
+    const g0 = findingsForTask({findings, record, taskId: IDS[0], revision: 2});
+    check("per-task: owner task IDS[0] gets both phase-wide findings in own",
+      g0.fallback === false && g0.own.length === 2 &&
+      g0.own[0] === findings[0] && g0.own[1] === findings[1] &&
+      g0.phaseWide.length === 0 && g0.unlinked.length === 0 && g0.handled.length === 0, g0);
+    for (const id of [IDS[1], IDS[2]]) {
       const g = findingsForTask({findings, record, taskId: id, revision: 2});
-      check(`per-task: every task gets the phase-wide finding (${id})`,
+      check(`per-task: non-owner task (${id}) sees phase-wide findings in handled`,
         g.fallback === false && g.own.length === 0 &&
-        g.phaseWide.length === 1 && g.phaseWide[0] === findings[0] &&
-        g.unlinked.length === 1 && g.unlinked[0] === findings[1] &&
-        g.handled.length === 0, g);
+        g.phaseWide.length === 0 && g.unlinked.length === 0 &&
+        g.handled.length === 2 &&
+        g.handled[0].taskLabel === `T1 (${IDS[0]})` && g.handled[0].finding === findings[0] &&
+        g.handled[1].taskLabel === `T1 (${IDS[0]})` && g.handled[1].finding === findings[1], g);
     }
+
+    const unlinkedRaw = [
+      {problem: "wiring with no loc", correction: "rewire"},
+      "nowhere plain string",
+    ];
+    const {findings: uFindings, record: uRecord} = makeRecord(unlinkedRaw);
+    check("per-task: entries without location/tasks are none",
+      uRecord.entries[0].source === "none" && uRecord.entries[1].source === "none");
+    for (const id of IDS) {
+      const g = findingsForTask({findings: uFindings, record: uRecord, taskId: id, revision: 2});
+      check(`per-task: every task gets the unlinked finding (${id})`,
+        g.fallback === false && g.own.length === 0 && g.phaseWide.length === 0 &&
+        g.unlinked.length === 2 && g.handled.length === 0, g);
+    }
+
     const tampered = JSON.parse(JSON.stringify(record));
     tampered.entries[0].source = "someday";
     const g = findingsForTask({findings, record: tampered, taskId: IDS[0], revision: 2});
     check("per-task: an unknown future source lands in unlinked, never phase-wide",
       g.fallback === false && g.phaseWide.length === 0 &&
-      g.unlinked.length === 2 &&
-      g.unlinked[0] === findings[0] && g.unlinked[1] === findings[1] &&
+      g.unlinked.length === 1 &&
+      g.unlinked[0] === findings[0] &&
       g.handled.length === 0, g);
   }
 
@@ -899,7 +930,7 @@ const FACTS = {
     check("per-task: another task's declared finding is dropped from every action group",
       g.fallback === false && g.own.length === 0 && g.phaseWide.length === 0 && g.unlinked.length === 0, g);
     check("per-task: another task's declared finding appears only in handled",
-      g.handled.length === 1 && g.handled[0].taskLabel === "T2" &&
+      g.handled.length === 1 && g.handled[0].taskLabel === `T2 (${IDS[1]})` &&
       g.handled[0].finding === findings[0], g.handled);
     const owner = findingsForTask({findings, record, taskId: IDS[1], revision: 2});
     check("per-task: the owner gets it in own and nothing in handled",
@@ -964,7 +995,7 @@ const FACTS = {
     check("per-task: no finding for the task yields empty action groups",
       g.fallback === false && g.own.length === 0 && g.phaseWide.length === 0 && g.unlinked.length === 0, g);
     check("per-task: no finding for the task still shows the other task's as handled",
-      g.handled.length === 1 && g.handled[0].taskLabel === "T2" && g.handled[0].finding === findings[0], g.handled);
+      g.handled.length === 1 && g.handled[0].taskLabel === `T2 (${IDS[1]})` && g.handled[0].finding === findings[0], g.handled);
   }
 
   // Order within each group is the original finding order.
@@ -991,8 +1022,8 @@ const FACTS = {
     check("per-task: handled keeps the original order and the per-finding owner",
       g.fallback === false && g.own.length === 0 && g.handled.length === 2 &&
       JSON.stringify(g.handled) === JSON.stringify([
-        {taskLabel: "T2", finding: findings[0]},
-        {taskLabel: "T3", finding: findings[1]},
+        {taskLabel: `T2 (${IDS[1]})`, finding: findings[0]},
+        {taskLabel: `T3 (${IDS[2]})`, finding: findings[1]},
       ]), g.handled);
   }
 
@@ -1007,7 +1038,7 @@ const FACTS = {
     const g = findingsForTask({findings, record: legacy, taskId: IDS[2], revision: 2});
     check("handled: a legacy multi-owner entry renders every owner label",
       g.fallback === false && g.own.length === 0 && g.handled.length === 1 &&
-      g.handled[0].taskLabel === "T1, T2" && g.handled[0].finding === findings[0], g.handled);
+      g.handled[0].taskLabel === `T1 (${IDS[0]}), T2 (${IDS[1]})` && g.handled[0].finding === findings[0], g.handled);
     // The owner itself still gets it in own, never in handled, even when
     // the legacy entry names more than one task.
     const owner = findingsForTask({findings, record: legacy, taskId: IDS[1], revision: 2});
@@ -1132,7 +1163,7 @@ const FACTS = {
     check("ownership: excludes current-phase task from cross-phase matching",
       findExactFileOwner("vitest.config.ts", loaded, ["standalone:P1:T0:0123456789ab"]) === null);
 
-    // Multi-owner ambiguity returns null (does not guess)
+    // Backlog #8 (b): multi-owner all in earlier phases produces synthetic targeted repair
     recordTaskOwnership(state, {
       taskId: "standalone:P1:T1:abcdef012345",
       phaseIndex: 0,
@@ -1140,8 +1171,16 @@ const FACTS = {
       phaseName: "foundation",
       files: ["vitest.config.ts"],
     });
-    check("ownership: non-unique multi-owner returns null",
-      findExactFileOwner("vitest.config.ts", loadTaskOwnership(state), []) === null);
+    const multiOwner = findExactFileOwner("vitest.config.ts", loadTaskOwnership(state), []);
+    check("ownership: multi-owner all in earlier phases returns synthetic repair",
+      multiOwner?.taskId === "cross-phase-file:vitest.config.ts" &&
+      multiOwner?.synthetic === true &&
+      Array.isArray(multiOwner?.ownerTasks) &&
+      multiOwner.ownerTasks.length === 2 &&
+      multiOwner.ownerTasks.includes("standalone:P1:T0:0123456789ab") &&
+      multiOwner.ownerTasks.includes("standalone:P1:T1:abcdef012345"), multiOwner);
+    check("ownership: multi-owner with one in current phase returns null",
+      findExactFileOwner("vitest.config.ts", loadTaskOwnership(state), ["standalone:P1:T1:abcdef012345"]) === null);
 
     // clearTaskOwnership
     clearTaskOwnership(state);
@@ -1325,6 +1364,118 @@ const FACTS = {
       cDisjoint.carry === true, cDisjoint);
   }
 
+  // 2b. Backlog #8: finding in a file with SEVERAL earlier owners becomes ONE targeted cross-phase repair
+  {
+    const state = {};
+    const earlierOwners = [
+      {taskId: "standalone:P1:T0:aaa111", phaseIndex: 0, phaseNumber: 1, phaseName: "core-init", files: ["src/shared-util.test.ts"]},
+      {taskId: "standalone:P2:T1:bbb222", phaseIndex: 1, phaseNumber: 2, phaseName: "core-ext", files: ["src/shared-util.test.ts"]},
+      {taskId: "standalone:P2:T2:ccc333", phaseIndex: 1, phaseNumber: 2, phaseName: "core-ext", files: ["src/shared-util.test.ts"]},
+    ];
+    for (const o of earlierOwners) recordTaskOwnership(state, o);
+
+    const currentTaskIds = ["standalone:P3:T0:cur001", "standalone:P3:T1:cur002"];
+    const key = "standalone-phase:2";
+    const digest = "phase-2-digest";
+    const finding = {
+      location: "src/shared-util.test.ts:42",
+      problem: "beforeEach hook timeout (>10 s) in test runner",
+      correction: "Increase hook timeout or isolate mock setup",
+    };
+    saveReviewFeedback(state, key, [finding]);
+
+    const factsByTask = {
+      [currentTaskIds[0]]: {files: ["src/feature-a.ts"], summary: "implemented feature a"},
+      [currentTaskIds[1]]: {files: ["src/feature-b.ts"], summary: "implemented feature b"},
+    };
+
+    const record = recordFindingTasks(state, key, {
+      phaseTaskDigest: digest,
+      findings: [finding],
+      taskIds: currentTaskIds,
+      factsByTask,
+      revision: 1,
+      carryAllowed: true,
+      taskOwnership: loadTaskOwnership(state),
+    });
+
+    check("backlog-8: finding resolved with source cross-phase for multi-earlier-owner file",
+      record?.entries?.[0]?.source === "cross-phase", record?.entries);
+    check("backlog-8: synthetic repair taskId is cross-phase-file:<path>",
+      record?.entries?.[0]?.taskIds?.[0] === "cross-phase-file:src/shared-util.test.ts");
+    check("backlog-8: entry preserves ownerTasks array of all earlier owners",
+      record?.entries?.[0]?.ownerTasks?.length === 3 &&
+      record?.entries?.[0]?.ownerTasks?.includes("standalone:P1:T0:aaa111") &&
+      record?.entries?.[0]?.ownerTasks?.includes("standalone:P2:T2:ccc333"));
+    check("backlog-8: allMapped is true (does NOT fall back to redo-all)",
+      record?.allMapped === true);
+    check("backlog-8: affected taskIds list is empty (no current-phase task affected)",
+      Array.isArray(record?.affected) && record.affected.length === 0);
+    check("backlog-8: crossPhase list has exactly one targeted repair",
+      record?.crossPhase?.length === 1 && record.crossPhase[0]?.taskId === "cross-phase-file:src/shared-util.test.ts");
+    check("backlog-8: crossPhase entry contains ownerTasks context",
+      record?.crossPhase?.[0]?.ownerTasks?.length === 3);
+
+    // Current phase tasks carry forward
+    const progress = {implementer: {completedTaskIds: []}};
+    const c0 = carryDecision({record, taskId: currentTaskIds[0], progress, revision: 2, phaseTaskDigest: digest});
+    const c1 = carryDecision({record, taskId: currentTaskIds[1], progress, revision: 2, phaseTaskDigest: digest});
+    check("backlog-8: current task 0 carries forward", c0.carry === true, c0);
+    check("backlog-8: current task 1 carries forward", c1.carry === true, c1);
+
+    // Build prompt with all owner tasks
+    const repairPrompt = buildCrossPhaseRepairPrompt({
+      owner: {taskId: "cross-phase-file:src/shared-util.test.ts"},
+      findingText: "Increase hook timeout or isolate mock setup",
+      file: "src/shared-util.test.ts",
+      taskRef: "cross-phase-file:src/shared-util.test.ts",
+      ownerTasks: record.crossPhase[0].ownerTasks,
+    });
+    check("backlog-8: repair brief names the file",
+      repairPrompt.includes("File: src/shared-util.test.ts"));
+    check("backlog-8: repair brief includes ALL owner tasks as context",
+      repairPrompt.includes("standalone:P1:T0:aaa111") &&
+      repairPrompt.includes("standalone:P2:T1:bbb222") &&
+      repairPrompt.includes("standalone:P2:T2:ccc333"));
+    check("backlog-8: repair brief includes finding text",
+      repairPrompt.includes("Increase hook timeout or isolate mock setup"));
+
+    // Execute repair
+    let executedRole = null;
+    let executedPrompt = null;
+    const mockRelay = async (role, prompt) => {
+      executedRole = role;
+      executedPrompt = prompt;
+      return {
+        status: "completed",
+        touchedFiles: ["src/shared-util.test.ts"],
+        response: "Fixed timeout in test",
+      };
+    };
+
+    const execResult = await executePendingCrossPhaseRepairs({
+      state,
+      key,
+      framework: "standalone",
+      relay: mockRelay,
+      config: {policy: {}},
+      phaseRequirements: "phase requirements",
+      perTaskLimits: {taskTimeoutMs: 60000, perTaskTokens: 100000},
+      feedback: "Timeout error",
+      onPolicyViolation: () => {},
+    });
+
+    check("backlog-8: repair executed via relay with implementer",
+      execResult.repaired === true && executedRole === "implementer" && executedPrompt?.includes("src/shared-util.test.ts"));
+
+    // Completed record
+    const updatedRecord = loadFindingTasks(state, key, {phaseTaskDigest: digest});
+    check("backlog-8: synthetic repair recorded in completedCrossPhaseRepairs",
+      !!updatedRecord?.completedCrossPhaseRepairs?.["cross-phase-file:src/shared-util.test.ts"]);
+    check("backlog-8: pendingCrossPhaseRepairs returns empty array after completion",
+      pendingCrossPhaseRepairs(updatedRecord).length === 0);
+  }
+
   // 3. Run-108 shape: manual check markers filtered, structured findings mapped, unaffected carry
   {
     const state = {};
@@ -1391,7 +1542,7 @@ const FACTS = {
     check("run-108: unaffected T2 carries forward", cT2.carry === true, cT2);
   }
 
-  // 4. Genuine phase-wide finding fails closed
+  // 4. Phase-wide finding routes to ONE task (backlog #8)
   {
     const state = {};
     const taskIds = ["standalone:P2:T0:aaa", "standalone:P2:T1:bbb"];
@@ -1417,14 +1568,16 @@ const FACTS = {
 
     const record = loadFindingTasks(state, key, {phaseTaskDigest: digest});
     check("phase-wide: source is phase", record?.entries?.[0]?.source === "phase");
-    check("phase-wide: allMapped is false", record?.allMapped === false);
-    check("phase-wide: carry is empty", Object.keys(record?.carry || {}).length === 0);
+    check("phase-wide: allMapped is true", record?.allMapped === true);
+    check("phase-wide: assigned to exactly task 0",
+      JSON.stringify(record?.affected) === JSON.stringify([taskIds[0]]));
+    check("phase-wide: task 1 is in carry", !!record?.carry?.[taskIds[1]]);
 
     const progress = {implementer: {completedTaskIds: [], factsByTask: {}}};
     const c0 = carryDecision({record, taskId: taskIds[0], progress, revision: 2, phaseTaskDigest: digest});
     const c1 = carryDecision({record, taskId: taskIds[1], progress, revision: 2, phaseTaskDigest: digest});
-    check("phase-wide: task 0 does not carry", c0.carry === false && c0.reason === "no-carry-entry");
-    check("phase-wide: task 1 does not carry", c1.carry === false && c1.reason === "no-carry-entry");
+    check("phase-wide: task 0 does not carry", c0.carry === false && c0.reason === "affected");
+    check("phase-wide: task 1 carries forward", c1.carry === true, c1);
   }
 
   // 5. Genuine unlinked finding fails closed
@@ -1812,8 +1965,10 @@ const CARRY_CASES = [
   // `carryAllowed` is true, so T2/T3 carry and only T1 re-launches.
   {scenario: "carry_forward_gate", affectedIndexes: [0], allMapped: true, recordCarryIndexes: [1, 2], carryIndexes: [1, 2], retryIndexes: [0], totalLaunches: 4, hangRole: "verify"},
   // Code review FAILs with one finding tagged ["T2"] and one explicitly
-  // phase-wide (`tasks: []`): allMapped is false, so all 3 re-launch.
-  {scenario: "carry_forward_phasewide", affectedIndexes: [1], allMapped: false, recordCarryIndexes: [], carryIndexes: [], retryIndexes: [0, 1, 2], totalLaunches: 6, hangRole: "review"},
+  // phase-wide (`tasks: []`): under backlog #8, the phase-wide finding routes
+  // to the phase's first task (T1), the declared finding routes to T2, and T3
+  // is carried. allMapped is true; the retry launches T1 and T2 only (5 launches).
+  {scenario: "carry_forward_phasewide", affectedIndexes: [0, 1], allMapped: true, recordCarryIndexes: [2], carryIndexes: [2], retryIndexes: [0, 1], totalLaunches: 5, hangRole: "review"},
 ];
 
 function writeCarryStandaloneMission(repo) {
@@ -2311,7 +2466,7 @@ async function runFindingsPhasewideCase() {
       {status: run.status, timedOut: run.timedOut, tail: String(run.stderr || run.stdout || "").slice(-400)});
     if (run.status !== 0) return;
     const launched = implementerLaunchedIds(repo);
-    check(`${tag}: all 3 tasks re-ran (6 launches)`, launched.length === 6, launched);
+    check(`${tag}: 2 tasks re-ran, T3 carried forward (5 launches)`, launched.length === 5, launched);
 
     const byTask = implementerBriefsByTask(repo);
     const retryBrief = (id) => {
@@ -2325,20 +2480,23 @@ async function runFindingsPhasewideCase() {
       const t1 = retryBrief(ids[0]);
       const t2 = retryBrief(ids[1]);
       const t3 = retryBrief(ids[2]);
-      // Mission 052 (a): FINDING-TWO is T2's own finding; the neighbours see
-      // it only as read-only handled context, never as work of their own.
+      // Backlog #8: FINDING-PHASEWIDE routed to T1; T2 gets FINDING-TWO;
+      // each sees the other's finding as read-only handled context.
+      // T3 has no finding of its own and was carried forward.
       check(`${tag}: T1 gets FINDING-PHASEWIDE as work and FINDING-TWO only read-only`,
         t1.includes("FINDING-PHASEWIDE") &&
         !briefWorkPart(t1).includes("FINDING-TWO") && briefHandledPart(t1).includes("FINDING-TWO"),
         t1.slice(0, 400));
-      check(`${tag}: T3 gets FINDING-PHASEWIDE as work and FINDING-TWO only read-only`,
-        t3.includes("FINDING-PHASEWIDE") &&
-        !briefWorkPart(t3).includes("FINDING-TWO") && briefHandledPart(t3).includes("FINDING-TWO"),
-        t3.slice(0, 400));
-      check(`${tag}: T2 gets both findings`,
-        t2.includes("FINDING-PHASEWIDE") && t2.includes("FINDING-TWO"), t2.slice(0, 400));
-      check(`${tag}: T1 shows the [] finding under the Phase-wide heading`,
-        t1.includes("Phase-wide findings") && t1.includes("FINDING-PHASEWIDE"), t1.slice(0, 400));
+      check(`${tag}: T3 had no retry brief (carried forward)`,
+        t3 === "", t3.slice(0, 400));
+      check(`${tag}: T2 gets FINDING-TWO as work and FINDING-PHASEWIDE only read-only`,
+        t2.includes("FINDING-TWO") &&
+        !briefWorkPart(t2).includes("FINDING-PHASEWIDE") && briefHandledPart(t2).includes("FINDING-PHASEWIDE"),
+        t2.slice(0, 400));
+      check(`${tag}: T1 handled section labels T2 with real ID`,
+        t1.includes(`T2 (${ids[1]})`), t1.slice(0, 400));
+      check(`${tag}: T2 handled section labels T1 with real ID`,
+        t2.includes(`T1 (${ids[0]})`), t2.slice(0, 400));
       check(`${tag}: T1 never files anything under Findings not linked`,
         !t1.includes("Findings not linked"), t1.slice(0, 400));
     } else {

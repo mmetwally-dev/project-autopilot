@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { loadReviewFeedback, feedbackText } from "./review-feedback.mjs";
-import { plannerEarlierRoundsText, planReviewNotesText } from "./plan-review-rounds.mjs";
+import { plannerEarlierRoundsText, planReviewNotesText, sameSectionRedesignLine, PLAN_REVIEW_DEFECT_PATTERN_FIX_INSTRUCTION } from "./plan-review-rounds.mjs";
 
 export function computeFileSha256(filePath) {
   try {
@@ -131,16 +131,20 @@ export function speckitGateNote(s, step, repo, c = {}) {
   if (!gateFindings) return "";
   const gateEarlierRounds = plannerEarlierRoundsText(s, gateKey, c?.workflow?.plan_review_convergence !== false);
   const gateNotes = planReviewNotesText(s, gateKey);
+  const redesignLine = sameSectionRedesignLine(s, gateKey);
   const files = speckitStageFilePaths(repo, s, step);
   const recorded = s?.reviewFeedback?.[gateKey]?.stageFileHashes || s?.reviewStageSnapshots?.[gateKey];
   const changed = stageFilesChangedSinceReview(recorded, files);
   const changedLine = stageFilesChangedLine(changed);
-  return `\n\n${changedLine ? `${changedLine}\n\n` : ""}The plan reviewer REJECTED the previous attempt at this stage. Address every finding; do not repeat the same output:\n${gateFindings}${gateEarlierRounds ? `\n\n${gateEarlierRounds}` : ""}${gateNotes ? `\n\n${gateNotes}` : ""}`;
+  const fixRule = PLAN_REVIEW_DEFECT_PATTERN_FIX_INSTRUCTION;
+  return `\n\n${changedLine ? `${changedLine}\n\n` : ""}${redesignLine ? `${redesignLine}\n\n` : ""}The plan reviewer REJECTED the previous attempt at this stage. Address every finding (${fixRule}); do not repeat the same output:\n${gateFindings}${gateEarlierRounds ? `\n\n${gateEarlierRounds}` : ""}${gateNotes ? `\n\n${gateNotes}` : ""}`;
 }
 
 export function standalonePlanFeedbackNote(s, repo, mission, c = {}, feedback = null) {
   const fb = feedback !== null ? feedback : feedbackText(loadReviewFeedback(s, "standalone-plan"));
   if (!fb) return "";
+  const redesignLine = sameSectionRedesignLine(s, "standalone-plan");
+  const fixRule = PLAN_REVIEW_DEFECT_PATTERN_FIX_INSTRUCTION;
   const planFile = path.join(repo, ".autopilot", "specs", mission || "mission", "PLAN.md");
   const tasksFile = path.join(repo, ".autopilot", "specs", mission || "mission", "TASKS.md");
   const altPlan = path.join(repo, "specs", mission || "mission", "PLAN.md");
@@ -154,19 +158,21 @@ export function standalonePlanFeedbackNote(s, repo, mission, c = {}, feedback = 
   const recorded = s?.reviewFeedback?.["standalone-plan"]?.stageFileHashes || s?.reviewStageSnapshots?.["standalone-plan"];
   const changed = stageFilesChangedSinceReview(recorded, candidateFiles);
   const changedLine = stageFilesChangedLine(changed);
-  return `${changedLine ? `${changedLine}\n\n` : ""}Plan reviewer feedback that MUST be addressed:\n${fb}`;
+  return `${changedLine ? `${changedLine}\n\n` : ""}${redesignLine ? `${redesignLine}\n\n` : ""}Plan reviewer feedback that MUST be addressed (${fixRule}):\n${fb}`;
 }
 
 export function standaloneSpecFeedbackNote(s, repo, mission, c = {}, feedback = null) {
   const fb = feedback !== null ? feedback : feedbackText(loadReviewFeedback(s, "standalone-spec"));
   if (!fb) return "";
+  const redesignLine = sameSectionRedesignLine(s, "standalone-spec");
+  const fixRule = PLAN_REVIEW_DEFECT_PATTERN_FIX_INSTRUCTION;
   const specFile = path.join(repo, "specs", mission || "mission", "SPEC.md");
   const rootSpec = path.join(repo, "SPEC.md");
   const candidateFiles = [fs.existsSync(specFile) ? specFile : rootSpec];
   const recorded = s?.reviewFeedback?.["standalone-spec"]?.stageFileHashes || s?.reviewStageSnapshots?.["standalone-spec"];
   const changed = stageFilesChangedSinceReview(recorded, candidateFiles);
   const changedLine = stageFilesChangedLine(changed);
-  return `${changedLine ? `${changedLine}\n\n` : ""}Spec reviewer feedback that MUST be addressed:\n${fb}`;
+  return `${changedLine ? `${changedLine}\n\n` : ""}${redesignLine ? `${redesignLine}\n\n` : ""}Spec reviewer feedback that MUST be addressed (${fixRule}):\n${fb}`;
 }
 
 export function gsdStageFiles(repo, phase, stage, c = {}) {

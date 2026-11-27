@@ -96,7 +96,7 @@ check("wiring: runFinalReviewSessions injects readOnlyHandoffNoteReminder",
   runFnSlice.includes("readOnlyHandoffNoteReminder({mission, ref"));
 
 check("wiring: runFinalReviewSessions injects readOnlyContinuationNote for carried scratch / note",
-  runFnSlice.includes("readOnlyContinuationNote(readHandoffNote(mission,ref)"));
+  runFnSlice.includes("readOnlyContinuationNote(prevRawNote") || runFnSlice.includes("readOnlyContinuationNote(readHandoffNote(mission,ref)"));
 
 check("wiring: runFinalReviewSessions injects readRolloverDeadEnds for dead ends context",
   runFnSlice.includes("readRolloverDeadEnds(s,contScope)"));

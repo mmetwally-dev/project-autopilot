@@ -235,13 +235,13 @@ check("cells: TURNS stays unprefixed while running",
   // resumed — the orchestrator writes the fallback note from this session's
   // own changed paths (shared changed-files stat limited to those paths) plus the session work
   // digest and records it on the run record.
-  check("caps/wrap-up: breach writes the orchestrator fallback note (no wrap-up resume)",
+  check("caps/wrap-up: breach resumes the session for a note turn, else writes the orchestrator fallback note",
     autopilotSrc.includes("buildOrchestratorFallbackNote(taskRef,events,role.adapter,repo,diffStat,capBreach,sessionPaths)")
     && /changedFilesStat\(cwd,\{paths:sessionPaths\}\)/.test(autopilotSrc)
     && /fs\.writeFileSync\(path\.join\(repo,noteRel\),fallbackNote\)/.test(autopilotSrc)
-    && autopilotSrc.includes('{status:"orchestrator_fallback",reason:"note_missing_or_stale",trigger:capBreach.trigger||null,note:noteRel,fallbackNote:true}')
+    && autopilotSrc.includes('{status:"orchestrator_fallback",reason:"note_missing_or_stale",trigger:capBreach.trigger||null,note:noteRel,fallbackNote:true,')
     && autopilotSrc.includes("fallbackNote:true")
-    && !autopilotSrc.includes('runNote:"wrap-up"')
+    && autopilotSrc.includes('runNote:"wrap-up"')
     && !autopilotSrc.includes('reason:"no_session_id"'));
 }
 

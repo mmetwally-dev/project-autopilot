@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import {
   NETWORK_TEST_NOTE_PREFIX,
   BROWSER_CHECK_NOTE_PREFIX,
+  isBrowserCheckFinding,
+  isNetworkGatedTestFinding,
   splitBrowserFindings,
   splitNetworkTestFindings,
   moveManualCheckFindings,
@@ -427,6 +429,81 @@ function check(name, condition, detail) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// 3b. Location-prefixed manual-check notes (backlog #9)
+// ─────────────────────────────────────────────────────────────
+{
+  const locBrowser = "apps/web/src/app/[locale]/access-blocked/page.tsx and apps/web/src/app/[locale]/(auth)/login/page.tsx: BROWSER CHECK NOT POSSIBLE: No approved browser command was provided. The blocked landing, proxy navigation, and login ...";
+  const locNetwork = "tests/integration/api.test.ts: NETWORK TEST MANUAL RUN: RUN_INTEGRATION=1 npm test";
+  const plainBrowser = `${BROWSER_CHECK_NOTE_PREFIX} check login modal`;
+  const plainNetwork = `${NETWORK_TEST_NOTE_PREFIX} RUN_INTEGRATION=1 npm test`;
+  const midSentence = "the test says browser check not possible is wrong";
+
+  check("location-prefixed browser note is detected by isBrowserCheckFinding",
+    isBrowserCheckFinding(locBrowser) === true);
+  check("location-prefixed network note is detected by isNetworkGatedTestFinding",
+    isNetworkGatedTestFinding(locNetwork) === true);
+  check("plain browser note still detected",
+    isBrowserCheckFinding(plainBrowser) === true);
+  check("plain network note still detected",
+    isNetworkGatedTestFinding(plainNetwork) === true);
+  check("mid-sentence mention stays a finding (browser)",
+    isBrowserCheckFinding(midSentence) === false);
+  check("mid-sentence mention stays a finding (network)",
+    isNetworkGatedTestFinding("the docs note network test manual run: maybe") === false);
+
+  // moveManualCheckFindings moves location-prefixed notes
+  {
+    const review = { decision: "FAIL", findings: [locBrowser, locNetwork, "real finding"] };
+    const { moved } = moveManualCheckFindings(review);
+    check("location-prefixed notes are moved", moved.length === 2 && moved.includes(locBrowser) && moved.includes(locNetwork));
+    check("only real finding remains", review.findings.length === 1 && review.findings[0] === "real finding");
+  }
+
+  // all-notes verdict counts as PASS
+  {
+    const s = { phaseIndex: 99, recordedManualCheckNotes: {} };
+    const review = { decision: "FAIL", findings: [locBrowser, locNetwork] };
+    const { moved } = moveManualCheckFindings(review);
+    const fresh = filterUnrecordedManualChecks(s, "Phase 99", moved);
+    check("all-notes: moved count is 2", moved.length === 2);
+    check("all-notes: findings emptied", review.findings.length === 0);
+    // notes recorded to MANUAL-CHECKS.md
+    const tmpDir = fs.mkdtempSync(path.join(process.cwd(), "scripts", ".tmp-loc-notes-"));
+    try {
+      appendManualChecks(tmpDir, { phaseName: "Phase 99", notes: fresh, at: "2026-11-16T00:00:00.000Z" });
+      const content = fs.readFileSync(path.join(tmpDir, "MANUAL-CHECKS.md"), "utf8");
+      check("all-notes: browser note recorded", content.includes(locBrowser));
+      check("all-notes: network note recorded", content.includes(locNetwork));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+    review.decision = verifierVerdictAfterManualMove({ decision: review.decision, remaining: review.findings, gateOk: true, evidenceOk: true });
+    check("all-notes verdict is not FAIL (PASS)", review.decision === "PASS");
+
+    // a FAIL verdict whose findings are only the two location-prefixed notes -> PASS
+    const allNotesReview = { decision: "FAIL", findings: [locBrowser, locNetwork] };
+    moveManualCheckFindings(allNotesReview);
+    allNotesReview.decision = verifierVerdictAfterManualMove({ decision: "FAIL", remaining: allNotesReview.findings, gateOk: true, evidenceOk: true });
+    check("FAIL verdict with only the two location-prefixed notes -> PASS", allNotesReview.decision === "PASS");
+
+    // a verdict with one real finding left stays FAIL
+    const oneRealReview = { decision: "FAIL", findings: [locBrowser, locNetwork, "real finding"] };
+    moveManualCheckFindings(oneRealReview);
+    oneRealReview.decision = verifierVerdictAfterManualMove({ decision: oneRealReview.decision, remaining: oneRealReview.findings, gateOk: true, evidenceOk: true });
+    check("verdict with one real finding left stays FAIL", oneRealReview.decision === "FAIL");
+  }
+
+  // extractPrefixedNotes keeps location in note text
+  {
+    const review = { notes: [locBrowser], findings: [locNetwork] };
+    const browserNotes = browserCheckNotes(review);
+    const networkNotes = networkCheckNotes(review);
+    check("extractPrefixedNotes keeps location (browser)", browserNotes.length === 1 && browserNotes[0] === locBrowser);
+    check("extractPrefixedNotes keeps location (network)", networkNotes.length === 1 && networkNotes[0] === locNetwork);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // 4. Source checks in autopilot.mjs
 // ─────────────────────────────────────────────────────────────
 {
@@ -438,7 +515,7 @@ function check(name, condition, detail) {
   );
 
   // Standalone verifier section inspection
-  const standaloneMatch = autopilotSrc.match(/const vv=await relayAsync\("verifier",[\s\S]*?recordPhaseFindingTasks\(phaseKey/);
+  const standaloneMatch = autopilotSrc.match(/const vv=await (?:relayAsync\("verifier"|relayVerifierWithApp\()[\s\S]*?recordPhaseFindingTasks\(phaseKey/);
   check("standalone verifier block located", Boolean(standaloneMatch));
   if (standaloneMatch) {
     const block = standaloneMatch[0];
@@ -462,7 +539,7 @@ function check(name, condition, detail) {
   }
 
   // SpecKit verifier section inspection
-  const speckitMatch = autopilotSrc.match(/const vv=await relayAsync\("verifier",[\s\S]*?speckitPhaseFeedbackKey\(s\.phaseIndex\)/);
+  const speckitMatch = autopilotSrc.match(/const vv=await (?:relayAsync\("verifier"|relayVerifierWithApp\()[\s\S]*?speckitPhaseFeedbackKey\(s\.phaseIndex\)/);
   check("speckit verifier block located", Boolean(speckitMatch));
   if (speckitMatch) {
     const block = speckitMatch[0];

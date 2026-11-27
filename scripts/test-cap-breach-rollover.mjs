@@ -210,8 +210,14 @@ function splitGenerations(repo, impls) {
     const gen1out = (() => { try { return fs.readFileSync(path.join(path.dirname(impls[0]?.file || ""), "stdout.log"), "utf8"); } catch { return ""; } })();
     check("s1: generation 1 ran the fixture binary (no sessionID in stdout)", !gen1out.includes("sessionID"), gen1out.slice(0, 200));
     const {wrapups, generations} = splitGenerations(repo, impls);
-    check("s1: breach produced gen-1, then gen-2 — no wrap-up run (two implementer runs)",
-      impls.length === 2 && generations.length === 2 && wrapups.length === 0, impls.length);
+    check("s1: breach produced gen-1, ONE resumed wrap-up turn, then gen-2 (three implementer runs)",
+      impls.length === 3 && generations.length === 2 && wrapups.length === 1, impls.length);
+    check("s1: the wrap-up turn resumed the same session (--session <id>) and is a wrap-up-noted, uncapped run",
+      statusOf(repo, wrapups[0])?.note === "wrap-up" && !wrapups[0]?.data?.capped
+      && /--session fixture-cap-session/.test((() => { try { return fs.readFileSync(path.join(repo, ".autopilot", ".wrapup-args.log"), "utf8"); } catch { return ""; } })()),
+      statusOf(repo, wrapups[0]));
+    check("s1: wrap-up turn is its own run with its own usage (turns accounted)",
+      Number.isInteger(wrapups[0]?.data?.usage?.turns) && wrapups[0].data.usage.turns >= 1 && wrapups[0].data.usage.turns <= 3, wrapups[0]?.data?.usage);
     const gen1 = generations[0]?.data;
     check("s1: generation 1 capped on turns with the wrap-up flag",
       gen1?.capped?.type === "turns" && gen1.capped.used > 5 && gen1.capped.limit === 5
@@ -222,13 +228,12 @@ function splitGenerations(repo, impls) {
     const gen1status = (() => { try { return JSON.parse(fs.readFileSync(path.join(path.dirname(generations[0]?.file || ""), "status.json"), "utf8")).status; } catch { return null; } })();
     check("s1: generation 1 reports capped, not failed", gen1status === "capped", gen1status);
     check("s1: breach observed to progress", progressText(repo, generations[0]).includes("CAP_BREACH | TYPE=turns"));
-    check("s1: capped gen-1 recorded the orchestrator fallback (never a resumed session)",
-      gen1?.wrapUp?.status === "orchestrator_fallback" && gen1?.wrapUp?.reason === "note_missing_or_stale"
-      && gen1?.wrapUp?.fallbackNote === true && typeof gen1?.wrapUp?.note === "string", gen1?.wrapUp);
-    check("s1: wrap-up outcome observed to progress (fallback, no resume)",
-      progressText(repo, generations[0]).includes("WRAP_UP | STATUS=orchestrator_fallback")
-      && progressText(repo, generations[0]).includes("REASON=note_missing_or_stale")
-      && progressText(repo, generations[0]).includes("PATH=orchestrator_fallback"),
+    check("s1: capped gen-1 recorded model_wrote (the resumed session wrote the note, no fallback)",
+      gen1?.wrapUp?.status === "model_wrote" && gen1?.wrapUp?.resumedSession === true
+      && gen1?.wrapUp?.fallbackNote === undefined && typeof gen1?.wrapUp?.note === "string", gen1?.wrapUp);
+    check("s1: wrap-up outcome observed to progress (model_wrote)",
+      progressText(repo, generations[0]).includes("WRAP_UP | STATUS=model_wrote")
+      && progressText(repo, generations[0]).includes("PATH=model_wrote"),
       progressText(repo, generations[0]).slice(-200));
     check("s1: generation 2 completed", generations[1]?.data?.status === "completed", generations[1]?.data?.status);
     check("s1: generation 2 prompt carried the dead-ends transfer",
@@ -256,20 +261,14 @@ function splitGenerations(repo, impls) {
     check("s1: gen-1 brief named its hand-off note path", typeof gen1NotePath === "string" && gen1NotePath.endsWith(".md"), gen1NotePath);
     const gen2Brief = briefText(repo, generations[1]) || "";
     const gen2Note = noteSectionOf(gen2Brief);
-    check("s1: orchestrator fallback note kept the stale model note at the hand-off path",
-      gen2Note.includes("(orchestrator fallback)")
-      && gen2Note.includes("## Previous note (written by the model)")
-      && gen2Note.includes("GEN1-HANDOFF-MARKER"), gen2Note.slice(0, 400));
-    check("s1: the rendered note is the orchestrator's (diff + digest, not the agent's)",
-      gen2Note.includes("## Changes made in this session")
-      && gen2Note.includes("## Session work digest"), gen2Note.slice(0, 200));
-    check("s1: generation 2 brief renders the orchestrator fallback above the digest",
+    check("s1: the model's wrap-up note is at the hand-off path, never overwritten by a fallback",
+      gen2Note.includes("GEN1-HANDOFF-MARKER") && !gen2Note.includes("(orchestrator fallback)"), gen2Note.slice(0, 400));
+    check("s1: generation 2 brief renders the model's note above the digest",
       gen2Brief.includes("## Hand-off note from the previous session")
-      && gen2Brief.includes("orchestrator fallback")
       && gen2Brief.indexOf("## Hand-off note from the previous session") < gen2Brief.indexOf("## Dead ends from capped generations"),
       gen2Brief.slice(0, 300));
     check("s1: hand-off note removed after the task completed",
-      gen1NotePath ? !fs.existsSync(path.join(repo, gen1NotePath)) : false, gen1NotePath);
+      gen1NotePath ? !fs.existsSync(path.resolve(repo, gen1NotePath)) : false, gen1NotePath);
     check("s1: session store recorded on the run and removed after completion",
       typeof gen1?.sessionStore === "string" && gen1.sessionStore.includes("/sessions/")
       && !fs.existsSync(path.join(repo, gen1.sessionStore)), gen1?.sessionStore);
@@ -289,15 +288,14 @@ function splitGenerations(repo, impls) {
     runAutopilot(repo, binDir, {request: "cap probe", timeoutMs: AP_TIMEOUT_MS});
     const impls = implementerRuns(repo);
     const {wrapups, generations} = splitGenerations(repo, impls);
-    check("s2: wrap-up trigger produced gen-1, then gen-2 — no wrap-up run (two runs)",
-      impls.length === 2 && generations.length === 2 && wrapups.length === 0, impls.length);
+    check("s2: wrap-up trigger produced gen-1, one wrap-up turn, then gen-2",
+      impls.length === 3 && generations.length === 2 && wrapups.length === 1, impls.length);
     const gen1 = generations[0]?.data;
     check("s2: generation 1 stopped at the 180K wrap-up threshold, not the 3M cap",
       gen1?.capped?.type === "tokens" && gen1.capped.used >= 180000 && gen1.capped.limit === 180000
       && gen1.capped.wrapUp === true && gen1.capped.trigger === "tokens", gen1?.capped);
-    check("s2: capped generation recorded the orchestrator fallback note",
-      gen1?.wrapUp?.status === "orchestrator_fallback" && gen1?.wrapUp?.reason === "note_missing_or_stale"
-      && gen1?.wrapUp?.fallbackNote === true, gen1?.wrapUp);
+    check("s2: capped generation recorded model_wrote",
+      gen1?.wrapUp?.status === "model_wrote" && gen1?.wrapUp?.trigger === "tokens", gen1?.wrapUp);
     check("s2: generation 2 completed", generations[1]?.data?.status === "completed", generations[1]?.data?.status);
     const s2gen1status = (() => { try { return JSON.parse(fs.readFileSync(path.join(path.dirname(generations[0]?.file || ""), "status.json"), "utf8")).status; } catch { return null; } })();
     check("s2: generation 1 reports capped, not failed", s2gen1status === "capped", s2gen1status);
@@ -313,11 +311,11 @@ function splitGenerations(repo, impls) {
     const run = runAutopilot(repo, binDir, {request: "cap probe", timeoutMs: AP_TIMEOUT_MS});
     const impls = implementerRuns(repo);
     const {wrapups, generations} = splitGenerations(repo, impls);
-    check("s3: two generations ran (no wrap-up turns), then escalation (no third generation)",
-      generations.length === 2 && wrapups.length === 0, impls.length);
-    check("s3: both capped generations carry the wrap-up flag and the orchestrator fallback",
-      generations.every((g) => g.data?.capped?.wrapUp === true && g.data?.wrapUp?.status === "orchestrator_fallback"
-      && g.data?.wrapUp?.fallbackNote === true),
+    check("s3: two generations ran, each followed by one wrap-up turn, then escalation (no third generation)",
+      generations.length === 2 && wrapups.length === 2, impls.length);
+    check("s3: both capped generations carry the wrap-up flag and model_wrote (wrap-up never re-triggers a wrap-up)",
+      generations.every((g) => g.data?.capped?.wrapUp === true && g.data?.wrapUp?.status === "model_wrote")
+      && wrapups.every((w) => w.data?.wrapUp === undefined || w.data?.wrapUp === null) && wrapups.every((w) => !w.data?.capped),
       generations.map((g) => g.data?.wrapUp));
     const state = readState(repo);
     check("s3: mission escalated as task-not-converging",
@@ -333,7 +331,7 @@ function splitGenerations(repo, impls) {
       && `${run.stdout}\n${run.stderr}`.includes("then ap run"), (run.stderr || "").slice(-300));
     const s3NotePath = (/Keep a hand-off note at (\S+)/.exec(briefText(repo, generations[0]) || "") || [])[1]?.replace(/[.,;:]+$/, "");
     check("s3: hand-off note kept on escalation (post-mortem)",
-      s3NotePath ? fs.existsSync(path.join(repo, s3NotePath)) : false, s3NotePath);
+      s3NotePath ? fs.existsSync(path.resolve(repo, s3NotePath)) : false, s3NotePath);
     check("s3: escalation recorded the continuation for bare `ap reset`",
       (readState(repo).lastContinuation?.scope || "").startsWith("task:standalone:phase-0:"), readState(repo).lastContinuation);
     const key = continuationKey(state);
@@ -352,13 +350,11 @@ function splitGenerations(repo, impls) {
     const run = runAutopilot(repo, binDir, {request: "cap probe", timeoutMs: AP_TIMEOUT_MS});
     const impls = implementerRuns(repo);
     const {wrapups, generations} = splitGenerations(repo, impls);
-    check("s7: exactly two no-edit generations ran (no wrap-up turns), not six",
-      generations.length === 2 && wrapups.length === 0, {generations: generations.length, wrapups: wrapups.length});
-    check("s7: both capped generations recorded the orchestrator fallback (never a resumed session)",
+    check("s7: exactly two no-edit generations ran (one wrap-up turn each), not six",
+      generations.length === 2 && wrapups.length === 2, {generations: generations.length, wrapups: wrapups.length});
+    check("s7: both capped generations recorded model_wrote",
       generations.every((g) => g.data?.capped?.wrapUp === true
-      && g.data?.wrapUp?.status === "orchestrator_fallback"
-      && g.data?.wrapUp?.reason === "note_missing_or_stale"
-      && g.data?.wrapUp?.fallbackNote === true),
+      && g.data?.wrapUp?.status === "model_wrote"),
       generations.map((g) => g.data?.wrapUp));
     const state = readState(repo);
     check("s7: mission escalated as task-no-progress",
@@ -387,12 +383,11 @@ function splitGenerations(repo, impls) {
     const run = runAutopilot(repo, binDir, {request: "cap probe", timeoutMs: AP_TIMEOUT_MS});
     const impls = implementerRuns(repo);
     const {wrapups, generations} = splitGenerations(repo, impls);
-    check("s4: two generations ran (no wrap-up turns), then escalation (no third generation)",
-      generations.length === 2 && wrapups.length === 0, impls.length);
-    check("s4: generation 1 capped on turns, fallback note recorded (never a resumed session)",
-      generations[0]?.data?.capped?.type === "turns" && generations[0]?.data?.wrapUp?.status === "orchestrator_fallback"
-      && generations[0]?.data?.wrapUp?.fallbackNote === true,
-      generations[0]?.data?.capped);
+    check("s4: two generations ran (one wrap-up turn after the capped gen-1), then escalation",
+      generations.length === 2 && wrapups.length === 1, impls.length);
+    check("s4: generation 1 capped on turns, note written by the resumed session",
+      generations[0]?.data?.capped?.type === "turns" && generations[0]?.data?.wrapUp?.status === "model_wrote",
+      generations[0]?.data?.wrapUp);
     const state = readState(repo);
     check("s4: mission escalated as task-not-converging",
       state.phase === "escalated" && state.step === "standalone_task_not_converging",
@@ -424,14 +419,14 @@ function splitGenerations(repo, impls) {
     runAutopilot(repo, binDir, {request: "cap probe", timeoutMs: AP_TIMEOUT_MS});
     const impls = implementerRuns(repo);
     const {wrapups, generations} = splitGenerations(repo, impls);
-    check("s5: breach produced gen-1, then gen-2 — no wrap-up run (two implementer runs)",
-      impls.length === 2 && generations.length === 2 && wrapups.length === 0, impls.length);
+    check("s5: breach produced gen-1, a wrap-up turn that wrote nothing, then gen-2",
+      impls.length === 3 && generations.length === 2 && wrapups.length === 1, impls.length);
     const gen1 = generations[0]?.data;
     check("s5: generation 1 capped with the wrap-up flag",
       gen1?.capped?.wrapUp === true, gen1?.capped);
-    check("s5: fallback recorded (orchestrator wrote the missing note), never retried",
+    check("s5: the turn left the note stale -> fallback recorded (orchestrator wrote the missing note), never retried",
       gen1?.wrapUp?.status === "orchestrator_fallback" && gen1?.wrapUp?.reason === "note_missing_or_stale"
-      && gen1?.wrapUp?.fallbackNote === true, gen1?.wrapUp);
+      && gen1?.wrapUp?.fallbackNote === true && gen1?.wrapUp?.resumeTurn === "note_still_stale", gen1?.wrapUp);
     const gen1NotePath = (/Keep a hand-off note at (\S+)/.exec(briefText(repo, generations[0]) || "") || [])[1]?.replace(/[.,;:]+$/, "");
     const gen2Brief = briefText(repo, generations[1]) || "";
     const gen2Note = noteSectionOf(gen2Brief);
@@ -474,7 +469,7 @@ function splitGenerations(repo, impls) {
       gen1?.capped?.wrapUp === true && (gen1?.sessionId === null || gen1?.sessionId === undefined), gen1?.capped);
     check("s6: orchestrator fallback recorded, mission continues",
       gen1?.wrapUp?.status === "orchestrator_fallback" && gen1?.wrapUp?.reason === "note_missing_or_stale"
-      && gen1?.wrapUp?.fallbackNote === true, gen1?.wrapUp);
+      && gen1?.wrapUp?.fallbackNote === true && gen1?.wrapUp?.resumeTurn === "not_resumable", gen1?.wrapUp);
     const gen1NotePath = (/Keep a hand-off note at (\S+)/.exec(briefText(repo, generations[0]) || "") || [])[1]?.replace(/[.,;:]+$/, "");
     const gen2Brief = briefText(repo, generations[1]) || "";
     const gen2Note = noteSectionOf(gen2Brief);
@@ -487,6 +482,32 @@ function splitGenerations(repo, impls) {
       && gen2Brief.includes("## Previous note (written by the model)")
       && gen2Brief.includes("GEN1-HANDOFF-MARKER"), gen2Brief.slice(0, 400));
     check("s6: generation 2 completed", generations[1]?.data?.status === "completed", generations[1]?.data?.status);
+  } finally { if (!process.env.KEEP_CAP_FIXTURE) cleanup(repo, binDir); }
+}
+
+// ── S8 (backlog #8): a runaway wrap-up turn is stopped by WRAPUP_MAX_TURNS ──
+// The resumed wrap-up turn keeps working instead of writing the note. The
+// ceiling kills it (turns > 3), it never triggers a second wrap-up, and the
+// orchestrator fallback note is written as before.
+{
+  const {repo, binDir} = setupCapMission("cap-s8", "cap_wrapup_runaway", {per_task_max_turns: 5});
+  try {
+    runAutopilot(repo, binDir, {request: "cap probe", timeoutMs: AP_TIMEOUT_MS});
+    const impls = implementerRuns(repo);
+    const {wrapups, generations} = splitGenerations(repo, impls);
+    check("s8: exactly one wrap-up turn ran (no second wrap-up), then gen-2",
+      wrapups.length === 1 && generations.length === 2, {wrapups: wrapups.length, generations: generations.length});
+    const w = wrapups[0]?.data;
+    check("s8: wrap-up turn was cut by the ceiling (few turns, far below the 45 it would spin)",
+      Number.isInteger(w?.usage?.turns) && w.usage.turns < 25 && w.usage.turns > 3
+      && w?.capped?.type === "turns" && w?.capped?.limit === 3,
+      {usage: w?.usage, capped: w?.capped});
+    check("s8: wrap-up turn carries no wrapUp of its own and no cap record triggering continuation",
+      (w?.wrapUp === undefined || w?.wrapUp === null) && w?.capped?.wrapUp !== true, {wrapUp: w?.wrapUp, capped: w?.capped});
+    const gen1 = generations[0]?.data;
+    check("s8: ceiling-killed turn left the note stale -> orchestrator fallback as before",
+      gen1?.wrapUp?.status === "orchestrator_fallback" && gen1?.wrapUp?.fallbackNote === true, gen1?.wrapUp);
+    check("s8: generation 2 completed", generations[1]?.data?.status === "completed", generations[1]?.data?.status);
   } finally { if (!process.env.KEEP_CAP_FIXTURE) cleanup(repo, binDir); }
 }
 

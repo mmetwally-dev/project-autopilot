@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import {AUTO_REJECT_WARNING_TYPE, classifyLinkedResult, classifyObservedFailure, reclassifySilentOpenCodeFailure, failure, parseReviewContract, recordFailureBudget, selectAttemptFailure, shouldRefusePassForLinkedResults} from "./failure-contract.mjs";
+import {AUTO_REJECT_WARNING_TYPE, classifyLinkedResult, classifyObservedFailure, reclassifySilentOpenCodeFailure, failure, parseReviewContract, recordFailureBudget, resetAdapterRetryBudget, selectAttemptFailure, shouldRefusePassForLinkedResults} from "./failure-contract.mjs";
 import {validateTaskResult} from "./role-progress-commit.mjs";
 import {decidePlanningReview} from "./planning-review-decision.mjs";
 import {decideEscalationName} from "./escalation-naming.mjs";
@@ -33,7 +33,22 @@ assert.equal(parseReviewContract("AUTOPILOT_REVIEW=[1,2").failure.class, "STRUCT
 invalidClass(parseReviewContract('AUTOPILOT_REVIEW={"decision":"MAYBE","findings":[]}')); // wrong decision value
 invalidClass(parseReviewContract('AUTOPILOT_REVIEW={"decision":"PASS"}')); // findings not an array
 invalidClass(parseReviewContract(`${sentinel}\nAUTOPILOT_REVIEW={"decision":"PASS","findings":[]}`)); // >1 marker
-invalidClass(parseReviewContract(`AUTOPILOT_REVIEW={"decision":"PASS","findings":[]}\ntrailing response content`)); // not final line
+// Backlog #9: prose after the one valid sentinel is accepted and kept as notes.
+{
+  const notes = parseReviewContract(`AUTOPILOT_REVIEW={"decision":"PASS","findings":[]}\n\nNotes: ran the suite\nNotes: nothing else`);
+  assert.equal(notes.contract.status, "valid");
+  assert.equal(notes.verdict.decision, "PASS");
+  assert.equal(notes.contract.trailingNotes, "Notes: ran the suite\nNotes: nothing else");
+  assert.equal(parseReviewContract(`${sentinel}\ntrailing response content`).verdict.decision, "FAIL");
+  assert.equal(parseReviewContract(`noise\n${sentinel}`).contract.trailingNotes, undefined);
+}
+// Still failing: a second conflicting sentinel, a JSON verdict-looking tail, an invalid/truncated tail sentinel.
+invalidClass(parseReviewContract(`AUTOPILOT_REVIEW={"decision":"PASS","findings":[]}\nNotes: x\nAUTOPILOT_REVIEW={"decision":"FAIL","findings":["y"]}`));
+invalidClass(parseReviewContract(`AUTOPILOT_REVIEW={"decision":"PASS","findings":[]}\n{"decision":"FAIL","findings":[]}`));
+invalidClass(parseReviewContract(`AUTOPILOT_REVIEW={"decision":"PASS","findings":[]}\nAUTOPILOT_REVIEW={"decision":`));
+invalidClass(parseReviewContract(`AUTOPILOT_REVIEW={"decision":"PASS","findings":[]}\nAUTOPILOT_REVIEW=garbage`));
+// Two identical sentinels: last valid wins, same outcome.
+assert.equal(parseReviewContract(`${sentinel}\n${sentinel}`).verdict.decision, "FAIL");
 invalidClass(parseReviewContract(`${sentinel} and then some`)); // object does not consume the line
 assert.equal(parseReviewContract(`noise\n${sentinel}\n`).contract.status, "valid"); // trailing whitespace only is fine
 // Prose echoes and occurrences inside JSON finding strings never count as markers.
@@ -79,9 +94,9 @@ invalidClass(parseReviewContract('AUTOPILOT_REVIEW={invalid}'));
     parseReviewContract(`${sentinel}\nAUTOPILOT_REVIEW={"decision":"PASS","findings":[]}`),
     "STRUCTURED_OUTPUT_INVALID"
   );
-  // Line 47 STRUCTURED_OUTPUT_INVALID: one valid record followed by trailing non-empty text.
+  // Line 47 STRUCTURED_OUTPUT_INVALID: one valid record followed by a JSON verdict-looking tail (prose tails are notes since backlog #9).
   checkRetryableAdapter(
-    parseReviewContract('AUTOPILOT_REVIEW={"decision":"PASS","findings":[]}\ntrailing response content'),
+    parseReviewContract('AUTOPILOT_REVIEW={"decision":"PASS","findings":[]}\n{"decision":"FAIL","findings":[]}'),
     "STRUCTURED_OUTPUT_INVALID"
   );
   // Line 51 STRUCTURED_OUTPUT_INVALID: complete record with a non-PASS/FAIL
@@ -157,6 +172,40 @@ const adapterBudget = recordFailureBudget(state, policy, failure("PROCESS_EXIT_N
 assert.equal(adapterBudget.used, 1);
 assert.equal(state.failureBudgets["verificationFailureBudget:task:1"], 2);
 assert.equal(state.failureBudgets["adapterRetryBudget:adapter:codex:verifier"], 1);
+
+// Backlog #8: a successful run resets that adapter+role's budget counter (consecutive failures, not mission-wide)
+// fail, success, fail, fail does not exhaust a budget of 3
+{
+  const bState = {};
+  const bPolicy = {failure_budgets: {adapterRetryBudget: 3}};
+  const adapterFailure = failure("PROCESS_EXIT_NONZERO", "adapter", true);
+  // 1. First failure
+  const f1 = recordFailureBudget(bState, bPolicy, adapterFailure, "adapter:antigravity:implementer");
+  assert.equal(f1.allowed, true);
+  assert.equal(f1.used, 1);
+  assert.equal(bState.failureBudgets["adapterRetryBudget:adapter:antigravity:implementer"], 1);
+
+  // 2. Success: resets the budget counter
+  resetAdapterRetryBudget(bState, "antigravity", "implementer");
+  assert.equal(bState.failureBudgets["adapterRetryBudget:adapter:antigravity:implementer"], undefined);
+
+  // 3. Second failure (first consecutive failure after reset)
+  const f2 = recordFailureBudget(bState, bPolicy, adapterFailure, "adapter:antigravity:implementer");
+  assert.equal(f2.allowed, true);
+  assert.equal(f2.used, 1);
+  assert.equal(bState.failureBudgets["adapterRetryBudget:adapter:antigravity:implementer"], 1);
+
+  // 4. Third failure (second consecutive failure) — does NOT exhaust budget of 3
+  const f3 = recordFailureBudget(bState, bPolicy, adapterFailure, "adapter:antigravity:implementer");
+  assert.equal(f3.allowed, true, "fail, success, fail, fail does not exhaust a budget of 3");
+  assert.equal(f3.used, 2);
+  assert.equal(bState.failureBudgets["adapterRetryBudget:adapter:antigravity:implementer"], 2);
+
+  // 5. Fourth failure (third consecutive failure) — NOW exhausts budget of 3
+  const f4 = recordFailureBudget(bState, bPolicy, adapterFailure, "adapter:antigravity:implementer");
+  assert.equal(f4.allowed, false, "3 consecutive failures exhausts a budget of 3");
+  assert.equal(f4.used, 3);
+}
 
 // Zero-aware failure budgets: each configured key accepts 0 as a real limit,
 // so the first failure is not retried, while absent keys keep the built-in

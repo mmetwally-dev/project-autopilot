@@ -33,8 +33,8 @@ check("helpers: handoffNoteFreshnessForWrapUp defined and delegates to the pure 
   check("order: freshness gate before the orchestrator fallback write",
     gateIdx !== -1 && fallbackIdx !== -1 && gateIdx < fallbackIdx,
     gateIdx, fallbackIdx);
-  check("no wrap-up resume remains (runNote:\"wrap-up\" gone)",
-    !src.includes('runNote:"wrap-up"'));
+  check("wrap-up resume turn present and runs before the fallback write (Backlog #8)",
+    src.includes('runNote:"wrap-up"') && src.indexOf("runModelWrapUpTurn({") < fallbackIdx);
   check("deleted resume paths are gone",
     !src.includes('reason:"no_session_id"')
     && !src.includes('reason:"resume_unsupported"')
@@ -44,7 +44,7 @@ check("helpers: handoffNoteFreshnessForWrapUp defined and delegates to the pure 
 
 // ── Skipped/note_fresh record shape ──
 check("record: fresh note records wrapUp skipped with reason note_fresh",
-  /if\(handoffNoteFreshnessForWrapUp\(wrapMission,taskRef\)\?\.fresh\)\s*\n\s*return \{status:"skipped",reason:"note_fresh",trigger:capBreach\.trigger\|\|null\};/.test(src));
+  /if\(handoffNoteFreshnessForWrapUp\(wrapMission,taskRef\)\?\.fresh\) return true;[\s\S]*?if\(noteIsFresh\(\)\) return \{status:"skipped",reason:"note_fresh",trigger:capBreach\.trigger\|\|null\};/.test(src));
 
 // ── capEnabled scope (031 P4.5: wrap-up gate uses capEnabled, not roleName) ──
 check("scope: skip gate lives inside the capEnabled cap/wrap-up trigger block",
@@ -71,8 +71,8 @@ check("capDriver unchanged (capEnabled-gated, wrap-up turn exempt)",
     logLine.includes("RAW_TOKENS="));
   check("log: PATH is derived right after REASON on the same line",
     /WRAP_UP \| STATUS=\$\{result\.wrapUp\.status\} \| REASON=\$\{result\.wrapUp\.reason\|\|"-"\} \| PATH=/.test(logLine));
-  check("log: PATH maps note_fresh skip, orchestrator_fallback, and - for anything else",
-    /const __wrapPath=result\.wrapUp\.reason==="note_fresh"\?"note_fresh":\(result\.wrapUp\.status==="orchestrator_fallback"\?"orchestrator_fallback":"-"\);/.test(src));
+  check("log: PATH maps note_fresh skip, orchestrator_fallback, model_wrote, and - for anything else",
+    /const __wrapPath=result\.wrapUp\.reason==="note_fresh"\?"note_fresh":\(result\.wrapUp\.status==="orchestrator_fallback"\?"orchestrator_fallback":\(result\.wrapUp\.status==="model_wrote"\?"model_wrote":"-"\)\);/.test(src));
 }
 
 // ── Task 2.4: both-loops wrap-up-skip behaviour ──

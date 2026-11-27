@@ -3,9 +3,9 @@
 // contract (`task-result-contract.mjs`) and the pure attribution helpers
 // (`task-attribution.mjs`). Both are importable without `autopilot.mjs`.
 //
-// The parser mirrors `failure-contract.mjs`'s AUTOPILOT_REVIEW parser, so the
-// three failure modes are asserted independently: missing, malformed, and
-// duplicate sentinels each fail closed.
+// The three failure modes are asserted independently: missing, malformed,
+// and invalid sentinels each fail closed; when multiple valid sentinels are
+// present, the last one wins (Backlog #8).
 import fs from "node:fs";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
@@ -53,10 +53,21 @@ const GOOD = SENTINEL({summary: "did the task", taskLocalCheck: {command: "node 
   const incomplete = parseTaskResultContract("AUTOPILOT_TASK_RESULT={\"summary\":\"x\"");
   check("parser: unbalanced JSON object fails closed", !incomplete.ok && incomplete.code === TASK_RESULT_CODE_INVALID, incomplete);
 
-  const duplicate = parseTaskResultContract(`${GOOD}\n${GOOD}`);
-  check("parser: duplicate sentinel fails closed", !duplicate.ok && duplicate.code === TASK_RESULT_CODE_INVALID, duplicate);
-  check("parser: duplicate rejection names the duplication",
-    /Multiple/i.test(duplicate.reason), duplicate);
+  const GOOD2 = SENTINEL({summary: "second summary", taskLocalCheck: {command: "npm test", status: "passed", exitCode: 0, summary: "all good"}});
+  const multipleValid = parseTaskResultContract(`${GOOD}\n${GOOD2}`);
+  check("parser: multiple valid sentinels resolves to last", multipleValid.ok === true, multipleValid);
+  check("parser: last sentinel wins (summary from second)", multipleValid.ok && multipleValid.summary === "second summary", multipleValid);
+  check("parser: last sentinel wins (taskLocalCheck command from second)", multipleValid.ok && multipleValid.taskLocalCheck?.command === "npm test", multipleValid);
+  check("parser: duplicate identical sentinels also resolves to last", parseTaskResultContract(`${GOOD}\n${GOOD}`).ok === true);
+
+  const validThenInvalid = parseTaskResultContract(`${GOOD}\nAUTOPILOT_TASK_RESULT={not json}`);
+  check("parser: valid then invalid fails closed", !validThenInvalid.ok && validThenInvalid.code === TASK_RESULT_CODE_INVALID, validThenInvalid);
+
+  const validThenIncomplete = parseTaskResultContract(`${GOOD}\nAUTOPILOT_TASK_RESULT={"summary":"x"`);
+  check("parser: valid then incomplete fails closed", !validThenIncomplete.ok && validThenIncomplete.code === TASK_RESULT_CODE_INVALID, validThenIncomplete);
+
+  const validThenBadSchema = parseTaskResultContract(`${GOOD}\n${SENTINEL({summary: 123})}`);
+  check("parser: valid then bad schema fails closed", !validThenBadSchema.ok && validThenBadSchema.code === TASK_RESULT_CODE_INVALID, validThenBadSchema);
 
   const notFinal = parseTaskResultContract(`${GOOD}\nprose after the sentinel`);
   check("parser: sentinel off the final non-empty line fails closed",

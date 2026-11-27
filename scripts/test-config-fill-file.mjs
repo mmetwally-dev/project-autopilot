@@ -60,7 +60,7 @@ try {
   assert.deepEqual(onDisk, fillLayout(partial, file), "the file gains every missing default");
   assert.equal(onDisk.project.repo, "/tmp/demo", "operator values survive");
   assert.equal(onDisk.roles.planner.model, "planner-model", "nested operator values survive");
-  assert.deepEqual(onDisk.roles.free_models, { auto_fallback: false, max_turns: DEFAULTS.roles.free_models.max_turns }, "a partial section is completed");
+  assert.deepEqual(onDisk.roles.free_models, { auto_fallback: false, max_turns: DEFAULTS.roles.free_models.max_turns, exclude: DEFAULTS.roles.free_models.exclude }, "a partial section is completed");
   assert.deepEqual(onDisk.runtime, {}, "an empty runtime stays empty");
 
   const backupNames = backups(file);

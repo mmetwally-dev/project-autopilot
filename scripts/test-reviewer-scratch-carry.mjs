@@ -261,6 +261,38 @@ try {
     // Check autopilot.mjs seeds carried scratch before spawn
     check("(4) autopilot.mjs seeds carried scratch before spawn",
       autopilotSrc.includes("seedPreviousScratch(carriedPath,effectiveScratchDir)"));
+    // Backlog #9(a): plan_reviewer is included in both seed and wrap-up carry
+    check("(4) autopilot.mjs includes plan_reviewer in scratch seed and wrap-up carry",
+      autopilotSrc.includes('roleName==="code_reviewer"||roleName==="verifier"||roleName==="plan_reviewer"'));
+  }
+
+  // ── (5) Backlog #9(a)/(c): PowerShell runtime (>1 MB) is carried while generic >1 MB files are skipped ──
+  {
+    const srcScratch = makeTmpDir("test-scratch-pwsh-src-");
+    const destCarried = path.join(makeTmpDir("test-scratch-pwsh-dest-"), "carried-scratch");
+    const targetScratch = makeTmpDir("test-scratch-pwsh-target-");
+
+    fs.writeFileSync(path.join(srcScratch, "report.md"), "Decision: FAIL");
+    fs.writeFileSync(path.join(srcScratch, "big.bin"), Buffer.alloc(2 * 1024 * 1024));
+    fs.writeFileSync(path.join(srcScratch, "powershell.tar.gz"), Buffer.alloc(2 * 1024 * 1024));
+    fs.mkdirSync(path.join(srcScratch, "powershell-cache"), {recursive: true});
+    fs.writeFileSync(path.join(srcScratch, "powershell-cache", "libcoreclr.so"), Buffer.alloc(2 * 1024 * 1024));
+    fs.mkdirSync(path.join(srcScratch, "pwsh"), {recursive: true});
+    fs.writeFileSync(path.join(srcScratch, "pwsh", "pwsh"), "#!/bin/sh\necho ok\n");
+    fs.chmodSync(path.join(srcScratch, "pwsh", "pwsh"), 0o755);
+
+    const res = copyCarriedScratch(srcScratch, destCarried);
+    check("(5) copyCarriedScratch carries report + PowerShell runtime files", res.copied === 4, res);
+    check("(5) carried dir contains report.md", fs.existsSync(path.join(destCarried, "report.md")));
+    check("(5) carried dir still skips generic 2 MB big.bin", !fs.existsSync(path.join(destCarried, "big.bin")));
+    check("(5) carried dir preserves >1 MB powershell.tar.gz", fs.existsSync(path.join(destCarried, "powershell.tar.gz")));
+    check("(5) carried dir preserves >1 MB powershell-cache/libcoreclr.so", fs.existsSync(path.join(destCarried, "powershell-cache", "libcoreclr.so")));
+    check("(5) carried dir preserves pwsh/pwsh", fs.existsSync(path.join(destCarried, "pwsh", "pwsh")));
+
+    const seeded = seedPreviousScratch(destCarried, targetScratch);
+    check("(5) seedPreviousScratch seeds PowerShell runtime into previous-session/",
+      seeded === true && fs.existsSync(path.join(targetScratch, "previous-session", "powershell.tar.gz"))
+      && fs.existsSync(path.join(targetScratch, "previous-session", "pwsh", "pwsh")));
   }
 } finally {
   for (const d of tmpDirs) {

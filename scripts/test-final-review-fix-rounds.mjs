@@ -212,9 +212,9 @@ const driverDeps = (events, runFinalReview) => ({
     deps: driverDeps(events, async () => { reviews += 1; return FAIL; }),
   });
   check("behavior: over-budget FAILs escalate",
-    result.outcome === "escalate" && reviews === 2, JSON.stringify({outcome: result.outcome, reviews}));
+    result.outcome === "escalate" && reviews === 3, JSON.stringify({outcome: result.outcome, reviews}));
   check("behavior: every round ran a fix pass before its re-review",
-    JSON.stringify(events) === JSON.stringify(["fix:1", "review:1", "fix:2", "review:2"]),
+    JSON.stringify(events) === JSON.stringify(["fix:1", "review:1", "fix:2", "review:2", "fix:3", "review:3"]),
     JSON.stringify(events));
   check("behavior: escalation uses step final_review",
     result.step === "final_review", JSON.stringify({step: result.step}));
@@ -288,10 +288,10 @@ const siteDeps = (events, runFinalReview) => ({
   });
   check("behavior: speckit over-budget FAILs escalate with step final_review",
     result.outcome === "escalate" && result.step === "final_review"
-      && result.message === "Final review failed." && reviews === 2,
+      && result.message === "Final review failed." && reviews === 3,
     JSON.stringify({outcome: result.outcome, step: result.step, reviews}));
   check("behavior: speckit over-budget rounds each ran a fix pass first",
-    JSON.stringify(events) === JSON.stringify(["fix:1", "review:1", "fix:2", "review:2"]),
+    JSON.stringify(events) === JSON.stringify(["fix:1", "review:1", "fix:2", "review:2", "fix:3", "review:3"]),
     JSON.stringify(events));
 }
 

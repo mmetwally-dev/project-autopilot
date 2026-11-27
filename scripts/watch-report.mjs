@@ -380,19 +380,70 @@ function aggregateCarriedForward(runs) {
   return carried;
 }
 
+// Parse a task ref into numeric segments and optional letter suffix for natural ordering:
+// T029 -> { numbers: [29], suffix: "" }
+// T036a -> { numbers: [36], suffix: "a" }
+// T3.2 -> { numbers: [3, 2], suffix: "" }
+// T3.10 -> { numbers: [3, 10], suffix: "" }
+export function parseNaturalTaskRef(ref) {
+  if (typeof ref !== "string") return null;
+  const m = /^T(\d+(?:\.\d+)*)([a-z]*)$/i.exec(ref.trim());
+  if (!m) return null;
+  const numbers = m[1].split(".").map(Number);
+  const suffix = m[2].toLowerCase();
+  return { numbers, suffix, raw: ref };
+}
+
+export function compareNaturalTaskRef(a, b) {
+  const minLen = Math.min(a.numbers.length, b.numbers.length);
+  for (let i = 0; i < minLen; i++) {
+    if (a.numbers[i] !== b.numbers[i]) {
+      return a.numbers[i] - b.numbers[i];
+    }
+  }
+  if (a.numbers.length !== b.numbers.length) {
+    return a.numbers.length - b.numbers.length;
+  }
+  if (a.suffix !== b.suffix) {
+    return a.suffix.localeCompare(b.suffix);
+  }
+  return a.raw.localeCompare(b.raw);
+}
+
 // Every task ref of a phase, in phase order: the phase task list first, else
-// the implementation runs' refs ordered by their start (the runtime truth when
-// the adapter's descriptor has no refs).
-function phaseTaskRefs(phase) {
+// the implementation runs' refs ordered by natural task order (the runtime
+// truth when the adapter's descriptor has no refs), with unparsed ids keeping
+// their start-time order after parsed ones.
+export function phaseTaskRefs(phase) {
   const fromDef = (phase?.tasks || []).length ? phaseTaskDisplayRefs(phase) : [];
   const defRefs = [...new Set(fromDef.filter(Boolean))];
   if (defRefs.length) return defRefs;
-  const ordered = (phase?.runs || [])
-    .filter((r) => IMPLEMENTATION_ROLES.has(roleOf(r)))
-    .map((r) => ({ ref: runRef(r), at: Date.parse(r.started_at ?? r.startedAt) || 0 }))
-    .filter((r) => r.ref)
-    .sort((a, b) => a.at - b.at);
-  return [...new Set(ordered.map((r) => r.ref))];
+
+  const distinct = new Map();
+  for (const r of phase?.runs || []) {
+    if (!IMPLEMENTATION_ROLES.has(roleOf(r))) continue;
+    const ref = runRef(r);
+    if (!ref) continue;
+    const at = Date.parse(r.started_at ?? r.startedAt) || 0;
+    if (!distinct.has(ref) || at < distinct.get(ref).at) {
+      distinct.set(ref, { ref, at, seq: distinct.size });
+    }
+  }
+  const items = [...distinct.values()].map((item) => ({
+    ...item,
+    parsed: parseNaturalTaskRef(item.ref),
+  }));
+
+  items.sort((a, b) => {
+    if (a.parsed && b.parsed) {
+      return compareNaturalTaskRef(a.parsed, b.parsed);
+    }
+    if (a.parsed && !b.parsed) return -1;
+    if (!a.parsed && b.parsed) return 1;
+    return a.at - b.at || a.seq - b.seq;
+  });
+
+  return items.map((i) => i.ref);
 }
 
 export function taskRange(refs) {
@@ -406,6 +457,11 @@ export function taskRange(refs) {
 // tasks, else phase tasks ordered by phase order with 3+ consecutive tasks
 // collapsed into `first > last`, shorter runs comma-separated, and non-phase
 // refs kept at the end in their original order.
+//
+// When allRefs does not contain every task named in the record (an incomplete list),
+// do not split the record into phase-first/non-phase-last; keep the recorded pieces
+// in their recorded order (the recorded string is already in plan order).
+// Only reorder/compress when every named task (both ends of every range) is in allRefs.
 export function normalizeRunTaskRef(ref, allRefs) {
   const text = String(ref ?? "").trim();
   if (!text) return null;
@@ -413,6 +469,25 @@ export function normalizeRunTaskRef(ref, allRefs) {
   const allSet = new Set(all);
 
   const rawParts = text.split(",").map((p) => p.trim()).filter(Boolean);
+  if (!rawParts.length) return null;
+
+  // Incomplete list check: every named task (both ends of every range, plus
+  // single task tokens) must be in allRefs to allow reordering or compressing.
+  const hasMissingTask = rawParts.some((part) => {
+    if (part.includes(">")) {
+      const tokens = part.split(">").map((t) => t.trim()).filter(Boolean);
+      return tokens.some((t) => !allSet.has(t));
+    }
+    if (parseNaturalTaskRef(part) !== null) {
+      return !allSet.has(part);
+    }
+    return false;
+  });
+
+  if (hasMissingTask) {
+    return rawParts.join(", ");
+  }
+
   const phaseRefs = [];
   const nonPhaseRefs = [];
 
@@ -486,6 +561,79 @@ export function normalizeRunTaskRef(ref, allRefs) {
   return allResult.join(", ");
 }
 
+// Format a table TASK cell for compact display and return any overflow detail
+// for the row's NOTE column:
+// (A) `cross-phase-file:<path>` -> `xfile:<basename>`, NOTE `cross-phase file <path>`
+// (B) non-consecutive list of 3+ tasks -> `<first> … +<N> … <last>`, NOTE `tasks <full list>`
+// (C) `speckit:P<n>:T<ord>:<hash>` -> mapped task ref from phase task list, or `P<n> T<ord>`
+function formatTaskCellAndNote(rawTask, { allRefs = [], phase = null, model = null } = {}) {
+  const text = String(rawTask ?? "").trim();
+  if (!text || text === "-") return { task: "-", notePart: null };
+
+  if (text.startsWith("cross-phase-file:")) {
+    const fullPath = text.slice("cross-phase-file:".length).trim();
+    const base = fullPath.split(/[\\/]/).filter(Boolean).pop() || fullPath;
+    return {
+      task: `xfile:${base}`,
+      notePart: fullPath ? `cross-phase file ${fullPath}` : null,
+    };
+  }
+
+  const speckitMatch = text.match(/^speckit:P(\d+):T(\d+):[0-9a-f]+$/i);
+  if (speckitMatch) {
+    const phaseNumber = Number(speckitMatch[1]);
+    const ordinal = Number(speckitMatch[2]);
+    const targetPhase = (phase && Number(phase.number) === phaseNumber)
+      ? phase
+      : (model?.phases || []).find((p) => Number(p?.number) === phaseNumber) ?? null;
+    const ref = resolveStableTaskId(text, targetPhase);
+    return { task: ref ?? `P${phaseNumber} T${ordinal}`, notePart: null };
+  }
+
+  if (text.includes(",")) {
+    const parts = text.split(",").map((p) => p.trim()).filter(Boolean);
+    if (parts.length > 1) {
+      const expandPart = (part) => {
+        if (part.includes(">")) {
+          const tokens = part.split(">").map((t) => t.trim()).filter(Boolean);
+          if (tokens.length >= 2) {
+            const start = tokens[0];
+            const end = tokens[tokens.length - 1];
+            const startIdx = allRefs.indexOf(start);
+            const endIdx = allRefs.indexOf(end);
+            if (startIdx !== -1 && endIdx !== -1) {
+              const [min, max] = startIdx <= endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+              return allRefs.slice(min, max + 1);
+            }
+            return [start, end];
+          }
+        }
+        return [part];
+      };
+      const expanded = parts.flatMap(expandPart);
+      if (expanded.length >= 3) {
+        const first = expanded[0];
+        const last = expanded[expanded.length - 1];
+        return {
+          task: `${first} … +${expanded.length - 2} … ${last}`,
+          notePart: `tasks ${text}`,
+        };
+      }
+    }
+  }
+
+  return { task: text, notePart: null };
+}
+
+// Resolve an internal stable task id (`<prefix>:P<n>:T<ord>:<hash>`) through
+// `phase`'s task list, returning the display ref or null when unresolvable.
+function resolveStableTaskId(text, phase) {
+  const m = String(text ?? "").match(/^[^:]+:P(\d+):T(\d+):[0-9a-f]+$/i);
+  if (!m || !phase) return null;
+  const refs = phaseTaskRefs(phase);
+  return refs[Number(m[2])] || null;
+}
+
 // A carried-forward entry is recorded as the internal stable id
 // (`standalone:P1:T0:4ab4c18bb44b`). Show the task id instead: resolve the
 // phase's ordinal to its display ref, falling back to `T<phase>.<ordinal+1>`.
@@ -494,11 +642,7 @@ function displayCarriedTask(value, phase) {
     const text = part.trim();
     const m = text.match(/^[^:]+:P(\d+):T(\d+):[0-9a-f]+$/);
     if (!m) return text;
-    const phaseNumber = Number(m[1]);
-    const ordinal = Number(m[2]);
-    const refs = phaseTaskRefs(phase);
-    if (refs[ordinal]) return refs[ordinal];
-    return `T${phaseNumber}.${ordinal + 1}`;
+    return resolveStableTaskId(text, phase) ?? `T${Number(m[1])}.${Number(m[2]) + 1}`;
   }).filter(Boolean).join(", ");
 }
 
@@ -632,6 +776,41 @@ function isPostImplementationInterruptedPlanningRun(run, phaseCount = 0, allRuns
   });
 }
 
+// Planning stage labels shared across watch report functions
+const PLANNING_STAGE_LABELS = {
+  specify: "spec", spec: "spec", "review-spec": "spec", "spec-review": "spec",
+  plan: "plan", "review-plan": "plan", "plan-review": "plan",
+  tasks: "tasks", "review-tasks": "tasks", "tasks-review": "tasks",
+  discuss: "discuss", research: "research",
+  "plan-check": "plan-check", "review-plan-check": "plan-check",
+};
+
+function resolveRoundGate(runs, hasStandaloneSpec = false) {
+  for (const r of runs || []) {
+    const raw = r?.gate ?? r?.planningGate ?? r?.planningStage ?? r?.stage ?? r?.planningStep ?? null;
+    if (typeof raw === "string" && raw.trim()) {
+      const norm = raw.trim().toLowerCase()
+        .replace(/^(?:speckit|gsd)-/, "")
+        .replace(/-revision-\d+$/, "")
+        .replace(/-review-failed$/, "");
+      const stripped = norm.replace(/^review-/, "");
+      return PLANNING_STAGE_LABELS[stripped] ?? PLANNING_STAGE_LABELS[norm] ?? stripped;
+    }
+    if (typeof r?.taskRef === "string") {
+      if (r.taskRef.startsWith("standalone-spec-")) return "spec";
+      if (r.taskRef.startsWith("standalone-planning-")) {
+        return hasStandaloneSpec ? "plan" : null;
+      }
+      const m = r.taskRef.match(/(?:speckit|gsd)-(?:planning-)?([a-z0-9_-]+)/i);
+      if (m) {
+        const key = m[1].toLowerCase().replace(/^review-/, "");
+        return PLANNING_STAGE_LABELS[key] ?? key;
+      }
+    }
+  }
+  return null;
+}
+
 // Planning rounds: each planner run opens a new round; the plan_reviewer runs
 // that follow (until the next planner) belong to it. `revision` is the
 // planner's recorded planRevision (the generation being reviewed).
@@ -651,6 +830,17 @@ function buildPlanningRuns(runs, { status: missionStatus, phaseCount = 0, allRun
     }
     current.runs.push(run);
     for (const f of run.findings || []) current.findings.push({ run: run.id ?? run.dirName ?? null, text: String(f) });
+  }
+  const hasStandaloneSpec = stageRuns.some((r) => r.taskRef && r.taskRef.startsWith("standalone-spec-"));
+  const gateRoundCounts = new Map();
+  for (const round of rounds) {
+    round.gate = resolveRoundGate(round.runs, hasStandaloneSpec);
+    const gateKey = round.gate ?? "__default__";
+    const count = (gateRoundCounts.get(gateKey) || 0) + 1;
+    gateRoundCounts.set(gateKey, count);
+    if (round.revision == null && count > 1) {
+      round.revision = count - 1;
+    }
   }
   const terminal = terminalStageStatus(missionStatus);
   let status;
@@ -994,7 +1184,7 @@ function escalatedButResumed(state, runs, ownerAlive, isAlive) {
 export function classifyStatus(state, { operatorEvents = [], runs = [], ownerAlive, isAlive, gates = [] } = {}) {
   const phase = String(state?.phase || "");
   const mission = state?.mission ?? null;
-  const info = { status: "RUNNING", at: null, reason: null, failureClass: null, cause: null, humanRequired: false, stopLine: null, orchestratorNotRunning: false, planningOnlyDone: false };
+  const info = { status: "RUNNING", at: null, reason: null, failureClass: null, cause: null, humanRequired: false, stopLine: null, orchestratorNotRunning: false, planningOnlyDone: false, rateLimitWait: state?.rateLimitWait ?? null, networkWait: state?.networkWait ?? null };
   if (phase === "complete" || phase === "completed") {
     info.status = "COMPLETED";
   } else if (phase === "cancelled") {
@@ -1124,7 +1314,12 @@ export function buildOperatorEvents(events) {
       if ((e.scope === "retries" || e.scope === "failure-budget") && e.key) label += ` (${e.key})`;
       text = label;
     } else if (reason === "rebase") text = `operator rebase phase checkpoint${e.note ? ` — ${e.note}` : ""}`;
+    else if (reason === "note") text = `operator decision${e.note ? ` — ${e.note}` : ""}`;
     else if (reason === "escalation") text = `ESCALATED${at ? ` ${formatStamp(at)}` : ""} — operator escalation`;
+    else if (reason === "network_wait") {
+      const where = e.role ? ` (${e.role}${e.waitSec ? `, ${e.waitSec}s` : ""})` : "";
+      text = `NETWORK WAIT${at ? ` ${formatStamp(at)}` : ""}${where}${e.evidence ? ` — ${e.evidence}` : ""}`;
+    }
     else text = `operator ${reason || "event"}${e.scope ? ` ${e.scope}` : ""}`;
     list.push({ at, reason, scope: e.scope ?? null, key: e.key ?? null, live: e.live === true, note: e.note ?? null, text });
   }
@@ -1160,6 +1355,47 @@ export function buildGateEntries(events) {
   const list = [];
   let open = null;
   const list0 = Array.isArray(events) ? events : [];
+  // Normalize a variety of count-bearing event shapes into a single counts
+  // object (see backlog #10). Accepts `counts`, `files`/`tests`, `progress`
+  // bags, or legacy `{passed,total,failed}`.
+  function normalizeCountBag(b) {
+    if (!b || typeof b !== "object") return null;
+    const passed = Number.isFinite(Number(b.passed)) ? Number(b.passed) : 0;
+    const failed = Number.isFinite(Number(b.failed)) ? Number(b.failed) : 0;
+    const skipped = Number.isFinite(Number(b.skipped)) ? Number(b.skipped) : 0;
+    const total = Number.isFinite(Number(b.total)) ? Number(b.total) : (passed + failed + skipped);
+    return { passed, failed, skipped, total };
+  }
+  function extractCounts(e) {
+    if (!e || typeof e !== "object") return null;
+    let candidate = e.counts ?? e.gateCounts ?? null;
+    if (!candidate && e.files && typeof e.files === "object" && (e.tests || e.files.passed != null || e.files.total != null)) candidate = e;
+    if (!candidate && e.progress && typeof e.progress === "object") {
+      const p = e.progress;
+      if (p.counts) candidate = p.counts;
+      else if (p.files || p.tests) candidate = p;
+      else if (p.total != null || p.passed != null) candidate = p;
+    }
+    if (candidate == null) return null;
+    if (typeof candidate === "string") return parseGateCountsFromLog(candidate);
+    if (typeof candidate !== "object") return null;
+    const filesRaw = candidate.files ?? (candidate.total != null || candidate.passed != null ? candidate : null);
+    const testsRaw = candidate.tests ?? null;
+    const hasFiles = filesRaw && typeof filesRaw === "object";
+    const hasTests = testsRaw && typeof testsRaw === "object";
+    const hasLegacy = !hasFiles && !hasTests && (candidate.total != null || candidate.passed != null);
+    if (!hasFiles && !hasTests && !hasLegacy) return null;
+    const files = hasFiles ? normalizeCountBag(filesRaw) : (hasLegacy ? normalizeCountBag(candidate) : null);
+    const tests = hasTests ? normalizeCountBag(testsRaw) : null;
+    const style = candidate.style ?? (tests ? "vitest" : "test-all");
+    const out = { style, files, tests };
+    if (files) { out.passed = files.passed; out.total = files.total; out.failed = files.failed; out.skipped = files.skipped; }
+    return out;
+  }
+  function extractLogFile(e) {
+    if (!e || typeof e !== "object") return null;
+    return e.logFile ?? e.log ?? e.logPath ?? e.path ?? e.gateLog ?? null;
+  }
   for (let i = 0; i < list0.length; i++) {
     const e = list0[i];
     if (!e) continue;
@@ -1168,6 +1404,7 @@ export function buildGateEntries(events) {
         kind: "gate", phase: e.phase ?? null, status: "running", ok: null, command: e.command ?? null,
         durationMs: null, reused: e.reused === true, at: e.at ?? null, resultAt: null, pid: e.pid ?? null,
         progress: { total: null, passed: null, failed: null }, startIndex: i, resultIndex: null, attempt: null,
+        counts: null, logFile: extractLogFile(e),
       };
       list.push(open);
     } else if (e.type === "gate_progress" && open) {
@@ -1180,6 +1417,10 @@ export function buildGateEntries(events) {
         passed: e.passed ?? p.passed ?? open.progress.passed,
         failed: e.failed ?? p.failed ?? open.progress.failed,
       };
+      const c = extractCounts(e);
+      if (c) open.counts = c;
+      const lf = extractLogFile(e);
+      if (lf) open.logFile = lf;
     } else if (e.type === "gate_result" && open) {
       open.status = "completed";
       open.ok = e.ok === true;
@@ -1192,6 +1433,17 @@ export function buildGateEntries(events) {
         passed: e.passed ?? p.passed ?? open.progress.passed,
         failed: e.failed ?? p.failed ?? open.progress.failed,
       };
+      const c = extractCounts(e);
+      if (c) open.counts = c;
+      const lf = extractLogFile(e);
+      if (lf) open.logFile = lf;
+      // If counts present but progress missing, mirror files counts into progress
+      // for legacy readers.
+      if (open.counts && open.counts.files && (open.progress.total == null)) {
+        open.progress.total = open.counts.files.total;
+        open.progress.passed = open.counts.files.passed;
+        open.progress.failed = open.counts.files.failed;
+      }
       open = null;
     }
   }
@@ -1565,16 +1817,19 @@ export function parseVitestGateLog(text) {
     // Ignore deeper-indented per-test lines (2 or more spaces, or tab)
     if (/^[ ]{2,}|\t/.test(raw)) continue;
 
-    // Vitest top-level line: symbol then path then `(N test...` group
-    // e.g. ` ✓ path (21 tests) 2733ms`, ` ❯ path (3 tests | 3 failed) 56ms`, ` ↓ path (2 tests | 2 skipped)`
-    const vitestMatch = raw.match(/^[ ]?([✓✔×✕✗❯↓])\s+(\S+)\s+\((\d+)\s+test/i);
+    // Vitest top-level line: symbol then optional project label then path then `(N test...` group
+    // e.g. ` ✓ path (21 tests) 2733ms`, ` ✓ jsdom path (21 tests) 3901ms`, ` ✓ |jsdom| path (21 tests) 3901ms`,
+    // ` ❯ path (3 tests | 3 failed) 56ms`, ` ↓ path (2 tests | 2 skipped)`
+    const vitestMatch = raw.match(/^[ ]?([✓✔×✕✗❯↓])\s+(?:\|([^|]+)\|\s+|(\S+)\s+)?(\S+)\s+\((\d+)\s+test/i);
     if (vitestMatch) {
       const symbol = vitestMatch[1];
-      const file = vitestMatch[2];
-      const testCount = Number(vitestMatch[3]);
+      const project = (vitestMatch[2] || vitestMatch[3] || "").trim() || null;
+      const file = vitestMatch[4];
+      const testCount = Number(vitestMatch[5]);
 
-      if (seenFiles.has(file)) continue;
-      seenFiles.add(file);
+      const fileKey = project ? `${project}:${file}` : file;
+      if (seenFiles.has(fileKey)) continue;
+      seenFiles.add(fileKey);
 
       lastFile = file;
       lastTests = testCount;
@@ -1646,10 +1901,42 @@ export function parseVitestGateLog(text) {
   };
 }
 
+// Normalize a parsed vitest/jest summary or test-all progress into a counts
+// object for a finished gate. Returns null when no counts can be derived.
+export function parseGateCountsFromLog(text) {
+  const vitest = parseVitestGateLog(text);
+  if (vitest && vitest.summary) {
+    const files = vitest.summary.files;
+    const tests = vitest.summary.tests;
+    const normFile = {
+      passed: Number(files.passed) || 0,
+      failed: Number(files.failed) || 0,
+      skipped: Number(files.skipped) || 0,
+      total: Number(files.total) || (Number(files.passed) || 0) + (Number(files.failed) || 0) + (Number(files.skipped) || 0),
+    };
+    const normTest = {
+      passed: Number(tests.passed) || 0,
+      failed: Number(tests.failed) || 0,
+      skipped: Number(tests.skipped) || 0,
+      total: Number(tests.total) || (Number(tests.passed) || 0) + (Number(tests.failed) || 0) + (Number(tests.skipped) || 0),
+    };
+    return { style: "vitest", files: normFile, tests: normTest };
+  }
+  const progress = parseGateLogProgress(text);
+  if (progress) {
+    return {
+      style: "test-all",
+      files: { passed: progress.passed || 0, failed: progress.failed || 0, skipped: 0, total: progress.total || 0 },
+      tests: null,
+    };
+  }
+  return null;
+}
+
 // The single live CURRENT RUN (watcher.md): the open orchestrator gate wins
 // while it runs, else the newest run recorded `running`. Nothing is current
 // once the mission is finished/cancelled/escalated or stopped.
-export function detectCurrent({ runs = [], gates = [], status = "RUNNING", gateLog = null, expectedTotal = null, expectedLabel = null } = {}) {
+export function detectCurrent({ runs = [], gates = [], status = "RUNNING", gateLog = null, expectedTotal = null, expectedLabel = null, gateCommand = null } = {}) {
   if (status !== "RUNNING") return null;
   const openGate = [...gates].reverse().find((g) => g.status === "running");
   if (openGate) {
@@ -1673,7 +1960,7 @@ export function detectCurrent({ runs = [], gates = [], status = "RUNNING", gateL
     return {
       kind: "gate",
       phase: openGate.phase,
-      command: openGate.command,
+      command: openGate.command || gateCommand || null,
       status: "running",
       startedAt: openGate.at,
       pid: openGate.pid ?? null,
@@ -1850,10 +2137,229 @@ function missionStartedAt(state, runs) {
   return earliest;
 }
 
+// Backlog #10: extract model escalations from state.budgetEscalations and
+// watch-events.jsonl model_escalation events.
+export function extractEscalations({ state = null, events = [], phases = [] } = {}) {
+  const escalations = [];
+  const eventList = Array.isArray(events) ? events : [];
+  const phaseDefs = Array.isArray(phases) ? phases : [];
+
+  const resolvePhaseNumber = (scope, phaseVal) => {
+    if (phaseVal != null && Number.isFinite(Number(phaseVal))) return Number(phaseVal);
+    if (typeof scope === "string") {
+      const m = scope.match(/phase-(\d+)/);
+      if (m) return Number(m[1]) + 1;
+      for (const p of phaseDefs) {
+        if (p?.name && (scope === p.name || scope.endsWith(":" + p.name))) {
+          return p.number;
+        }
+      }
+    }
+    return null;
+  };
+
+  const budgetEscalations = state?.budgetEscalations;
+  const hasMatchingEvent = (scope, entry) => {
+    return eventList.some((ev) => {
+      if (ev?.type !== "model_escalation") return false;
+      if ((ev.scope || "") !== scope) return false;
+      const toMatches = !ev.to || !entry.to || matchesModel({ model: ev.to }, entry.to);
+      const atMatches = !ev.at || !entry.at || entry.at === ev.at || Math.abs((Date.parse(entry.at) || 0) - (Date.parse(ev.at) || 0)) < 2000;
+      return toMatches && atMatches;
+    });
+  };
+
+  if (budgetEscalations && typeof budgetEscalations === "object") {
+    for (const [scope, entry] of Object.entries(budgetEscalations)) {
+      if (!entry || typeof entry !== "object") continue;
+      if (hasMatchingEvent(scope, entry)) continue;
+      const atTime = entry.at ? (Date.parse(entry.at) || 0) : 0;
+      escalations.push({
+        source: "failure_budget",
+        role: entry.role || "implementer",
+        from: entry.from,
+        to: entry.to,
+        budget: entry.budget,
+        used: entry.used,
+        limit: entry.limit,
+        remaining: entry.remaining ?? (entry.limit != null && entry.used != null ? entry.limit - entry.used : null),
+        scope,
+        phase: resolvePhaseNumber(scope, entry.phase),
+        at: entry.at,
+        atTime,
+      });
+    }
+  }
+
+  const unavailableEscalations = state?.escalationUnavailable;
+  if (unavailableEscalations && typeof unavailableEscalations === "object") {
+    for (const [scope, entry] of Object.entries(unavailableEscalations)) {
+      if (!entry || typeof entry !== "object") continue;
+      if (hasMatchingEvent(scope, entry)) continue;
+      const atTime = entry.at ? (Date.parse(entry.at) || 0) : 0;
+      escalations.push({
+        source: "escalation_unavailable",
+        unavailable: true,
+        role: entry.role || "implementer",
+        from: entry.from,
+        to: entry.to,
+        scope,
+        phase: resolvePhaseNumber(scope, entry.phase),
+        at: entry.at,
+        atTime,
+      });
+    }
+  }
+
+  for (const ev of eventList) {
+    if (ev?.type !== "model_escalation") continue;
+    const scope = ev.scope || "";
+    const atTime = ev.at ? (Date.parse(ev.at) || 0) : 0;
+    let stateBudget = null;
+    if (scope && budgetEscalations && typeof budgetEscalations === "object") {
+      const cand = budgetEscalations[scope];
+      if (cand && typeof cand === "object") {
+        const toMatches = !ev.to || !cand.to || matchesModel({ model: ev.to }, cand.to);
+        const atMatches = Boolean(ev.at && cand.at && (ev.at === cand.at || Math.abs((Date.parse(cand.at) || 0) - (Date.parse(ev.at) || 0)) < 2000));
+        if (toMatches && atMatches) {
+          stateBudget = cand;
+        }
+      }
+    }
+    const budget = ev.budget ?? stateBudget?.budget ?? null;
+    const used = ev.used ?? stateBudget?.used ?? null;
+    const limit = ev.limit ?? stateBudget?.limit ?? null;
+    const remaining = ev.remaining ?? (stateBudget?.remaining != null ? stateBudget.remaining : (limit != null && used != null ? limit - used : null));
+    escalations.push({
+      source: ev.source || (stateBudget ? "failure_budget" : null),
+      unavailable: ev.unavailable === true || ev.source === "escalation_unavailable",
+      role: ev.role || stateBudget?.role || "implementer",
+      from: ev.from ?? stateBudget?.from ?? null,
+      to: ev.to ?? stateBudget?.to ?? null,
+      budget,
+      used,
+      limit,
+      remaining,
+      scope,
+      phase: resolvePhaseNumber(scope, ev.phase ?? stateBudget?.phase),
+      at: ev.at ?? stateBudget?.at,
+      atTime,
+      consecutive: ev.consecutive,
+      reason: ev.reason,
+    });
+  }
+
+  escalations.sort((a, b) => a.atTime - b.atTime);
+  return escalations;
+}
+
+export function matchesModel(run, to) {
+  if (!to) return false;
+  const toModelStr = typeof to === "object" && to ? (to.model || to.name || "") : String(to || "");
+  if (!toModelStr) return false;
+  const toShort = shortenModel(toModelStr).replace(/\[.*?\]$/, "").toLowerCase();
+  const toRaw = toModelStr.toLowerCase();
+
+  const candidates = [
+    run?.model,
+    run?.resolvedModel,
+    run?.configuredModel,
+    run?.displayModel,
+  ].filter(Boolean);
+
+  for (const c of candidates) {
+    const raw = String(c).toLowerCase();
+    const short = shortenModel(c).replace(/\[.*?\]$/, "").toLowerCase();
+    if (raw === toRaw || short === toShort) return true;
+    if (toShort && (short.startsWith(toShort) || toShort.startsWith(short))) return true;
+    if (toRaw && (raw.startsWith(toRaw) || toRaw.startsWith(raw))) return true;
+  }
+  return false;
+}
+
+export function findMatchingEscalation(run, escalations = []) {
+  if (!run || !Array.isArray(escalations) || !escalations.length) return null;
+  const role = roleOf(run);
+  const phase = phaseNumberOf(run);
+  const runTime = Date.parse(run?.started_at ?? run?.startedAt) || 0;
+
+  const matches = [];
+  for (const esc of escalations) {
+    if (esc.role && esc.role !== role) continue;
+    if (esc.phase != null && phase != null && esc.phase !== phase) continue;
+    if (esc.phase != null && phase == null) continue;
+    if (esc.atTime > 0 && runTime > 0 && runTime < esc.atTime) continue;
+    if (!matchesModel(run, esc.to)) continue;
+    matches.push(esc);
+  }
+
+  if (!matches.length) return null;
+  return matches[matches.length - 1];
+}
+
+export function formatEscalationReason(esc) {
+  if (!esc) return "";
+  const fromModel = typeof esc.from === "object" && esc.from ? (esc.from.model || esc.from.name || "") : String(esc.from || "");
+  const toModel = typeof esc.to === "object" && esc.to ? (esc.to.model || esc.to.name || "") : String(esc.to || "");
+  const fromDisplay = shortenModel(fromModel).replace(/\[.*?\]$/, "");
+  const toDisplay = shortenModel(toModel).replace(/\[.*?\]$/, "");
+  const arrow = fromDisplay && toDisplay ? `${fromDisplay} → ${toDisplay}` : (toDisplay || fromDisplay || "escalation");
+
+  if (esc.source === "escalation_unavailable" || esc.unavailable) {
+    return `escalation model unavailable → back to ${toDisplay || toModel}`;
+  }
+
+  if (esc.source === "failure_budget" || esc.budget) {
+    let budgetName = "failure budget";
+    if (typeof esc.budget === "string") {
+      const b = esc.budget.toLowerCase();
+      if (b.includes("verification")) budgetName = "verification budget";
+      else if (b.includes("implementation")) budgetName = "implementation budget";
+    }
+    const hasNumbers = esc.used != null && esc.limit != null && !Number.isNaN(Number(esc.used)) && !Number.isNaN(Number(esc.limit));
+    if (hasNumbers) {
+      const used = esc.used;
+      const limit = esc.limit;
+      const remaining = esc.remaining ?? (Number.isFinite(Number(limit) - Number(used)) ? (Number(limit) - Number(used)) : null);
+      const roundsStr = (remaining != null && remaining > 0) ? `, last ${remaining} fix round${remaining === 1 ? "" : "s"}` : "";
+      return `escalated: ${arrow} (${budgetName} ${used}/${limit}${roundsStr})`;
+    }
+    return `escalated: ${arrow} (${budgetName}, last fix rounds)`;
+  }
+
+  if (esc.source === "no_progress" || esc.source === "no-progress") {
+    const sessions = esc.consecutive ? ` in ${esc.consecutive} sessions` : "";
+    return `escalated: ${arrow} (no progress${sessions})`;
+  }
+
+  if (esc.source === "operator") {
+    return `escalated: ${arrow} (operator)`;
+  }
+
+  if (esc.source) {
+    const src = String(esc.source).replace(/_/g, " ");
+    return `escalated: ${arrow} (${src})`;
+  }
+
+  return `escalated: ${arrow}`;
+}
+
+export function findRunEscalationReason(run, model = null) {
+  if (!run || !model) return null;
+  const escalations = model._extractedEscalations || model.escalations || extractEscalations({
+    state: model.state,
+    events: model.events,
+    phases: model.phases,
+  });
+  const matched = findMatchingEscalation(run, escalations);
+  return matched ? formatEscalationReason(matched) : null;
+}
+
 export function buildReportModel({ state = null, runs = [], events = [], phases = [], policy = {}, layout = null, workflow = null, progress = [], gateLog = null, now = null, skill = null, command = null, missionFallback = null, ownerAlive, notRunText = "", isAlive, expectedGateTotal = null, expectedGateLabel = null } = {}) {
   const eventList = Array.isArray(events) ? events : [];
   const progressList = Array.isArray(progress) ? progress : [];
   const phaseDefs = normalizePhases(phases);
+  const escalations = extractEscalations({ state, events: eventList, phases: phaseDefs });
 
   // Enrich every run once: disk extras, display model, provider trouble and
   // the "session k of N" scope label.
@@ -1864,6 +2370,10 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
     run.providerTrouble = providerTroubleLabel(run.note);
     const k = Number(run.sessionNumber);
     run.sessionLabel = Number.isInteger(k) && k > 0 ? (allowance !== null ? `session ${k} of ${allowance + 1}` : `session ${k}`) : null;
+    const matchedEsc = findMatchingEscalation(run, escalations);
+    if (matchedEsc) {
+      run.escalationReason = formatEscalationReason(matchedEsc);
+    }
     return run;
   });
 
@@ -1913,7 +2423,20 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
       if (g.status === "running") g.status = "interrupted";
     }
   }
-  const gateCommand = gates.map((g) => g.command).filter(Boolean).pop() ?? null;
+  const layoutGateCommands = layout?.tests?.commands
+    ?? layout?.gates?.commands
+    ?? policy?.gates?.commands
+    ?? state?.gates?.commands
+    ?? null;
+  const layoutGateCommand = Array.isArray(layoutGateCommands)
+    ? layoutGateCommands.filter(Boolean).join(" && ")
+    : (typeof layoutGateCommands === "string" ? layoutGateCommands : null);
+  const gateCommand = gates.map((g) => g.command).filter(Boolean).pop() ?? layoutGateCommand ?? null;
+  if (gateCommand) {
+    for (const g of gates) {
+      if (!g.command) g.command = gateCommand;
+    }
+  }
   const operatorResetBudgetDomains = operatorResetDomains(eventList);
 
   // Parsed diff_stat rows (watcher.md rule 13), each keeping its source index
@@ -2077,14 +2600,20 @@ export function buildReportModel({ state = null, runs = [], events = [], phases 
     primaryModelFallbacks: primaryModelFallbackEntries(state),
     // Backlog #4 / #12: minor notes preserved from the PASSing plan-review round.
     planPassNotes: planPassNoteEntries(state),
+    operatorDecisions: Array.isArray(state?.operatorDecisions) ? state.operatorDecisions : [],
+    manualTasks: Array.isArray(state?.manualTasks) ? state.manualTasks : [],
+    rateLimitWait: state?.rateLimitWait ?? null,
+    networkWait: state?.networkWait ?? null,
     liveProgress: decodeLiveProgress({ events: eventList, progress: progressList, gateCommand, limit: 10 }),
-    current: detectCurrent({ runs: enrichedRuns, gates, status: statusInfo.status, gateLog, expectedTotal: expectedGateTotal, expectedLabel: expectedGateLabel }),
+    current: detectCurrent({ runs: enrichedRuns, gates, status: statusInfo.status, gateLog, expectedTotal: expectedGateTotal, expectedLabel: expectedGateLabel, gateCommand }),
     planning,
     phases: phasesOut,
     finalReview,
     unclassified,
     runs: enrichedRuns,
     events: eventList,
+    escalations,
+    _extractedEscalations: escalations,
     notRunText: typeof notRunText === "string" ? notRunText : "",
   };
 }
@@ -2395,6 +2924,8 @@ export function planningNote(run, model) {
   }
   const slowSnapshot = slowSnapshotNote(run);
   if (slowSnapshot) parts.push(slowSnapshot);
+  const escReason = run?.escalationReason ?? (model ? findRunEscalationReason(run, model) : null);
+  if (escReason) parts.push(escReason);
   const failureReason = failureReasonText(run, model?.runs);
   if (failureReason) parts.push(failureReason);
   const staleReason = statusReason(run);
@@ -2405,10 +2936,16 @@ export function planningNote(run, model) {
 // The single table column order shared by planning, implementation and final
 // review (watcher.md Table columns): ROLE MODEL TASK STATUS TURNS CONTEXT TOKENS
 // DURATION STARTED NOTE.
+const TASK_CELL_MAX = 32;
+function capTaskCell(value) {
+  const text = String(value ?? "-");
+  return text.length > TASK_CELL_MAX ? `${text.slice(0, TASK_CELL_MAX - 1)}…` : text;
+}
+
 const TABLE_COLUMNS = [
   { header: "ROLE", cell: (r) => r.role ?? "-" },
   { header: "MODEL", cell: (r) => r.model ?? "-" },
-  { header: "TASK", cell: (r) => r.task ?? "-" },
+  { header: "TASK", cell: (r) => capTaskCell(r.task ?? "-") },
   { header: "STATUS", cell: (r) => r.status ?? "-" },
   { header: "TURNS", cell: (r) => r.turns ?? "-" },
   { header: "CONTEXT", cell: (r) => r.context ?? "-" },
@@ -2475,13 +3012,6 @@ function renderRows(rows, { indent = "    ", widths: sharedWidths = null, collec
 // GSD rows their stage (`discuss`/`research`/`plan`/`plan-check`), all from
 // the stage recorded on the run at launch. A legacy run without that field
 // keeps the old `plan/tasks` label rather than inventing a stage.
-const PLANNING_STAGE_LABELS = {
-  specify: "spec", spec: "spec", "review-spec": "spec", "spec-review": "spec",
-  plan: "plan", "review-plan": "plan", "plan-review": "plan",
-  tasks: "tasks", "review-tasks": "tasks", "tasks-review": "tasks",
-  discuss: "discuss", research: "research",
-  "plan-check": "plan-check", "review-plan-check": "plan-check",
-};
 function planningStageLabel(run) {
   const raw = run?.planningStage ?? run?.stage ?? run?.planningStep ?? null;
   if (typeof raw !== "string" || !raw.trim()) return null;
@@ -2712,7 +3242,8 @@ export function renderPlanningStage(model, { widths = null, collectRows = null, 
     let header = `  Round ${round.number}`;
     if (typeof round.revision === "number" && round.revision > 0) {
       const max = Number.isFinite(maxRevisions) ? ` of ${maxRevisions}` : "";
-      header += ` (revision ${round.revision}${max})`;
+      const gatePrefix = round.gate ? `${round.gate} ` : "";
+      header += ` (${gatePrefix}revision ${round.revision}${max})`;
     }
     out.push(header);
     out.push(...renderRows((round.runs || []).map((run) => planningRow(run, model, dayTracker)), { widths, collectRows }));
@@ -2737,6 +3268,8 @@ function currentRunLabel(text) {
 }
 
 function statusText(model) {
+  if (model?.networkWait?.role) return `RUNNING · waiting for network (${model.networkWait.elapsedMin}/${model.networkWait.maxWaitMin} min, retrying ${model.networkWait.role})`;
+  if (model?.rateLimitWait?.time) return `RUNNING · waiting for rate limit reset at ${model.rateLimitWait.time}`;
   if (model?.status && model.status !== "RUNNING") return model.stopLine || model.status;
   return model?.status || "RUNNING";
 }
@@ -3037,7 +3570,7 @@ export function capsText(model) {
   }
 
   const known = CAP_ROLE_ORDER.filter((role) => layoutCaps?.[role] || legacyCaps[role]);
-  const extra = [...new Set([...Object.keys(layoutCaps || {}), ...Object.keys(legacyCaps)])].filter((role) => !CAP_ROLE_ORDER.includes(role) && role !== "implementer" && role !== "task_size_target_turns" && role !== "max_phase_tasks" && role !== "min_phase_tasks" && role !== "mission_token_backstop");
+  const extra = [...new Set([...Object.keys(layoutCaps || {}), ...Object.keys(legacyCaps)])].filter((role) => !CAP_ROLE_ORDER.includes(role) && role !== "implementer" && role !== "task_size_target_turns" && role !== "max_phase_tasks" && role !== "min_phase_tasks" && role !== "mission_token_backstop" && role !== "final_review_max_turns");
   const roles = [...known, ...extra];
   if (!roles.length && freeModelMaxTurns == null) return "-";
 
@@ -3180,7 +3713,18 @@ export function renderPipelineState(model, { stamp = null } = {}) {
 
 // Rule 15: a run row at ≥70% of its role's `policy.caps.<role>` cap gets
 // `⚠ high usage (<used> of <cap> cap)`. Never fabricated when no cap exists.
-function highUsageText(run, model) {
+// Backlog s15 #8: final-review code_reviewer rows are turn-capped only (no
+// token cap is applied), so label them with their real cap instead of the
+// code_reviewer token cap.
+function isFinalReviewCodeReviewerRow(run, noteHint = null) {
+  if (roleOf(run) !== "code_reviewer") return false;
+  if (noteHint === "final review") return true;
+  if (run?.phase === "final_review") return true;
+  const ref = String(runRef(run) || "");
+  return ref.startsWith("final-review-");
+}
+
+export function highUsageText(run, model, { noteHint = null } = {}) {
   if (run?.usage?.usagePartial) return null;
   const caps = model?.policy?.caps && typeof model.policy.caps === "object" ? model.policy.caps : {};
   const cap = caps[roleOf(run)] || {};
@@ -3188,6 +3732,9 @@ function highUsageText(run, model) {
   const used = Number(run?.usage?.priceWeighted);
   if (!Number.isFinite(limit) || limit <= 0 || !Number.isFinite(used)) return null;
   if (used / limit < 0.7) return null;
+  if (isFinalReviewCodeReviewerRow(run, noteHint)) {
+    return `⚠ high usage (${formatTokens(used)}; final review is turn-capped)`;
+  }
   return `⚠ high usage (${formatTokens(used)} of ${formatTokens(limit)} cap)`;
 }
 
@@ -3211,6 +3758,7 @@ const FAILURE_CLASS_LABELS = {
   READ_ONLY_CONTAINMENT_UNAVAILABLE: "read-only containment unavailable",
   COMMAND_FAILED: "command failed",
   SERVER_UNAVAILABLE: "server unavailable",
+  NETWORK_UNAVAILABLE: "network unavailable",
   RATE_LIMITED: "rate limited",
   AUTH_REQUIRED: "authentication required (log in)",
   PROVIDER_ERROR: "provider error",
@@ -3359,6 +3907,8 @@ export function implementationNote(run, model, noteHint = null) {
     parts.push(`capped · escalated (${String(reason).replace(/_/g, " ").toLowerCase()})`);
   }
   if (run?.sessionLabel) parts.push(run.sessionLabel);
+  const escReason = run?.escalationReason ?? (model ? findRunEscalationReason(run, model) : null);
+  if (escReason) parts.push(escReason);
   const staleReason = statusReason(run);
   if (staleReason) parts.push(staleReason);
   const killedReason = orchestratorKilledText(run, model);
@@ -3370,14 +3920,16 @@ export function implementationNote(run, model, noteHint = null) {
   const retry = retryText(run, model);
   if (retry) parts.push(retry);
   if (run?.retryAfterEscalation) parts.push("retry after escalation");
-  const high = highUsageText(run, model);
+  const high = highUsageText(run, model, { noteHint });
   if (high) parts.push(high);
   return parts.join(" · ");
 }
 
 // A run row of an implementation/final-review table; `task` overrides the
 // display ref (final review uses the mission-wide task range).
-function implementationRow(run, model, { task = undefined, noteHint = null, tracker = null } = {}) {
+function implementationRow(run, model, { task = undefined, noteHint = null, extraNote = null, tracker = null } = {}) {
+  const baseNote = implementationNote(run, model, noteHint);
+  const note = [baseNote, extraNote].filter(Boolean).join(" · ");
   return {
     running: String(run?.status || "") === "running",
     task: task !== undefined ? task : (runRef(run) ?? "-"),
@@ -3391,26 +3943,67 @@ function implementationRow(run, model, { task = undefined, noteHint = null, trac
     context: contextCell(run),
     turns: turnsCell(run),
     started: startedCell(run, tracker, model?.missionStartedAt),
-    note: implementationNote(run, model, noteHint),
+    note,
   };
 }
 
 // A `GATE (orchestrator)` row (rule 10): no model/price/context/turns; the
 // command and `passed/total` runs come from the gate events. STARTED is when
 // the gate started (DURATION is its measured run time).
-function gateRow(gate, model, task, tracker = null) {
+function gateCountsOf(gate) {
+  if (!gate || typeof gate !== "object") return null;
+  if (gate.counts) return gate.counts;
+  const lf = gate.logFile ?? gate.log ?? gate.logPath ?? gate.path ?? gate.gateLog ?? null;
+  if (typeof lf === "string" && lf) {
+    try {
+      const text = fs.readFileSync(lf, "utf8");
+      const c = parseGateCountsFromLog(text);
+      if (c) return c;
+    } catch {}
+  }
+  return null;
+}
+export function gateRow(gate, model, task, tracker = null) {
   const running = gate.status === "running";
   const p = gate.progress || {};
   const cmd = gate.command ? ` (${gate.command})` : "";
   let note;
   if (gate.status === "completed") {
-    const passed = p.passed ?? "-";
-    const total = p.total ?? "-";
-    if (gate.ok === false) {
-      note = `full test suite${cmd} · ${passed}/${total} runs · ${p.failed ?? "?"} failed`;
-      if (gate.failingFile) note += ` · ${gate.failingFile}`;
+    const counts = gateCountsOf(gate);
+    const isVitest = counts && counts.style === "vitest" && counts.tests;
+    if (isVitest) {
+      const t = counts.tests;
+      const f = counts.files;
+      if (gate.ok === false) {
+        const fileWord = (f.failed === 1) ? "file" : "files";
+        note = `full test suite${cmd} · ${t.failed} failed / ${t.total} tests (${f.failed} ${fileWord} failed)`;
+      } else {
+        note = `full test suite${cmd} · ${t.passed}/${t.total} tests passed (${f.passed}/${f.total} files, ${t.skipped} skipped)`;
+      }
+    } else if (counts && (counts.files || counts.total != null)) {
+      const f = counts.files || {};
+      const passed = (f.passed != null ? f.passed : counts.passed) ?? "-";
+      const total = (f.total != null ? f.total : counts.total) ?? "-";
+      const failed = (f.failed != null ? f.failed : counts.failed) ?? "?";
+      if (gate.ok === false) {
+        note = `full test suite${cmd} · ${passed}/${total} runs · ${failed} failed`;
+        if (gate.failingFile) note += ` · ${gate.failingFile}`;
+      } else {
+        note = `full test suite${cmd} · ${passed}/${total} runs passed`;
+      }
+    } else if (p.total != null || p.passed != null) {
+      // legacy progress without counts style: keep runs wording
+      const passed = p.passed ?? "-";
+      const total = p.total ?? "-";
+      if (gate.ok === false) {
+        note = `full test suite${cmd} · ${passed}/${total} runs · ${p.failed ?? "?"} failed`;
+        if (gate.failingFile) note += ` · ${gate.failingFile}`;
+      } else {
+        note = `full test suite${cmd} · ${passed}/${total} runs passed`;
+      }
     } else {
-      note = `full test suite${cmd} · ${passed}/${total} runs passed`;
+      // no counts available: omit counts entirely (never -/-)
+      note = `full test suite${cmd}`;
     }
   } else if (running) {
     note = p.total != null
@@ -3450,17 +4043,26 @@ function attemptRows(attempt, model, phase, tracker = null) {
   const range = taskRange(allRefs);
   const entries = [];
   for (const run of attempt.runs || []) {
-    let task;
-    if (IMPLEMENTATION_ROLES.has(roleOf(run))) task = runRef(run) ?? "-";
-    else task = normalizeRunTaskRef(runRef(run), allRefs) ?? range ?? "-";
-    entries.push({ ts: Date.parse(run.started_at ?? run.startedAt) || 0, seq: entries.length, run, task, findings: run.findings || [], runId: run.dirName || run.id || null });
+    const rawTask = IMPLEMENTATION_ROLES.has(roleOf(run))
+      ? (runRef(run) ?? "-")
+      : (normalizeRunTaskRef(runRef(run), allRefs) ?? range ?? "-");
+    const formatted = formatTaskCellAndNote(rawTask, { allRefs, phase, model });
+    entries.push({
+      ts: Date.parse(run.started_at ?? run.startedAt) || 0,
+      seq: entries.length,
+      run,
+      task: formatted.task,
+      extraNote: formatted.notePart,
+      findings: run.findings || [],
+      runId: run.dirName || run.id || null,
+    });
   }
   for (const g of attempt.gates || []) {
-    entries.push({ ts: Date.parse(g.at ?? g.resultAt) || 0, seq: entries.length, gate: g, task: range ?? "-", findings: [] });
+    entries.push({ ts: Date.parse(g.at ?? g.resultAt) || 0, seq: entries.length, gate: g, task: range ?? "-", extraNote: null, findings: [] });
   }
   entries.sort((a, b) => (a.ts - b.ts) || (a.seq - b.seq));
   for (const e of entries) {
-    if (e.run) e.row = implementationRow(e.run, model, { task: e.task, tracker });
+    if (e.run) e.row = implementationRow(e.run, model, { task: e.task, extraNote: e.extraNote, tracker });
     else if (e.gate) e.row = gateRow(e.gate, model, e.task, tracker);
   }
   return entries;
@@ -3473,10 +4075,54 @@ function phaseTaskDisplayRefs(phase) {
     if (typeof t.ref === "string" && t.ref) return t.ref;
     const fromText = taskRefFromText(t.text);
     if (fromText) return fromText;
-    const m = String(t.text ?? "").match(/^\*{0,2}\s*(\d+(?:\.\d+)?)/);
+    const m = String(t.text ?? "").match(/^\*{0,2}\s*(\d+(?:\.\d+)?(?:[a-z])?)/i);
     if (m) return `T${m[1]}`;
     return `T${phase.number}.${i + 1}`;
   });
+}
+
+function attemptCarriedTasks(attempt, phase) {
+  const raw = [
+    ...(Array.isArray(attempt?.carriedForward) ? attempt.carriedForward : []),
+    ...(Array.isArray(attempt?.carriedForwardTasks) ? attempt.carriedForwardTasks : []),
+    ...(Array.isArray(attempt?.runs) ? attempt.runs.flatMap((r) => r.carriedForwardTasks || []) : []),
+  ];
+  const set = new Set();
+  for (const item of raw) {
+    const disp = displayCarriedTask(item, phase);
+    for (const part of String(disp).split(",")) {
+      const trimmed = part.trim();
+      if (trimmed) set.add(trimmed);
+    }
+  }
+  return set;
+}
+
+function phaseFindingTasksRecord(model, phase) {
+  const state = model?.state ?? model;
+  const store = state?.reviewFindingTasks;
+  if (!store || typeof store !== "object") return null;
+
+  const phaseIndex = phase?.number != null
+    ? phase.number - 1
+    : (Number.isFinite(Number(model?.phaseIndex)) ? Number(model.phaseIndex) : null);
+
+  if (phaseIndex != null && Number.isInteger(phaseIndex)) {
+    const framework = model?.framework ?? state?.planningDetection?.framework ?? state?.framework ?? null;
+    if (framework === "speckit" && store[`speckit-phase:${phaseIndex}`]) {
+      return store[`speckit-phase:${phaseIndex}`];
+    }
+    if (framework === "standalone" && store[`standalone-phase:${phaseIndex}`]) {
+      return store[`standalone-phase:${phaseIndex}`];
+    }
+    const candidate = store[`speckit-phase:${phaseIndex}`]
+      ?? store[`standalone-phase:${phaseIndex}`]
+      ?? store[`phase:${phaseIndex}`]
+      ?? store[String(phaseIndex)];
+    if (candidate) return candidate;
+  }
+  if (phase?.name && store[phase.name]) return store[phase.name];
+  return null;
 }
 
 // The single `next:` line under the running phase's table (backlog #9): the
@@ -3484,19 +4130,46 @@ function phaseTaskDisplayRefs(phase) {
 // (phase review -> full test suite -> phase verify). Nothing is shown during
 // the final verify (nothing is left), and the line is dropped for a stopped
 // phase (its status is terminal, not in_progress).
-function nextStepsLine(model, phase, attempt) {
+export function nextStepsLine(model, phase, attempt) {
   if (model?.stage !== "IMPLEMENTATION") return null;
   const current = model?.current;
   if (!current) return null;
   if (current.role === "verifier") return null;
   const parts = [];
   if (current.kind === "run" && current.role === "implementer" && current.taskRef) {
-    const refs = phaseTaskDisplayRefs(phase);
+    const refs = (phase?.tasks || []).length ? phaseTaskDisplayRefs(phase) : phaseTaskRefs(phase);
     const i = refs.indexOf(String(current.taskRef));
-    if (i >= 0 && i < refs.length - 1) {
-      const next = refs[i + 1];
-      const more = refs.length - (i + 2);
-      parts.push(`${next}${more > 0 ? ` (+${more} more task${more === 1 ? "" : "s"})` : ""}`);
+    if (i >= 0) {
+      const isRound1 = (attempt?.number ?? model?.attempt) === 1;
+      const findingRecord = !isRound1 ? phaseFindingTasksRecord(model, phase) : null;
+      const usableRecord =
+        findingRecord != null &&
+        typeof findingRecord === "object" &&
+        findingRecord.allMapped === true &&
+        Array.isArray(findingRecord.affected) &&
+        findingRecord.affected.length > 0;
+
+      let remainingToRun;
+      if (usableRecord) {
+        const affectedRefs = new Set();
+        for (const item of findingRecord.affected) {
+          const disp = displayCarriedTask(item, phase);
+          for (const part of String(disp).split(",")) {
+            const trimmed = part.trim();
+            if (trimmed) affectedRefs.add(trimmed);
+          }
+        }
+        remainingToRun = refs.slice(i + 1).filter((ref) => affectedRefs.has(ref));
+      } else {
+        const carriedSet = attemptCarriedTasks(attempt, phase);
+        remainingToRun = refs.slice(i + 1).filter((ref) => !carriedSet.has(ref));
+      }
+
+      if (remainingToRun.length > 0) {
+        const next = remainingToRun[0];
+        const more = remainingToRun.length - 1;
+        parts.push(`${next}${more > 0 ? ` (+${more} more task${more === 1 ? "" : "s"})` : ""}`);
+      }
     }
   }
   const runs = attempt?.runs || [];
@@ -3714,8 +4387,13 @@ export function renderFinalReviewStage(model, { widths = null, collectRows = nul
   const finalGates = (model?.gates || []).filter((g) => g.phase == null);
   const scopeOf = (run) => {
     const ref = runRef(run);
-    if (!ref || ref.startsWith("final-review-") || ref.startsWith("final-fix-")) return range ?? "-";
-    return normalizeRunTaskRef(ref, allRefs) ?? (range ?? "-");
+    if (!ref || ref.startsWith("final-review-") || ref.startsWith("final-fix-")) {
+      return { task: range ?? "-", notePart: null };
+    }
+    const rawTask = IMPLEMENTATION_ROLES.has(roleOf(run))
+      ? ref
+      : (normalizeRunTaskRef(ref, allRefs) ?? range ?? "-");
+    return formatTaskCellAndNote(rawTask, { allRefs, model });
   };
   const roundApproved = (round) => (round.runs || []).some((r) => REVIEW_ROLES.has(roleOf(r)) && isDecision(r, "PASS"));
   const out = [head];
@@ -3724,7 +4402,10 @@ export function renderFinalReviewStage(model, { widths = null, collectRows = nul
     const reviewers = (round.runs || []).filter((r) => REVIEW_ROLES.has(roleOf(r)));
     const implRuns = (round.runs || []).filter((r) => IMPLEMENTATION_ROLES.has(roleOf(r)));
     out.push(`  Round ${round.number}`);
-    out.push(...renderRows(reviewers.map((r) => implementationRow(r, model, { task: scopeOf(r), noteHint: "final review", tracker: dayTracker })), { widths, collectRows }));
+    out.push(...renderRows(reviewers.map((r) => {
+      const scoped = scopeOf(r);
+      return implementationRow(r, model, { task: scoped.task, extraNote: scoped.notePart, noteHint: "final review", tracker: dayTracker });
+    }), { widths, collectRows }));
     const findingsPassed = fr.status === "passed" || (fr.rounds || []).slice(roundIndex + 1).some(roundApproved);
     if (!findingsPassed) {
       for (const r of reviewers) {
@@ -3737,12 +4418,15 @@ export function renderFinalReviewStage(model, { widths = null, collectRows = nul
       fix += 1;
       out.push(limit ? `  Fix round ${fix} of ${limit}` : `  Fix round ${fix}`);
       const entries = [
-        ...implRuns.map((r) => ({ ts: Date.parse(r.started_at ?? r.startedAt) || 0, seq: 0, run: r, task: scopeOf(r) })),
-        ...finalGates.map((g) => ({ ts: Date.parse(g.at ?? g.resultAt) || 0, seq: 1, gate: g, task: range ?? "-" })),
+        ...implRuns.map((r) => {
+          const scoped = scopeOf(r);
+          return { ts: Date.parse(r.started_at ?? r.startedAt) || 0, seq: 0, run: r, task: scoped.task, extraNote: scoped.notePart };
+        }),
+        ...finalGates.map((g) => ({ ts: Date.parse(g.at ?? g.resultAt) || 0, seq: 1, gate: g, task: range ?? "-", extraNote: null })),
       ];
       entries.sort((a, b) => (a.ts - b.ts) || (a.seq - b.seq));
       for (const e of entries) {
-        if (e.run) e.row = implementationRow(e.run, model, { task: e.task, tracker: dayTracker });
+        if (e.run) e.row = implementationRow(e.run, model, { task: e.task, extraNote: e.extraNote, tracker: dayTracker });
         else if (e.gate) e.row = gateRow(e.gate, model, e.task, dayTracker);
       }
       out.push(...renderRows(entries.map((e) => e.row), { widths, collectRows }));
@@ -3837,7 +4521,8 @@ export function renderCurrentRun(model) {
   if (current.kind === "gate") {
     out.push(currentRunLabel("stage") + currentStageText(model));
     out.push(currentRunLabel("run") + "GATE (orchestrator full suite, no agent)");
-    if (current.command) out.push(currentRunLabel("command") + current.command);
+    const cmd = current.command || model?.gateCommand || "(orchestrator gate)";
+    out.push(currentRunLabel("command") + cmd);
     let status = "RUNNING";
     if (current.pid != null) status += ` · pid ${current.pid} (alive)`;
     out.push(currentRunLabel("status") + status);
@@ -3970,6 +4655,29 @@ export function renderPlanPassNotes(model) {
   ].join("\n");
 }
 
+// Backlog #11: operator decisions recorded with `ap note`.
+export function renderOperatorDecisions(model) {
+  const list = Array.isArray(model?.operatorDecisions) ? model.operatorDecisions.filter((d) => d && typeof d.text === "string" && d.text.trim()) : [];
+  if (!list.length) return "";
+  return [
+    "=== Operator decisions ===",
+    ...list.map((d) => `- ${d.text.trim()}${d.at ? ` (${String(d.at).slice(0, 10)})` : ""}`),
+  ].join("\n");
+}
+
+// Backlog #3: manual tasks skipped for the operator.
+export function renderManualTasks(model) {
+  const list = Array.isArray(model?.manualTasks) ? model.manualTasks.filter((t) => t && typeof t.text === "string" && t.text.trim()) : [];
+  if (!list.length) return "";
+  return [
+    "=== Manual tasks (for the operator) ===",
+    ...list.map((t) => {
+      const phasePrefix = t.phase ? `[${t.phase}] ` : (Number.isInteger(t.phaseIndex) ? `[Phase ${t.phaseIndex + 1}] ` : "");
+      return `- ${phasePrefix}${t.text.trim()} (${t.note || "manual — for the operator"})`;
+    }),
+  ].join("\n");
+}
+
 // The whole report. Tasks 1.5 append the current-run and live-progress sections.
 export function renderReport(model, { stamp = null } = {}) {
   // Backlog #23: one width per column for the whole report. Collect every
@@ -3999,5 +4707,9 @@ export function renderReport(model, { stamp = null } = {}) {
   if (progress) sections.push("", progress);
   const passNotes = renderPlanPassNotes(model);
   if (passNotes) sections.push("", passNotes);
+  const decisions = renderOperatorDecisions(model);
+  if (decisions) sections.push("", decisions);
+  const manual = renderManualTasks(model);
+  if (manual) sections.push("", manual);
   return sections.join("\n");
 }

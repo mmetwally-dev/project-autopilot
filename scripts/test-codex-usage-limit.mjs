@@ -117,7 +117,7 @@ const EXACT_STDOUT = `${LINE1}\n${LINE2}\n`;
   });
 
   check("escalation naming: step is rate_limited_escalation", naming?.step === "rate_limited_escalation", naming);
-  check("escalation naming: detail says 'resume after 4:47 AM'", naming?.detail?.includes("resume after 4:47 AM"), naming?.detail);
+  check("escalation naming: detail says 'resume with `ap run` after 4:47 AM'", naming?.detail?.includes("resume with `ap run` after 4:47 AM"), naming?.detail);
   check("escalation naming: detail does not use generic 'after the limit lifts'", !naming?.detail?.includes("after the limit lifts"), naming?.detail);
 }
 

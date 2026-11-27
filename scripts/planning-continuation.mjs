@@ -88,6 +88,7 @@ export function hasSpentPlanningContinuations(s) {
     if (s.noProgressGenerations && typeof s.noProgressGenerations === "object" && budgetKey in s.noProgressGenerations) return true;
     if (s.rolloverDeadEnds && typeof s.rolloverDeadEnds === "object" && budgetKey in s.rolloverDeadEnds) return true;
     if (s.planningProgressDigests && typeof s.planningProgressDigests === "object" && scope in s.planningProgressDigests) return true;
+    if (s.planReviewCappedNoVerdict && typeof s.planReviewCappedNoVerdict === "object" && scope in s.planReviewCappedNoVerdict) return true;
     const ledgerKey = backstopLedgerKey(scope);
     if (s.backstopFirings && typeof s.backstopFirings === "object" && ledgerKey in s.backstopFirings) return true;
   }
@@ -123,6 +124,12 @@ export function clearPlanningContinuationScope(s, scope) {
   }
   if (s.planningProgressDigests && typeof s.planningProgressDigests === "object" && scope in s.planningProgressDigests) {
     delete s.planningProgressDigests[scope];
+    cleared += 1;
+  }
+  // Backlog #9(d): the consecutive capped plan_reviewer sessions without a
+  // verdict annotate the same scope; a verdict/uncapped round clears them.
+  if (s.planReviewCappedNoVerdict && typeof s.planReviewCappedNoVerdict === "object" && scope in s.planReviewCappedNoVerdict) {
+    delete s.planReviewCappedNoVerdict[scope];
     cleared += 1;
   }
   if (clearBackstopFirings(s, scope)) cleared += 1;

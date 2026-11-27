@@ -48,7 +48,8 @@
     },
     "free_models": {
       "auto_fallback": true,
-      "max_turns": 45
+      "max_turns": 45,
+      "exclude": []
     }
   },
   "caps": {
@@ -65,7 +66,8 @@
       "max_turns": 30,
       "max_tokens": 250000,
       "extra_sessions": 4,
-      "wrap_up_at_tokens": 225000
+      "wrap_up_at_tokens": 225000,
+      "first_round_reasoning": null
     },
     "implementer": {
       "max_turns": 40,
@@ -85,19 +87,20 @@
       "extra_sessions": 2,
       "wrap_up_at_tokens": 180000
     },
-    "mission_token_backstop": 6000000
+    "mission_token_backstop": 6000000,
+    "final_review_max_turns": null
   },
   "retries": {
     "plan_revisions": 8,
     "spec_revisions": 3,
     "implementation": 5,
     "verification": 5,
-    "final_review_fix_rounds": 2,
+    "final_review_fix_rounds": 3,
     "cli_errors": 3,
     "infrastructure": 3,
     "no_progress_sessions": 2,
     "extra_sessions_per_task": 5,
-    "escalate_after_not_fixed": 2
+    "escalate_after_not_fixed": 3
   },
   "time_limits": {
     "role_timeout_minutes": { "default": 60, "verifier": 180 },
@@ -130,6 +133,18 @@
     "offline_test_tools": "",
     "not_run_in_missions": [],
     "not_run_in_missions_original_command": "",
+    "app_server": {
+      "start_command": "",
+      "cwd": "",
+      "port": "auto",
+      "ready_url": "/",
+      "warmup_urls": [],
+      "ready_timeout_ms": 180000,
+      "env_file": "",
+      "env": {},
+      "allow_hosts": [],
+      "credential_vars": []
+    },
     "require_reviewer": true,
     "browser": "native",
     "require_browser": "when-task-requires",
@@ -141,6 +156,7 @@
     "allow_git_commit": false,
     "allow_git_push": false,
     "allow_destructive_operations": false,
+    "allow_docker": false,
     "stop_on_sandbox_violation": true,
     "block_git_in_roles": true,
     "check_read_only_roles": true,
@@ -187,6 +203,9 @@
     "handoff_note_max_chars": 4000,
     "handoff_wrapup_tokens": 180000,
     "fallback_retry_primary_minutes": 60,
+    "rate_limit_wait_max_minutes": 60,
+    "network_wait_minutes": 60,
+    "daily_reset_time": "03:00",
     "checkpoint_after_task": true,
     "checkpoint_after_phase": true,
     "capabilities": {

@@ -91,7 +91,9 @@
 // measured baseline its own assertions are read off, and every other
 // mission's subprocess timeout is derived from that measurement with
 // headroom (8x, i.e. >= 2x a single observed run — never a fixed 3
-// minutes); (b) reads several assertions off each single mission run
+// minutes); a minimum floor (WAVE_TIMEOUT_FLOOR_MS = 90s, scaled by
+// TIMEOUT_FACTOR) prevents starvation when the full wave runs concurrently;
+// (b) reads several assertions off each single mission run
 // instead of re-spawning per case; (c) runs the wave of independent
 // scenarios concurrently, with the three cross-mission pairs pipelined
 // into the same wave (each pair's second mission starts the moment its
@@ -136,6 +138,13 @@ function check(name, condition, detail) {
   if (condition) { console.log(`PASS ${name}`); return; }
   failures += 1;
   console.error(`FAIL ${name}${detail !== undefined ? ` :: ${JSON.stringify(detail)}` : ""}`);
+}
+
+function logTimeoutDiag(label, run) {
+  if (!run || !run.timedOut) return;
+  const tail = (text) => (text || "").replace(/\r\n/g, "\n").trimEnd().split("\n").slice(-15).join("\n");
+  console.log("timeout diag:", `${label} (last 15 lines of stdout):\n` + tail(run.stdout));
+  console.log("timeout diag:", `${label} (last 15 lines of stderr):\n` + tail(run.stderr));
 }
 
 function readState(repo) {
@@ -415,7 +424,17 @@ const autopilotSrc = fs.readFileSync(path.join("scripts", "autopilot.mjs"), "utf
   // Retry closures: an arrow wrapping the relayAsync call (`()=>relayAsync("plan_reviewer",...)`)
   // whose options carry resume:false plus the read-only review shape; other options tolerated.
   const retryClosures = callsWithOptions(autopilotSrc, 'relayAsync("plan_reviewer",', ["readOnly:true", "review:true", "resume:false", "capEnabled:true", "taskRef:'standalone-planning-plan_reviewer'"])
-    .filter((call) => autopilotSrc.includes("()=>" + call));
+    .filter((call) => {
+      // The retry wrapper may be a bare arrow (`()=>relayAsync(...)`) or the
+      // backlog #9 verdict-only async block (`async ()=>{ ... relayAsync(...) }`).
+      for (let from = 0; ; ) {
+        const idx = autopilotSrc.indexOf(call, from);
+        if (idx < 0) return false;
+        const prefix = autopilotSrc.slice(Math.max(0, idx - 500), idx);
+        if (prefix.includes("()=>") || prefix.includes("async ()=>{") || prefix.includes("async()=>{")) return true;
+        from = idx + call.length;
+      }
+    });
   check("contract: standalone retry uses a fresh session (resume:false)",
     retryClosures.length >= 1);
   check("contract: review() helper passes resume:false",
@@ -437,8 +456,9 @@ const autopilotSrc = fs.readFileSync(path.join("scripts", "autopilot.mjs"), "utf
   // task scopes.
   const sites = (autopilotSrc.match(/await resolvePlanningReviewAttempt\(c,s,/g) || []).length;
   // Four call sites plus the SpecKit gate confirmation full review (a fifth
-  // reviewer call routed through the same helper).
-  check("contract: all four call sites (+ SpecKit confirmation review) route through resolvePlanningReviewAttempt", sites === 5, {sites});
+  // reviewer call routed through the same helper), plus the SpecKit gate
+  // verdict-only retry after a no-verdict review (backlog sk #5, a sixth).
+  check("contract: all four call sites (+ SpecKit confirmation review + verdict-only retry) route through resolvePlanningReviewAttempt", sites === 6, {sites});
   check("contract: post-revision re-review scope", autopilotSrc.includes('"speckit-gate-review"'));
   check("contract: existing-planning scope", autopilotSrc.includes('"existing-planning-review"'));
 
@@ -448,7 +468,7 @@ const autopilotSrc = fs.readFileSync(path.join("scripts", "autopilot.mjs"), "utf
   check("contract: re-review prompt hoisted for the retry closure",
     autopilotSrc.includes("const reReviewPrompt=`Re-review the SpecKit gate"));
   check("contract: re-review retries via the same capped reviewer call",
-    autopilotSrc.includes("()=>runCappedReview(reReviewPrompt)"));
+    autopilotSrc.includes("()=>runCappedReview(reReviewPrompt,fullRoundRelayOpts())"));
 
   // Call site 4: positive allowlist gating — never a negative check.
   check("contract: decision module exports the allowlist predicate",
@@ -461,7 +481,7 @@ const autopilotSrc = fs.readFileSync(path.join("scripts", "autopilot.mjs"), "utf
   check("contract: call site 4 never uses a negative framework check",
     !reviewExistingCode.includes('framework!=="gsd"') && !reviewExistingCode.includes("framework !== \"gsd\""));
   check("contract: call site 4 retry re-invokes the same reviewer closure",
-    reviewExistingCode.includes("runReview,") && reviewExistingCode.includes("const runReview=()=>relayAsync(\"plan_reviewer\""));
+    reviewExistingCode.includes("runReview,") && /const runReview=async\(\)=>\{[\s\S]*?relayAsync\("plan_reviewer"/.test(reviewExistingCode));
   // relayAsync's own default is resume:false (fresh session), so the
   // closure above retries with a fresh session without restating it.
   check("contract: relayAsync defaults to a fresh session (resume:false)",
@@ -517,7 +537,9 @@ const winSrc = fs.readFileSync(path.join("scripts", "test-fixtures", "fake-workf
 // case itself (several assertions read off this one run). Its measured
 // wall clock derives every other mission's subprocess timeout (8x —
 // comfortably above the binding >= 2x headroom over a single observed
-// mission run). Fixture setup for the wave proceeds while the probe runs,
+// mission run). A minimum floor (WAVE_TIMEOUT_FLOOR_MS = 90s, scaled by
+// TIMEOUT_FACTOR) guards against wave-concurrency starvation on loaded hosts.
+// Fixture setup for the wave proceeds while the probe runs,
 // since setup is local-only and shares no state with it.
 // ---------------------------------------------------------------------
 const s2 = setupStandalone("planning-review-s2", "plan_review_infra_non_retryable");
@@ -560,8 +582,10 @@ const probeElapsed = Date.now() - probeT0;
 // A 2-relay escalation is the shortest mission shape here; every wave case
 // runs at most ~4x its relay count, so 8x the measured wall clock leaves
 // >= 2x headroom even if box load doubles per-relay cost mid-file.
-const FULL_TIMEOUT_MS = Math.ceil(probeElapsed * 8 * TIMEOUT_FACTOR);
-console.log(`timing: calibration probe (S2) elapsed=${(probeElapsed / 1000).toFixed(1)}s -> derived wave timeout=${(FULL_TIMEOUT_MS / 1000).toFixed(0)}s`);
+const WAVE_TIMEOUT_FLOOR_MS = 90_000;
+const FULL_TIMEOUT_MS = Math.max(Math.ceil(probeElapsed * 8 * TIMEOUT_FACTOR), Math.ceil(WAVE_TIMEOUT_FLOOR_MS * TIMEOUT_FACTOR));
+const timeoutSource = FULL_TIMEOUT_MS === Math.ceil(WAVE_TIMEOUT_FLOOR_MS * TIMEOUT_FACTOR) ? "floor" : "derived";
+console.log(`timing: calibration probe (S2) elapsed=${(probeElapsed / 1000).toFixed(1)}s -> derived wave timeout=${(FULL_TIMEOUT_MS / 1000).toFixed(0)}s (floor=${(Math.ceil(WAVE_TIMEOUT_FLOOR_MS * TIMEOUT_FACTOR) / 1000).toFixed(0)}s, used=${timeoutSource})`);
 check("budget: derived wave timeout has >=2x headroom over the observed run",
   FULL_TIMEOUT_MS >= probeElapsed * 2, {probeElapsed, FULL_TIMEOUT_MS});
 
@@ -573,6 +597,7 @@ check("budget: derived wave timeout has >=2x headroom over the observed run",
   const run = probeRun;
   const {repo, binDir} = s2;
   try {
+    logTimeoutDiag("s2", run);
     check("s2: probe did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("s2: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
     check("s2: escalation names the failure class", (run.stderr || "").includes("PATH_UNSUPPORTED"), (run.stderr || "").slice(-500));
@@ -655,6 +680,7 @@ async function xaPair() {
   let xaM1Dir;
   {
     const run = m1;
+    logTimeoutDiag("xa-m1", run);
     check("xa-m1: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("xa-m1: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
     check("xa-m1: escalation names class+domain and exhaustion",
@@ -677,6 +703,7 @@ async function xaPair() {
   {
     const run = m2;
     try {
+      logTimeoutDiag("xa-m2", run);
       check("xa-m2: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
       check("xa-m2: mission escalates after retrying on a fresh budget (nonzero exit)", run.status !== 0, {status: run.status});
       check("xa-m2: escalation names class+domain and exhaustion",
@@ -703,6 +730,7 @@ async function xb1Pair() {
   let xb1M1Dir;
   {
     const run = m1;
+    logTimeoutDiag("xb1-m1", run);
     check("xb1-m1: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("xb1-m1: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
     check("xb1-m1: escalation names class+domain and exhaustion",
@@ -727,6 +755,7 @@ async function xb1Pair() {
   {
     const run = m2;
     try {
+      logTimeoutDiag("xb1-m2", run);
       check("xb1-m2: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
       check("xb1-m2: mission escalates after retrying on a fresh budget (nonzero exit)", run.status !== 0, {status: run.status});
       check("xb1-m2: escalation names class+domain and exhaustion",
@@ -753,6 +782,7 @@ async function xb2Pair() {
   let xb2M1Dir;
   {
     const run = m1;
+    logTimeoutDiag("xb2-m1", run);
     check("xb2-m1: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("xb2-m1: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
     const dirs = missionDirs(repo).filter((d) => d !== "planning");
@@ -801,6 +831,7 @@ async function xb2Pair() {
   {
     const run = m2;
     try {
+      logTimeoutDiag("xb2-m2", run);
       check("xb2-m2: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
       check("xb2-m2: stopped after planning pass (or completed)", run.watchReason === "stopped-after-planning-pass" || run.status === 0,
         {watchReason: run.watchReason, status: run.status, killed: run.killed});
@@ -875,6 +906,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = r1;
   const {repo, binDir} = s1;
   try {
+    logTimeoutDiag("s1", run);
     check("s1: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("s1: mission completes (exit 0)", run.status === 0, {status: run.status, stderrTail: (run.stderr || "").slice(-800)});
     const counts = roleCounts(repo);
@@ -916,6 +948,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = r3;
   const {repo, binDir} = s3;
   try {
+    logTimeoutDiag("s3", run);
     check("s3: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("s3: mission escalates after revisions (nonzero exit)", run.status !== 0, {status: run.status});
     check("s3: escalation is the unchanged revision-exhaustion path",
@@ -941,6 +974,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = r4;
   const {repo, binDir} = s4;
   try {
+    logTimeoutDiag("s4", run);
     check("s4: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("s4: stopped after planning pass (or completed)", run.watchReason === "stopped-after-planning-pass" || run.status === 0,
       {watchReason: run.watchReason, status: run.status, killed: run.killed});
@@ -969,6 +1003,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = rk1;
   const {repo, binDir} = k1;
   try {
+    logTimeoutDiag("k1", run);
     check("k1: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("k1: stopped after planning pass (or completed)", run.watchReason === "stopped-after-planning-pass" || run.status === 0,
       {watchReason: run.watchReason, status: run.status, killed: run.killed});
@@ -995,6 +1030,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = rk2;
   const {repo, binDir} = k2;
   try {
+    logTimeoutDiag("k2", run);
     check("k2: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("k2: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
     check("k2: escalation names the failure class", (run.stderr || "").includes("PATH_UNSUPPORTED"), (run.stderr || "").slice(-500));
@@ -1008,17 +1044,25 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
 }
 
 // ---------------------------------------------------------------------
-// K3: SpecKit initial gate output-contract failure still consumes a
-// revision and re-invokes the planner, unchanged, with nothing recorded.
+// K3: SpecKit initial gate output-contract failure (clean exit, no
+// sentinel) runs one verdict-only retry of the reviewer, then escalates
+// immediately with formatSpeckitGateNoVerdictMessage (no planner
+// revision, no revision counted, nothing recorded).
 // ---------------------------------------------------------------------
 {
   const run = rk3;
   const {repo, binDir} = k3;
   try {
+    logTimeoutDiag("k3", run);
     check("k3: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("k3: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
+    check("k3: escalation is the no-verdict message",
+      (run.stderr || "").includes("SpecKit gate review-spec failed: reviewer gave no usable verdict")
+      && (run.stderr || "").includes("after one retry"),
+      (run.stderr || "").slice(-500));
     const counts = roleCounts(repo);
-    check("k3: planner re-invoked (specify ran twice)", counts.planner === 2, counts);
+    check("k3: reviewer ran twice (initial + one verdict-only retry)", counts.plan_reviewer === 2, counts);
+    check("k3: planner ran once (specify only, no revision)", counts.planner === 1, counts);
     check("k3: output-contract failure never recorded", Object.keys(budgetKeys(repo)).length === 0, budgetKeys(repo));
   } finally {
     cleanup(repo, binDir);
@@ -1034,6 +1078,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = rk4;
   const {repo, binDir} = k4;
   try {
+    logTimeoutDiag("k4", run);
     check("k4: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("k4: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
     const counts = roleCounts(repo);
@@ -1052,6 +1097,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = rr1;
   const {repo, binDir} = v1;
   try {
+    logTimeoutDiag("r1", run);
     check("r1: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("r1: stopped after re-review pass (or completed)", run.watchReason === "stopped-after-planning-pass" || run.status === 0,
       {watchReason: run.watchReason, status: run.status, killed: run.killed});
@@ -1091,6 +1137,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = rr2;
   const {repo, binDir} = v2;
   try {
+    logTimeoutDiag("r2", run);
     check("r2: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("r2: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
     check("r2: escalation names the failure class", (run.stderr || "").includes("PATH_UNSUPPORTED"), (run.stderr || "").slice(-500));
@@ -1106,21 +1153,25 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
 }
 
 // ---------------------------------------------------------------------
-// R3: SpecKit post-revision re-review output-contract failure escalates
-// with the pre-existing message, nothing recorded. This is call site 3's
-// own shape — never inferred from E3 below.
+// R3: SpecKit post-revision re-review output-contract failure (clean
+// exit, no sentinel) runs one verdict-only retry of the reviewer, then
+// escalates immediately with formatSpeckitGateNoVerdictMessage (no
+// second planner revision, no revision counted, nothing recorded).
 // ---------------------------------------------------------------------
 {
   const run = rr3;
   const {repo, binDir} = v3;
   try {
+    logTimeoutDiag("r3", run);
     check("r3: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("r3: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
-    check("r3: escalation is the unchanged immediate die (no revision left)",
-      (run.stderr || "").includes("SpecKit gate review-spec failed."), (run.stderr || "").slice(-500));
+    check("r3: escalation is the no-verdict message",
+      (run.stderr || "").includes("SpecKit gate review-spec failed: reviewer gave no usable verdict")
+      && (run.stderr || "").includes("after one retry"),
+      (run.stderr || "").slice(-500));
     const counts = roleCounts(repo);
-    check("r3: reviewer ran exactly twice (initial + re-review, no retry)", counts.plan_reviewer === 2, counts);
-    check("r3: planner ran exactly twice (initial + one revision)", counts.planner === 2, counts);
+    check("r3: reviewer ran three times (initial + re-review + one verdict-only retry)", counts.plan_reviewer === 3, counts);
+    check("r3: planner ran exactly twice (initial + one revision, no second revision)", counts.planner === 2, counts);
     check("r3: output-contract failure never recorded", Object.keys(budgetKeys(repo)).length === 0, budgetKeys(repo));
   } finally {
     cleanup(repo, binDir);
@@ -1134,6 +1185,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = rr4;
   const {repo, binDir} = v4;
   try {
+    logTimeoutDiag("r4", run);
     check("r4: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("r4: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
     check("r4: escalation is the policy message", (run.stderr || "").includes("reviewer violated read-only relay policy."), (run.stderr || "").slice(-500));
@@ -1158,6 +1210,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = re1;
   const {repo, binDir} = e1;
   try {
+    logTimeoutDiag("e1", run);
     check("e1: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("e1: stopped after review pass (or completed)", run.watchReason === "stopped-after-planning-pass" || run.status === 0,
       {watchReason: run.watchReason, status: run.status, killed: run.killed});
@@ -1186,6 +1239,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = re2;
   const {repo, binDir} = e2;
   try {
+    logTimeoutDiag("e2", run);
     check("e2: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("e2: stopped after review pass (or completed)", run.watchReason === "stopped-after-planning-pass" || run.status === 0,
       {watchReason: run.watchReason, status: run.status, killed: run.killed});
@@ -1215,6 +1269,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = re3;
   const {repo, binDir} = e3;
   try {
+    logTimeoutDiag("e3", run);
     check("e3: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("e3: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
     check("e3: escalation is the unchanged immediate die",
@@ -1239,6 +1294,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = re4;
   const {repo, binDir} = e4;
   try {
+    logTimeoutDiag("e4", run);
     check("e4: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("e4: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
     check("e4: escalation is the unchanged message",
@@ -1262,6 +1318,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = re5;
   const {repo, binDir} = e5;
   try {
+    logTimeoutDiag("e5", run);
     check("e5: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("e5: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
     check("e5: escalation is the policy message", (run.stderr || "").includes("violated relay policy"), (run.stderr || "").slice(-500));
@@ -1285,6 +1342,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = rp1;
   const {repo, binDir} = p1;
   try {
+    logTimeoutDiag("p1", run);
     check("p1: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("p1: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
     check("p1: escalation is the policy message",
@@ -1309,6 +1367,7 @@ const [r1, r3, r4, rk1, rk2, rk3, rk4,
   const run = rp2;
   const {repo, binDir} = p2;
   try {
+    logTimeoutDiag("p2", run);
     check("p2: mission did not time out", run.timedOut === false, {timedOut: run.timedOut, status: run.status});
     check("p2: mission escalates (nonzero exit)", run.status !== 0, {status: run.status});
     check("p2: escalation is the policy message",

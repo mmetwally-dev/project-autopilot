@@ -223,8 +223,8 @@ if (process.exitCode) {
   // relay also clears up front with the same logged reason — gate writes
   // to ignored or already-dirty files leave guard hashes unchanged, so a
   // stale pre-gate before-snapshot must never be reused.
-  const mainGatesIdx = autopilotSource.indexOf("async function gates(c,s)");
-  const mainGatesWindow = functionBody(autopilotSource, "async function gates(c,s)");
+  const mainGatesIdx = autopilotSource.indexOf("async function gates(c,s,opts={})");
+  const mainGatesWindow = functionBody(autopilotSource, "async function gates(c,s,opts={})");
   check("gates: async gates(c,s) site exists", mainGatesIdx !== -1);
   check(
     "gates: async gates(c,s) clears the cache via clearSnapshotReuseCache(",
@@ -239,9 +239,16 @@ if (process.exitCode) {
     "gates: async gates(c,s) clears before its command loop",
     (() => {
       if (mainGatesIdx === -1) return false;
+      // Backlog #3 split the command loop into gateCommandsRun(); gates()
+      // clears first and only then calls it, so the clear is still before
+      // the loop (the loop must not appear in gates() before the clear).
       const clearIdx = mainGatesWindow.indexOf("clearSnapshotReuseCache(");
-      const loopIdx = mainGatesWindow.indexOf("for(const command of c.gates.commands)");
-      return clearIdx !== -1 && loopIdx !== -1 && clearIdx < loopIdx;
+      const callIdx = mainGatesWindow.indexOf("gateCommandsRun(");
+      const loopBody = functionBody(autopilotSource, "async function gateCommandsRun(");
+      const loopInGates = mainGatesWindow.indexOf("for(const command of c.gates.commands)");
+      return clearIdx !== -1 && callIdx !== -1 && clearIdx < callIdx &&
+        loopBody.includes("for(const command of c.gates.commands)") &&
+        (loopInGates === -1 || clearIdx < loopInGates);
     })()
   );
 

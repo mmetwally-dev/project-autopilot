@@ -69,6 +69,9 @@ import {spawnSync} from "node:child_process";
 // 5 s): the wiring kills "the same way the existing cap or deadline kill
 // does", so the constant lives next to the rule, not at the call site.
 export const IDLE_HANG_KILL_GRACE_MS = 5000;
+// A pager/interactive viewer descendant that sat under a silent run this long
+// is killed (it can only be waiting on a terminal nobody will type into).
+export const STUCK_PAGER_IDLE_MS = 10 * 60_000;
 // Rate-limit confirmation (operator decision): 1 match plus 60 s of
 // silence, so a transient retry that recovers never kills a healthy run.
 // Stop within ~1-2 min of the first match.
@@ -971,6 +974,82 @@ export function evaluateIdleWatch(watch, {now = Date.now(), platform = process.p
     return {status: "ok"};
   }
   return {status: "hung", idleMs: quietFor, noOutput};
+}
+
+const STUCK_PAGER_NAMES = new Set(["pager", "sensible-pager", "less", "more", "most", "vi", "vim", "nvim", "nano", "man"]);
+
+// Backlog s15 #7(b): classify a descendant command line that can only be
+// waiting interactively on a terminal/browser nobody will close:
+//   - classic pagers/editors (less, more, vim, ...)
+//   - Playwright HTML report server (`playwright ... show-report`, HTML reporter server)
+//   - Windows `powershell.exe ... Start -Wait` (plaintext or UTF-16LE -EncodedCommand)
+export function stuckInteractiveKind(cmdline) {
+  const cmd = String(cmdline || "").trim();
+  if (!cmd) return null;
+  const firstToken = cmd.split(/\s+/)[0] || "";
+  const exe = pathBasename(firstToken);
+  if (STUCK_PAGER_NAMES.has(exe)) {
+    return { kind: "pager", label: exe };
+  }
+  if (/\bplaywright\b[\s\S]*\bshow-report\b/i.test(cmd)
+    || /playwright(?:-core)?[\\/].*reporters?[\\/]html/i.test(cmd)) {
+    return { kind: "playwright_report", label: "playwright-html-report" };
+  }
+  const exeLower = exe.toLowerCase();
+  if (exeLower === "powershell" || exeLower === "powershell.exe" || exeLower === "pwsh" || exeLower === "pwsh.exe") {
+    if (/\bstart(?:-process)?\b[^\n]*\s-wait\b/i.test(cmd)) {
+      return { kind: "powershell_start_wait", label: "powershell-start-wait" };
+    }
+    const encMatch = cmd.match(/(?:^|\s)-(?:encodedcommand|enc|ec|e)\s+["']?([A-Za-z0-9+/=]{8,})["']?/i);
+    if (encMatch) {
+      try {
+        const decoded = Buffer.from(encMatch[1], "base64").toString("utf16le");
+        if (/\bstart(?:-process)?\b[^\n]*\s-wait\b/i.test(decoded)) {
+          return { kind: "powershell_start_wait", label: "powershell-start-wait" };
+        }
+      } catch {
+        /* ignore invalid base64 */
+      }
+    }
+  }
+  return null;
+}
+
+// Narrow stuck-pager / interactive-viewer reaper (Linux /proc only). When the
+// run has had no stream output and no file write for pagerIdleMs, kill
+// descendants of the agent whose command line is a pager/interactive viewer,
+// Playwright HTML report server, or Windows `powershell.exe ... Start -Wait`.
+// Nothing else is ever killed.
+// The generic idle scan treats any live descendant as work, so a pager or
+// report viewer waiting on a terminal/browser would otherwise keep the run
+// "alive" until the adapter's own timeout. Returns [{pid, cmdline, kind}] of
+// what it killed (each pid at most once).
+export function killStuckPagers(watch, {now = Date.now(), platform = process.platform, pagerIdleMs = watch?.pagerIdleMs ?? STUCK_PAGER_IDLE_MS, killFn = process.kill.bind(process), log = console.warn, ...deps} = {}) {
+  if (!watch || platform !== "linux" || !Number.isInteger(watch.pid) || watch.pid <= 0) return [];
+  if (!(pagerIdleMs > 0) || now - (watch.lastSilenceResetAt ?? watch.lastActivityAt) < pagerIdleMs) return [];
+  const killed = [];
+  try {
+    const found = linuxDescendants(watch.pid, deps);
+    if (found.unknown) return [];
+    watch.killedPagerPids = watch.killedPagerPids || new Set();
+    for (const entry of found.entries) {
+      if (watch.killedPagerPids.has(entry.pid)) continue;
+      const match = stuckInteractiveKind(entry.cmdline);
+      if (!match) continue;
+      try {
+        killFn(entry.pid, "SIGKILL");
+      } catch {
+        continue;
+      }
+      watch.killedPagerPids.add(entry.pid);
+      killed.push({pid: entry.pid, cmdline: entry.cmdline, kind: match.kind});
+      const what = match.kind === "pager" ? `pager ${match.label}` : match.label;
+      log(`[idle-watch] killed stuck ${what} after ${Math.round(pagerIdleMs / 60000)} min idle`);
+    }
+  } catch {
+    /* best-effort: never disturb the run */
+  }
+  return killed;
 }
 
 export const __testables = Object.freeze({

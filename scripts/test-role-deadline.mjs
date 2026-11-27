@@ -177,8 +177,11 @@ function skips(name, why) {
 
 // ══════════════════════════════════════════════════════════════════════
 // 4. Regression pin: planner, plan_reviewer and GSD relays still get
-// timeoutMs null (only verifier relayAsync calls carry a deadline; the two
+// timeoutMs null (only verifier relay calls carry a deadline; the two
 // implementer relay() calls keep their own per-task deadline, as before).
+// The standalone/SpecKit verifier relay calls moved inside
+// relayVerifierWithApp(); both call sites must still pass the verifier's
+// derived deadline through to runRelay.
 // ══════════════════════════════════════════════════════════════════════
 {
   const src = fs.readFileSync(new URL("./autopilot.mjs", import.meta.url), "utf8");
@@ -186,10 +189,15 @@ function skips(name, why) {
     /timeoutMs,alwaysSave:true/.test(src));
   const asyncWith = new Set();
   for (const m of src.matchAll(/relayAsync\(\s*"([^"]+)"/g)) {
-    if (/timeoutMs/.test(src.slice(m.index, m.index + 1200))) asyncWith.add(m[1]);
+    if (/timeoutMs/.test(src.slice(m.index, m.index + 1600))) asyncWith.add(m[1]);
   }
-  check("pin: only verifier relayAsync calls pass timeoutMs (GSD/planner/plan_reviewer unchanged)",
-    asyncWith.size === 1 && asyncWith.has("verifier"), [...asyncWith]);
+  const appVerifierCalls = [...src.matchAll(/await relayVerifierWithApp\(/g)]
+    .map((m) => src.slice(m.index, m.index + 2600));
+  check("pin: only verifier relay calls pass timeoutMs (both app-wrapper sites; GSD/planner/plan_reviewer unchanged)",
+    asyncWith.size === 0
+    && appVerifierCalls.length === 2
+    && appVerifierCalls.every((body) => /timeoutMs:verifyBudget\.timeoutMs/.test(body)),
+    {asyncWith: [...asyncWith], appVerifierCalls: appVerifierCalls.length});
   check("pin: reviewers never go through relay() directly (review()/relayAsync() carry the deadline)",
     !/relay\(\s*"code_reviewer"/.test(src) && !/relay\(\s*"verifier"/.test(src));
   const plannerWindow = src.slice(src.indexOf('relay("planner"'), src.indexOf('relay("planner"') + 600);
@@ -303,7 +311,7 @@ async function runSeededCase(label, framework) {
 
     const reviewBrief = briefOf(reviews[0]);
     check(`${tag}: the reviewer brief carries the derived 20min budget line`,
-      reviewBrief.includes(`Time budget: this run is killed at ${REVIEWER_KILL}`), reviewBrief.slice(0, 300));
+      reviewBrief.includes(`Time budget: this run is killed after ${REVIEWER_KILL} (at about `) && /killed after 00:20:00 \(at about \d\d:\d\d local time\)/.test(reviewBrief), reviewBrief.slice(0, 300));
     check(`${tag}: the reviewer brief shows the measured numbers`,
       reviewBrief.includes("took 00:05:00 (longest of the last 2: 00:10:00)"), reviewBrief.slice(0, 400));
     check(`${tag}: the reviewer relay received that timeoutMs`,
@@ -311,7 +319,7 @@ async function runSeededCase(label, framework) {
 
     const verifyBrief = briefOf(verifies[0]);
     check(`${tag}: the verifier brief carries the configured 180min budget line`,
-      verifyBrief.includes(`Time budget: this run is killed at ${VERIFIER_KILL}`), verifyBrief.slice(0, 300));
+      /killed after 03:00:00 \(at about \d\d:\d\d local time\)/.test(verifyBrief), verifyBrief.slice(0, 300));
     check(`${tag}: the verifier brief shows the measured numbers`,
       verifyBrief.includes("took 00:02:00 (longest of the last 2: 00:15:00)"), verifyBrief.slice(0, 400));
     check(`${tag}: the verifier relay received that timeoutMs`,
@@ -349,12 +357,12 @@ async function runDefaultCase() {
       phaseReviews.length >= 1 && verifies.length >= 1, {reviews: phaseReviews.length, verifies: verifies.length});
     if (!phaseReviews.length || !verifies.length) return;
     check(`${tag}: the phase review shows the default line`,
-      briefOf(phaseReviews[0]).includes("Time budget: this run is killed at 03:20:00. No measured code_reviewer run exists yet."),
+      /Time budget: this run is killed after 03:20:00 \(at about \d\d:\d\d local time\)\. No measured code_reviewer run exists yet\./.test(briefOf(phaseReviews[0])),
       briefOf(phaseReviews[0]).slice(0, 300));
     check(`${tag}: the phase review relay got relay_timeout_ms`,
       statusOf(phaseReviews[0])?.timeout_ms === RELAY_DEFAULT_MS, statusOf(phaseReviews[0])?.timeout_ms);
     check(`${tag}: the verifier shows the configured default line`,
-      briefOf(verifies[0]).includes("Time budget: this run is killed at 03:00:00. No measured verifier run exists yet."),
+      /Time budget: this run is killed after 03:00:00 \(at about \d\d:\d\d local time\)\. No measured verifier run exists yet\./.test(briefOf(verifies[0])),
       briefOf(verifies[0]).slice(0, 300));
     check(`${tag}: the verifier relay got the verifier default`,
       statusOf(verifies[0])?.timeout_ms === VERIFIER_KILL_MS, statusOf(verifies[0])?.timeout_ms);

@@ -259,7 +259,7 @@ await runCase('Yes sets the same model on planner and implementer; one question;
   const r = await runScripted({mode: '--edit', repo, binDir, answers: allAnswers(['2', '2', '2'])});
   const out = ok('yes', r);
   check('(a) exactly one escalation question', count(out, /Use a stronger model for/) === 1 && !/Stronger model to use for one round/.test(out), out.slice(-1500));
-  check('question shows the not-fixed count', /not fixed twice\)/.test(out));
+  check('question shows the not-fixed count', /not fixed 3 times\)/.test(out));
   const cfg = readConfig(repo);
   checkEqual('(b) planner escalation_model', cfg.roles.planner.escalation_model, ESC_PICK);
   check('(b) planner model is set', !!cfg.roles.planner.escalation_model);

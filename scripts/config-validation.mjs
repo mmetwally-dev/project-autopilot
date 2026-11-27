@@ -317,6 +317,9 @@ export function validatePolicyConfig(policy = {}) {
           if (roleBackstop != null && (!Number.isInteger(roleBackstop) || roleBackstop <= 0)) {
             errors.push(`policy.caps.${roleName}.backstop_raw_tokens must be a positive integer of tokens.`);
           }
+          if (roleName === "plan_reviewer" && roleCaps.first_round_reasoning !== undefined && roleCaps.first_round_reasoning !== null && typeof roleCaps.first_round_reasoning !== "string") {
+            errors.push(`policy.caps.plan_reviewer.first_round_reasoning must be a string or null.`);
+          }
         }
       }
     }
@@ -331,6 +334,10 @@ export function validatePolicyConfig(policy = {}) {
     const fixRounds = policy.final_review_fix_rounds;
     if (fixRounds != null && (!Number.isInteger(fixRounds) || fixRounds <= 0)) {
       errors.push("policy.final_review_fix_rounds must be a positive integer.");
+    }
+    const finalReviewMaxTurns = policy.final_review_max_turns;
+    if (finalReviewMaxTurns != null && (!Number.isInteger(finalReviewMaxTurns) || finalReviewMaxTurns <= 0)) {
+      errors.push("policy.final_review_max_turns must be a positive integer.");
     }
     // Mission 047 Phase 2 task 2.1: policy-level cumulative raw-token
     // backstop (the implementer-scale limit; review roles override it via
@@ -524,6 +531,7 @@ const LEGACY_KEY_TARGETS = {
     max_phase_tasks: "caps.max_phase_tasks",
     min_phase_tasks: "caps.min_phase_tasks",
     backstop_raw_tokens: "caps.mission_token_backstop",
+    final_review_max_turns: "caps.final_review_max_turns",
     max_plan_revisions: "retries.plan_revisions",
     max_spec_revisions: "retries.spec_revisions",
     no_progress_generations: "retries.no_progress_sessions",
@@ -539,10 +547,14 @@ const LEGACY_KEY_TARGETS = {
     handoff_max_chars: "advanced.handoff_max_chars",
     handoff_note_max_chars: "advanced.handoff_note_max_chars",
     fallback_retry_primary_minutes: "advanced.fallback_retry_primary_minutes",
+    rate_limit_wait_max_minutes: "advanced.rate_limit_wait_max_minutes",
+    network_wait_minutes: "advanced.network_wait_minutes",
+    daily_reset_time: "advanced.daily_reset_time",
     checkpoint_after_task: "advanced.checkpoint_after_task",
     checkpoint_after_phase: "advanced.checkpoint_after_phase",
     require_human_commit: "workflow.commit_by_human",
     fail_closed_on_relay_violation: "safety.stop_on_sandbox_violation",
+    allow_docker: "safety.allow_docker",
     caps: "caps.<role>",
     failure_budgets: "retries.<stage>",
   },
@@ -593,9 +605,9 @@ const ROLE_KEYS = new Set(["cli", "model", "reasoning", "variant", "resume_sessi
 const ROLE_FALLBACK_KEYS = new Set(["cli", "model", "reasoning", "variant"]);
 const ESCALATION_MODEL_KEYS = new Set(["cli", "model", "reasoning", "variant"]);
 
-const CAPS_REVIEW_ROLE_KEYS = new Set(["max_turns", "max_tokens", "extra_sessions", "wrap_up_at_tokens", "backstop_raw_tokens"]);
+const CAPS_REVIEW_ROLE_KEYS = new Set(["max_turns", "max_tokens", "extra_sessions", "wrap_up_at_tokens", "backstop_raw_tokens", "first_round_reasoning"]);
 const CAPS_IMPLEMENTER_KEYS = new Set(["max_turns", "max_tokens", "extra_sessions", "wrap_up_at_tokens"]);
-const CAPS_TOP_KEYS = new Set(["task_size_target_turns", "max_phase_tasks", "min_phase_tasks", "planner", "plan_reviewer", "implementer", "code_reviewer", "verifier", "mission_token_backstop"]);
+const CAPS_TOP_KEYS = new Set(["task_size_target_turns", "max_phase_tasks", "min_phase_tasks", "planner", "plan_reviewer", "implementer", "code_reviewer", "verifier", "mission_token_backstop", "final_review_max_turns"]);
 
 const RETRIES_KEYS = new Set([
   "plan_revisions",
@@ -645,6 +657,7 @@ const TESTS_KEYS = new Set([
   "offline_test_tools",
   "not_run_in_missions",
   "not_run_in_missions_original_command",
+  "app_server",
   "require_reviewer",
   "browser",
   "require_browser",
@@ -657,6 +670,7 @@ const SAFETY_KEYS = new Set([
   "allow_git_commit",
   "allow_git_push",
   "allow_destructive_operations",
+  "allow_docker",
   "stop_on_sandbox_violation",
   "block_git_in_roles",
   "check_read_only_roles",
@@ -686,6 +700,9 @@ const ADVANCED_KEYS = new Set([
   "handoff_note_max_chars",
   "handoff_wrapup_tokens",
   "fallback_retry_primary_minutes",
+  "rate_limit_wait_max_minutes",
+  "network_wait_minutes",
+  "daily_reset_time",
   "checkpoint_after_task",
   "checkpoint_after_phase",
   "capabilities",
@@ -700,7 +717,7 @@ const ADVANCED_CAPABILITIES_KEYS = new Set([
 
 const PROJECT_KEYS = new Set(["repo", "planning_framework"]);
 
-const FREE_MODELS_KEYS = new Set(["auto_fallback", "max_turns"]);
+const FREE_MODELS_KEYS = new Set(["auto_fallback", "max_turns", "exclude"]);
 
 // Enumerated values come from the schema generator so the validator and the
 // shipped config.schema.json cannot drift.
@@ -883,17 +900,27 @@ function validateCapsConfig(caps, path, errors, warnings) {
   if (caps.mission_token_backstop !== undefined) {
     validateType(caps.mission_token_backstop, "integer", `${path}.mission_token_backstop`, errors, null, {minimum: 1});
   }
-  const validateRoleCaps = (entry, rolePath, allowedKeys) => {
+  if (caps.final_review_max_turns !== undefined && caps.final_review_max_turns !== null) {
+    validateType(caps.final_review_max_turns, "integer", `${path}.final_review_max_turns`, errors, null, {minimum: 1});
+  }
+  const validateRoleCaps = (entry, rolePath, allowedKeys, roleName = null) => {
     checkUnknownKeys(entry, allowedKeys, rolePath, errors, warnings);
     for (const [key, minimum] of Object.entries(CAP_MINIMUMS)) {
       if (entry[key] !== undefined) validateType(entry[key], "integer", `${rolePath}.${key}`, errors, null, {minimum});
+    }
+    if (entry.first_round_reasoning !== undefined) {
+      if (roleName !== "plan_reviewer") {
+        errors.push(`${rolePath}.first_round_reasoning is only supported on caps.plan_reviewer.`);
+      } else if (entry.first_round_reasoning !== null) {
+        validateType(entry.first_round_reasoning, "string", `${rolePath}.first_round_reasoning`, errors);
+      }
     }
   };
   for (const role of REVIEW_ROLES) {
     if (caps[role] === undefined) continue;
     const rolePath = `${path}.${role}`;
     if (!isObject(caps[role])) errors.push(`${rolePath}: must be an object.`);
-    else validateRoleCaps(caps[role], rolePath, CAPS_REVIEW_ROLE_KEYS);
+    else validateRoleCaps(caps[role], rolePath, CAPS_REVIEW_ROLE_KEYS, role);
   }
   if (caps.implementer !== undefined) {
     const rolePath = `${path}.implementer`;
@@ -991,6 +1018,66 @@ function validateWorkflowConfig(workflow, path, errors, warnings) {
   }
 }
 
+const APP_SERVER_KEYS = new Set(["start_command", "cwd", "port", "ready_url", "warmup_urls", "ready_timeout_ms", "env_file", "env", "allow_hosts", "credential_vars"]);
+
+// Backlog #3: tests.app_server (the server the gate starts). Paths must stay
+// inside the repository; the env block holds plain name -> string values.
+export function validateAppServerConfig(block, path, errors) {
+  if (!isObject(block)) {
+    errors.push(`${path}: must be an object.`);
+    return;
+  }
+  for (const key of Object.keys(block)) {
+    if (!APP_SERVER_KEYS.has(key) && !key.startsWith("_")) errors.push(`${path}.${key}: unknown key.`);
+  }
+  for (const key of ["start_command", "cwd", "ready_url", "env_file"]) {
+    if (block[key] !== undefined && typeof block[key] !== "string") errors.push(`${path}.${key}: must be a string.`);
+  }
+  for (const key of ["cwd", "env_file"]) {
+    const v = block[key];
+    if (typeof v === "string" && v && (/^([A-Za-z]:)?[\\/]/.test(v) || v.split(/[\\/]/).includes(".."))) {
+      errors.push(`${path}.${key}: must be a repository-relative path without '..'.`);
+    }
+  }
+  if (typeof block.ready_url === "string" && block.ready_url && !block.ready_url.startsWith("/")) {
+    errors.push(`${path}.ready_url: must be a path starting with '/'.`);
+  }
+  if (block.port !== undefined && block.port !== "auto" && !(Number.isInteger(block.port) && block.port >= 1 && block.port <= 65535)) {
+    errors.push(`${path}.port: must be "auto" or a port number from 1 to 65535.`);
+  }
+  if (block.ready_timeout_ms !== undefined && !(typeof block.ready_timeout_ms === "number" && Number.isFinite(block.ready_timeout_ms) && block.ready_timeout_ms >= 1000)) {
+    errors.push(`${path}.ready_timeout_ms: must be a number >= 1000.`);
+  }
+  if (block.warmup_urls !== undefined) {
+    if (!Array.isArray(block.warmup_urls)) errors.push(`${path}.warmup_urls: must be an array.`);
+    else block.warmup_urls.forEach((u, i) => {
+      if (typeof u !== "string" || !u.startsWith("/")) errors.push(`${path}.warmup_urls[${i}]: must be a path starting with '/'.`);
+    });
+  }
+  if (block.allow_hosts !== undefined) {
+    if (!Array.isArray(block.allow_hosts)) errors.push(`${path}.allow_hosts: must be an array of host names.`);
+    else block.allow_hosts.forEach((h, i) => {
+      if (typeof h !== "string" || !/^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$/.test(h)) {
+        errors.push(`${path}.allow_hosts[${i}]: must be a plain host name such as project.supabase.co (no scheme, port or path).`);
+      }
+    });
+  }
+  if (block.credential_vars !== undefined) {
+    if (!Array.isArray(block.credential_vars)) errors.push(`${path}.credential_vars: must be an array of variable names.`);
+    else block.credential_vars.forEach((v, i) => {
+      if (typeof v !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(v)) {
+        errors.push(`${path}.credential_vars[${i}]: must be a valid environment variable name (letters, digits, underscores, not starting with a digit).`);
+      }
+    });
+  }
+  if (block.env !== undefined) {
+    if (!isObject(block.env)) errors.push(`${path}.env: must be an object of name: value strings.`);
+    else for (const [k, v] of Object.entries(block.env)) {
+      if (typeof v !== "string") errors.push(`${path}.env.${k}: must be a string.`);
+    }
+  }
+}
+
 function validateTestsConfig(tests, path, errors, warnings) {
   if (!isObject(tests)) return;
   checkUnknownKeys(tests, TESTS_KEYS, path, errors, warnings);
@@ -1052,6 +1139,7 @@ function validateTestsConfig(tests, path, errors, warnings) {
       errors.push(`${path}.not_run_in_missions_original_command: must be a string.`);
     }
   }
+  if (tests.app_server !== undefined) validateAppServerConfig(tests.app_server, `${path}.app_server`, errors);
   if (tests.require_reviewer !== undefined) validateType(tests.require_reviewer, "boolean", `${path}.require_reviewer`, errors);
   if (tests.browser !== undefined) validateType(tests.browser, "string", `${path}.browser`, errors, Array.from(BROWSER_VALUES));
   if (tests.require_browser !== undefined) validateType(tests.require_browser, "string", `${path}.require_browser`, errors, Array.from(REQUIRE_BROWSER_VALUES));
@@ -1175,13 +1263,20 @@ function validateFrameworksConfig(frameworks, path, errors, warnings) {
   }
 }
 
-function validateAdvancedConfig(advanced, path, errors, warnings) {
-  if (!isObject(advanced)) return;
+export function validateAdvancedConfig(advanced, path = "advanced", errors = [], warnings = []) {
+  if (!isObject(advanced)) return errors;
   checkUnknownKeys(advanced, ADVANCED_KEYS, path, errors, warnings);
   if (advanced.handoff_max_chars !== undefined) validateType(advanced.handoff_max_chars, "integer", `${path}.handoff_max_chars`, errors, null, {minimum: HANDOFF_MIN_CHARS});
   if (advanced.handoff_note_max_chars !== undefined) validateType(advanced.handoff_note_max_chars, "integer", `${path}.handoff_note_max_chars`, errors, null, {minimum: HANDOFF_NOTE_MIN_CHARS});
   if (advanced.handoff_wrapup_tokens !== undefined) validateType(advanced.handoff_wrapup_tokens, "integer", `${path}.handoff_wrapup_tokens`, errors, null, {minimum: 1});
   if (advanced.fallback_retry_primary_minutes !== undefined) validateType(advanced.fallback_retry_primary_minutes, "integer", `${path}.fallback_retry_primary_minutes`, errors);
+  if (advanced.rate_limit_wait_max_minutes !== undefined) validateType(advanced.rate_limit_wait_max_minutes, "integer", `${path}.rate_limit_wait_max_minutes`, errors, null, {minimum: 0});
+  if (advanced.network_wait_minutes !== undefined) validateType(advanced.network_wait_minutes, "integer", `${path}.network_wait_minutes`, errors, null, {minimum: 0});
+  if (advanced.daily_reset_time !== undefined) {
+    if (typeof advanced.daily_reset_time !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(advanced.daily_reset_time)) {
+      errors.push(`${path}.daily_reset_time: must be a string in HH:MM format (00:00 to 23:59).`);
+    }
+  }
   if (advanced.checkpoint_after_task !== undefined) validateType(advanced.checkpoint_after_task, "boolean", `${path}.checkpoint_after_task`, errors);
   if (advanced.checkpoint_after_phase !== undefined) validateType(advanced.checkpoint_after_phase, "boolean", `${path}.checkpoint_after_phase`, errors);
   if (advanced.capabilities !== undefined) {
@@ -1210,6 +1305,7 @@ function validateAdvancedConfig(advanced, path, errors, warnings) {
       }
     }
   }
+  return errors;
 }
 
 function validateProjectConfig(project, path, errors, warnings, options = {}) {
@@ -1238,6 +1334,11 @@ function validateRolesConfig(roles, path, errors, warnings) {
       checkUnknownKeys(roles.free_models, FREE_MODELS_KEYS, fmPath, errors, warnings);
       if (roles.free_models.auto_fallback !== undefined) validateType(roles.free_models.auto_fallback, "boolean", `${fmPath}.auto_fallback`, errors);
       if (roles.free_models.max_turns !== undefined) validateType(roles.free_models.max_turns, "integer", `${fmPath}.max_turns`, errors, null, {minimum: 0});
+      if (roles.free_models.exclude !== undefined) {
+        if (!Array.isArray(roles.free_models.exclude) || !roles.free_models.exclude.every((item) => typeof item === "string")) {
+          errors.push(`${fmPath}.exclude: must be an array of strings.`);
+        }
+      }
     }
   }
 }

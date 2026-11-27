@@ -210,7 +210,7 @@ try {
 
   // ---- #41 setting in layout, validation, schema -------------------------
   {
-    check("setting: default is 2", DEFAULTS.retries.escalate_after_not_fixed === 2, DEFAULTS.retries);
+    check("setting: default is 3", DEFAULTS.retries.escalate_after_not_fixed === 3, DEFAULTS.retries);
     const bad = validateNewConfig({...DEFAULTS, retries: {...DEFAULTS.retries, escalate_after_not_fixed: 0}});
     check("setting: validation rejects below 1", bad.valid === false
       && bad.errors.some((e) => e.includes("escalate_after_not_fixed")), bad.errors);
@@ -219,7 +219,7 @@ try {
     const schema = JSON.parse(fs.readFileSync(path.join(here, "..", "config.schema.json"), "utf8"));
     check("setting: schema documents the retries key",
       schema.properties?.retries?.properties?.escalate_after_not_fixed?.minimum === 1
-      && schema.properties?.retries?.properties?.escalate_after_not_fixed?.default === 2,
+      && schema.properties?.retries?.properties?.escalate_after_not_fixed?.default === 3,
       schema.properties?.retries?.properties?.escalate_after_not_fixed);
   }
 

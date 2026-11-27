@@ -19,7 +19,7 @@ export function schemaLeaves(schema) {
   const leaves = [];
   function walk(node, path) {
     if (!node || typeof node !== "object") return;
-    if (node.properties) {
+    if (node.properties && Object.keys(node.properties).length > 0) {
       for (const [key, child] of Object.entries(node.properties)) {
         walk(child, path ? `${path}.${key}` : key);
       }

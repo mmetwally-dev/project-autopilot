@@ -36,6 +36,13 @@ function planExecution(cwd, command, shellGuard, opts) {
   if (decision.isolate && sandboxPrefix.length) {
     return { bin: sandboxPrefix[0], args: [...sandboxPrefix.slice(1), command] };
   }
+  if (decision.isolate && Array.isArray(shellGuard.netnsJoinPrefix) && shellGuard.netnsJoinPrefix.length) {
+    // Backlog #4: join the phase's existing isolated namespace (the one the
+    // app server runs in) instead of creating a fresh, empty one. Still
+    // loopback-only, so isolation stays on and APP_BASE_URL is reachable.
+    const join = shellGuard.netnsJoinPrefix;
+    return { bin: join[0], args: [...join.slice(1), "sh", "-lc", command] };
+  }
   if (decision.isolate) {
     return { bin: netPrefix[0], args: [...netPrefix.slice(1), "sh", "-lc", command] };
   }

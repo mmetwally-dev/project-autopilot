@@ -95,7 +95,7 @@ check("wire: relay signature default is null",
 check("wire: relay forwards planRevision to runRelay",
   /capEnabled,contScope,planRevision,carriedForwardTasks(?:,resultExtra)?\}\), callSite\);/.test(autopilotSource));
 check("wire: runRelay signature default is null",
-  /capEnabled=false,contScope=null,planRevision=null,carriedForwardTasks=null(?:,resultExtra=null)?,__fallbackDepth=0=\{\}\(\)|capEnabled=false,contScope=null,planRevision=null,carriedForwardTasks=null(?:,resultExtra=null)?,__fallbackDepth=0/.test(autopilotSource));
+  /capEnabled=false,contScope=null,planRevision=null,carriedForwardTasks=null(?:,resultExtra=null)?(?:,wrapUpScratchCopyTo=null)?,__fallbackDepth=0=\{\}\(\)|capEnabled=false,contScope=null,planRevision=null,carriedForwardTasks=null(?:,resultExtra=null)?(?:,wrapUpScratchCopyTo=null)?,__fallbackDepth=0/.test(autopilotSource));
 check("wire: retry path re-passes planRevision",
   /isWrapUp,runNote,capEnabled,contScope,planRevision,carriedForwardTasks(?:,resultExtra)?,__fallbackDepth/.test(autopilotSource));
 check("wire: guard collapses non-integers to null",
@@ -117,9 +117,9 @@ check("site: runStandalonePlanning restores the revision from state",
 const plannerSite = autopilotSource.indexOf(`relayAsync("planner",prompt,c,s,{resume:false,capEnabled:true,taskRef:'standalone-planning-planner',planRevision:revision})`);
 check("site: planner run carries planRevision:revision", plannerSite !== -1, plannerSite);
 check("site: plan_reviewer run carries planRevision:revision",
-  /relayAsync\("plan_reviewer",reviewPrompt,c,s,\{readOnly:true,review:true,resume:false,capEnabled:true,taskRef:'standalone-planning-plan_reviewer',planRevision:revision,[^\n]*\}\)/.test(autopilotSource));
+  /relayAsync\("plan_reviewer",`\$\{formatReviewBriefForContinuation\(reviewPrompt\)\}\$\{standaloneVerdictOnlyText\?`\\n\\n\$\{standaloneVerdictOnlyText\}`:""\}`,standaloneReviewConfig,s,\{readOnly:true,review:true,resume:false,capEnabled:true,taskRef:'standalone-planning-plan_reviewer',planRevision:revision,[^\n]*\}\)/.test(autopilotSource));
 check("site: reviewer retry lambda carries planRevision:revision",
-  /\(\)=>relayAsync\("plan_reviewer",reviewPrompt,c,s,\{readOnly:true,review:true,resume:false,capEnabled:true,taskRef:'standalone-planning-plan_reviewer',planRevision:revision,[^\n]*\}\)/.test(autopilotSource));
+  /async \(\)=>\{[\s\S]{0,200}?relayAsync\("plan_reviewer",`\$\{reviewPrompt\}\$\{verdictOnlyText\?`\\n\\n\$\{verdictOnlyText\}`:""\}`,withFirstRoundReasoning\(withPlanReviewVerdictOnlyCap\([^,]+,\s*Boolean\(verdictOnlyText\)\),isFirstStandaloneRound\),s,\{readOnly:true,review:true,resume:false,capEnabled:true,taskRef:'standalone-planning-plan_reviewer',planRevision:revision,[^\n]*\}\)/.test(autopilotSource));
 // All three sites must sit inside runStandalonePlanning (4747..5264).
 {
   const fnStart = autopilotSource.indexOf("async function runStandalonePlanning(");
@@ -135,10 +135,10 @@ check("site: reviewer retry lambda carries planRevision:revision",
 // fail loudly if a site disappears rather than passing vacuously.
 for (const [label, needle, expectRevision] of [
   ["speckit planner", `relay("planner",task,c,s,{resume:false,capEnabled:true,taskRef,planRevision})`, true],
-  ["speckit gate plan_reviewer", `relay("plan_reviewer",\`\${prompt}\\n\\n\${planReviewerContextText()}\`,c,s,{readOnly:true,review:true,resume:false,...opts,capEnabled:true,taskRef:planReviewerTaskRef})`, false],
-  ["existing-planning plan_reviewer", `relayAsync("plan_reviewer",buildPrompt(),c,s,{readOnly:true,review:true,capEnabled:true,taskRef})`, false],
+  ["speckit gate plan_reviewer", `relay("plan_reviewer",\`\${prompt}\\n\\n\${planReviewerContextText()}\${verdictOnlyText?\`\\n\\n\${verdictOnlyText}\`:""}\`,reviewConfig,s,{readOnly:true,review:true,resume:false,...relayOpts,capEnabled:true,taskRef:planReviewerTaskRef})`, false],
+  ["existing-planning plan_reviewer", `relayAsync("plan_reviewer",\`\${buildPrompt()}\${verdictOnlyText?\`\\n\\n\${verdictOnlyText}\`:""}\`,reviewConfig,s,{readOnly:true,review:true,capEnabled:true,taskRef})`, false],
   ["gsd planner", `relayAsync("planner",prompt,c,s,{readOnly:false,resume,capEnabled:true,taskRef,planRevision})`, true],
-  ["gsd plan_reviewer", `relayAsync("plan_reviewer",prompt,c,s,{readOnly:true,review:true,capEnabled:true,taskRef})`, false],
+  ["gsd plan_reviewer", `relayAsync("plan_reviewer",\`\${prompt}\${verdictOnlyText?\`\\n\\n\${verdictOnlyText}\`:""}\`,withPlanReviewVerdictOnlyCap(c,Boolean(verdictOnlyText)),s,{readOnly:true,review:true,capEnabled:true,taskRef})`, false],
 ]) {
   const idx = autopilotSource.indexOf(needle);
   const end = idx === -1 ? -1 : autopilotSource.indexOf("\n", idx);

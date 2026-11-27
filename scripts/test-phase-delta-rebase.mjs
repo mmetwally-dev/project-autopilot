@@ -440,9 +440,9 @@ function driftedState() {
   check("brief wiring: SpecKit clear sits after the inline reviewPrompt",
     autopilotSrc.indexOf("Changes since your last review") < autopilotSrc.lastIndexOf("delete s.operatorPhaseEdits"), false);
   // Docs: operator-command sentence updated, usage line + subsection present.
-  check("docs: README counts four operator-only commands", readme.includes("Five operator-only commands"), false);
+  check("docs: README counts four operator-only commands", readme.includes("Six operator-only commands"), false);
   check("docs: README command list carries ap rebase", readme.includes("ap rebase"), false);
-  check("docs: SKILL counts four operator-only commands", skill.includes("Five operator-only commands"), false);
+  check("docs: SKILL counts four operator-only commands", skill.includes("Six operator-only commands"), false);
   check("docs: SKILL carries an ap rebase subsection", skill.includes("### `ap rebase"), false);
   // Inclusion-gated clear semantics: a record the brief shows is dropped
   // afterwards; an absent/empty record renders nothing so nothing is dropped.

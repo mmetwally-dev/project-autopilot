@@ -9,6 +9,8 @@ import {resolveRunModel} from "./model-extract.mjs";
 import {updateRunModel} from "./run-observability.mjs";
 import {FREE_QUOTA_REASON, PROVIDER_BALANCE_REASON, OPENCODE_TITLE_MODEL_LINE_RE} from "./idle-hang-watchdog.mjs";
 import {detectOpenCodeGeneration, splitOpenCodeModelSuffix} from "./opencode-generation.mjs";
+import {parseReviewContract} from "./failure-contract.mjs";
+import {parseTaskResultContract} from "./task-result-contract.mjs";
 
 const DRIVERS = Object.freeze({
   codex: codexDriver(),
@@ -161,13 +163,23 @@ const AUTO_REJECT_STDERR_TEXT = /permission requested:\s*external_directory[\s\S
 // regress them.
 const AUTO_REJECT_ERROR_TEXT = /rejected permission to use this specific tool call/i;
 
-// The review sentinel token, used ONLY to suppress a denial whose run still
-// produced a verdict. Loose and suppression-only on purpose: the authoritative
-// parser is failure-contract.mjs's parseReviewContract(), which alone decides
-// whether a verdict is valid. A false positive here can only mean the denial
-// goes untagged, falling back to the existing STRUCTURED_OUTPUT_MISSING path —
-// never the unsafe direction. Not prose-as-evidence.
-const SENTINEL_TOKEN = "AUTOPILOT_REVIEW";
+// Whether the decoded event stream contains a valid review or task-result
+// sentinel anywhere in agent/result text. Used to suppress permission_denied
+// on runs that actually produced a valid verdict/result (e.g. a trailing
+// stderr line appended after stdout events by decodeJsonLines).
+function streamHasValidSentinel(events) {
+  const texts = [];
+  for (const event of events) {
+    collectText(event, texts);
+    const resultText = resultEventText(event);
+    if (resultText != null) texts.push(resultText);
+  }
+  for (const text of texts) {
+    if (text.includes("AUTOPILOT_REVIEW") && parseReviewContract(text).contract.status === "valid") return true;
+    if (text.includes("AUTOPILOT_TASK_RESULT") && parseTaskResultContract(text).ok) return true;
+  }
+  return false;
+}
 
 // OpenCode-specific observation over captured live event shapes. Emits the
 // same canonical observation vocabulary the certifier consumes
@@ -310,11 +322,14 @@ function detectOpenCodeRateLimited(events) {
       if (OPENCODE_TITLE_MODEL_LINE_RE.test(text)) continue;
       if (!openCodeEngineErrorLine(text) || !OPENCODE_RATE_LIMIT_MESSAGE.test(text)) continue;
       const balance = OPENCODE_PROVIDER_BALANCE_MESSAGE.test(text);
+      const retryMatch = text.match(/["']?retryAfterMs["']?\s*[:=]\s*(\d+)/i);
+      const retryAfterMs = retryMatch ? Number(retryMatch[1]) : null;
       observations.push(observation("rate_limited", event, {
         reason: balance
           ? PROVIDER_BALANCE_REASON
           : OPENCODE_FREE_QUOTA_MESSAGE.test(text) ? FREE_QUOTA_REASON : "opencode_stderr_rate_limit",
         message: text.slice(0, 200),
+        ...(Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? {retryAfterMs} : {}),
       }));
       continue;
     }
@@ -329,10 +344,13 @@ function detectOpenCodeRateLimited(events) {
       // Balance first: a 402, or the provider's own balance/credit wording.
       const balance = status === 402 || OPENCODE_PROVIDER_BALANCE_MESSAGE.test(message);
       const freeQuota = OPENCODE_FREE_QUOTA_MESSAGE.test(message);
+      const rawRetryAfter = err.retryAfterMs ?? data.retryAfterMs;
+      const retryAfterMs = rawRetryAfter != null ? Number(rawRetryAfter) : null;
       observations.push(observation("rate_limited", event, {
         reason: balance
           ? PROVIDER_BALANCE_REASON
           : freeQuota ? FREE_QUOTA_REASON : status === 429 ? "api_error_status_429" : "opencode_error_message",
+        ...(Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? {retryAfterMs} : {}),
       }));
     }
   }
@@ -428,19 +446,19 @@ function toolCallSucceeded(event) {
 }
 
 // A terminal denial ended the run: the call is denied, nothing succeeded after
-// it, and no later agent text carries the sentinel. Anything else is a denial
-// the role worked around, which must not be tagged. Matches `state.error` only
-// — never merged output, which can carry tool output or prose that merely
-// mentions permissions.
+// it, and no agent/result text anywhere in the stream carries a valid review
+// or task-result sentinel. Anything else is a denial the role worked around,
+// which must not be tagged. Matches `state.error` only — never merged output,
+// which can carry tool output or prose that merely mentions permissions.
 function terminalDenial(events, index, status, state) {
   if (status !== "error") return false;
+  if (Number(state?.metadata?.exit) === 126 && /permission denied/i.test(String(state?.error || ""))) return false;
   if (!OPENCODE_DENIAL_TEXT.test(String(state.error || ""))) return false;
-  const collected = [];
+  if (streamHasValidSentinel(events)) return false;
   for (let cursor = index + 1; cursor < events.length; cursor += 1) {
     if (toolCallSucceeded(events[cursor])) return false;
-    collectText(events[cursor], collected);
   }
-  return !collected.some(text => text.includes(SENTINEL_TOKEN));
+  return true;
 }
 
 function commandOutputText(state) {
@@ -877,9 +895,13 @@ function detectClaudeRateLimited(events) {
     const explicitRateLimitError = event.error === "rate_limit";
     const apiStatus429 = event.api_error_status === 429;
     if (rejected || explicitRateLimitError || apiStatus429) {
-      observations.push(observation("rate_limited", event, {
+      const details = {
         reason: rejected ? "rate_limit_event_rejected" : explicitRateLimitError ? "error_rate_limit" : "api_error_status_429"
-      }));
+      };
+      if (event.rate_limit_info?.resetsAt != null) {
+        details.resetsAt = event.rate_limit_info.resetsAt;
+      }
+      observations.push(observation("rate_limited", event, details));
     }
   }
   return observations;
@@ -980,8 +1002,63 @@ function detectCodexRateLimited(events, probe = {}) {
   return [];
 }
 
+const CODEX_AUTH_UNAUTHORIZED_PATTERN = /\b401\s+Unauthorized\b/i;
+const CODEX_RECONNECTING_PATTERN = /^Reconnecting\.\.\./i;
+
+function codexEventErrorText(event) {
+  if (!event || typeof event !== "object") return null;
+  if (event.type === "turn.failed") {
+    return typeof event.error?.message === "string"
+      ? event.error.message
+      : (typeof event.message === "string" ? event.message : null);
+  }
+  if (event.type === "error" && typeof event.message === "string") {
+    return event.message;
+  }
+  return null;
+}
+
+function detectCodexAuthRequired(events) {
+  let lastTurnFailed = null;
+  let lastTerminalError = null;
+  let lastTurnCompletedIndex = -1;
+  let lastTerminalErrorIndex = -1;
+
+  for (let i = 0; i < events.length; i += 1) {
+    const event = events[i];
+    if (!event || typeof event !== "object") continue;
+    if (event.type === "turn.completed") {
+      lastTurnCompletedIndex = i;
+      continue;
+    }
+    if (event.type === "turn.failed") {
+      const text = codexEventErrorText(event);
+      if (text && CODEX_AUTH_UNAUTHORIZED_PATTERN.test(text)) {
+        lastTurnFailed = {event, text};
+      }
+      continue;
+    }
+    if (event.type === "error") {
+      const text = codexEventErrorText(event);
+      if (text && !CODEX_RECONNECTING_PATTERN.test(text.trim()) && CODEX_AUTH_UNAUTHORIZED_PATTERN.test(text)) {
+        lastTerminalError = {event, text};
+        lastTerminalErrorIndex = i;
+      }
+    }
+  }
+
+  const chosen = lastTurnFailed
+    || (lastTerminalError && lastTerminalErrorIndex > lastTurnCompletedIndex ? lastTerminalError : null);
+  if (!chosen) return [];
+  return [observation("auth_required", chosen.event, {
+    adapter: "codex",
+    reason: "401 Unauthorized",
+    message: chosen.text.slice(0, 200),
+  })];
+}
+
 function observeCodexEvents(events, probe = {}) {
-  const observations = [...detectCodexRateLimited(events, probe)];
+  const observations = [...detectCodexRateLimited(events, probe), ...detectCodexAuthRequired(events)];
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
     const item = event?.item || event;
@@ -1059,12 +1136,11 @@ function codexToolSucceeded(event) {
 }
 
 function terminalDenialCodex(events, index) {
-  const collected = [];
+  if (streamHasValidSentinel(events)) return false;
   for (let cursor = index + 1; cursor < events.length; cursor += 1) {
     if (codexToolSucceeded(events[cursor])) return false;
-    collectText(events[cursor], collected);
   }
-  return !collected.some(text => text.includes(SENTINEL_TOKEN));
+  return true;
 }
 
 function commandStarted(event, item) {
@@ -1104,17 +1180,23 @@ const PERMISSION_DENIAL_TEXT = /permission denied|insufficient permissions|not p
 // outcome field, not text scraped from its output.
 const EXPLICIT_DENIAL_STATUS = /^(?:denied|declined|rejected|blocked)$/i;
 
+// Structured codex sandbox/approval rejection on stderr only — never arbitrary
+// model prose or multi-line patch/file dumps echoed on stderr (e.g.
+// apply_patch verification failed dumping scratch-file text that mentions
+// "(permission denied)").
+const CODEX_STDERR_SANDBOX_DENIAL = /^(?:\d{4}-\d{2}-\d{2}T\S+\s+(?:ERROR|WARN)\s+codex_\S+:|Error:\s*|codex:\s*).*(?:sandbox.*(?:error|fail|denied|rejected|blocked)|(?:error|fail|denied|rejected|blocked).*sandbox|blocked by (?:active )?policy|approval (?:required|denied|rejected)|command (?:denied|declined|rejected))/i;
+
 function isBashExecPermissionError(item) {
   if (Number(item?.exit_code) !== 126) return false;
   const output = `${item?.error || ""}\n${item?.output || ""}\n${item?.aggregated_output || ""}`;
-  return /:\s*Permission denied/i.test(output);
+  return /permission denied/i.test(output);
 }
 
 function permissionDenied(item, itemType) {
   if (isBashExecPermissionError(item)) return false;
   const status = String(item?.status || "").trim();
   if (EXPLICIT_DENIAL_STATUS.test(status)) return true;
-  if (itemType === "stderr") return PERMISSION_DENIAL_TEXT.test(item?.text || "");
+  if (itemType === "stderr") return CODEX_STDERR_SANDBOX_DENIAL.test(String(item?.text || ""));
   // Otherwise, only ever infer denial from a genuinely FAILED event — never
   // from a successful (exit 0) command/tool call. A successful command's
   // own stdout/aggregated_output may be arbitrary tool output, assistant
@@ -1394,6 +1476,22 @@ export function accumulateCodexUsage(events) {
   return {...usage, priceWeighted: priceWeightedUsage(usage)};
 }
 
+function stripJsonObjectLines(text) {
+  if (typeof text !== "string" || !text) return "";
+  const kept = [];
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) continue;
+      } catch {}
+    }
+    kept.push(line);
+  }
+  return kept.join("\n").trim();
+}
+
 export function finalAgentText(events, fallback = "") {
   const candidates = [];
   // The real Claude Code CLI's terminal `{"type":"result","result":"..."}`
@@ -1402,18 +1500,25 @@ export function finalAgentText(events, fallback = "") {
   // ordering (the terminal event is normally last, but this makes the
   // precedence explicit rather than relying on array position).
   let resultText = null;
-  for (const event of events) {
+  for (const event of (Array.isArray(events) ? events : [])) {
     collectText(event, candidates);
     const r = resultEventText(event);
     if (r != null) resultText = r;
   }
   if (resultText != null) return resultText;
-  return candidates.at(-1) || fallback;
+  for (let i = candidates.length - 1; i >= 0; i -= 1) {
+    if (candidates[i]) return candidates[i];
+  }
+  // Backlog rv #5: when no text/result event was decoded (e.g. a capped
+  // opencode run killed on `step_start`), strip every raw JSON-object event
+  // line from fallback while preserving plain-text output or sentinels.
+  return stripJsonObjectLines(fallback);
 }
 
 function resultEventText(candidate) {
   if (!candidate || typeof candidate !== "object") return null;
   if (candidate.type === "result" && typeof candidate.result === "string") return candidate.result;
+  if (typeof candidate.result?.response === "string") return candidate.result.response;
   return null;
 }
 

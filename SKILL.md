@@ -88,28 +88,60 @@ and `ap watch` do not exist; the WATCH-REPORT is the status view.
   DENIES with findings; the planner revises up to `retries.plan_revisions` times
   (a capped revision goes to review only when its hand-off note says every
   finding is done, otherwise the planner continues; the spec review: `retries.spec_revisions`, default 3, then open findings pass
-  to the plan stage). With the spec on, full plan-review rounds also cross-check
+  to the plan stage). With convergence on, a fix-only PASS gets one full
+  confirmation review, and after a failed confirmation every later round is a
+  full review that also re-checks the findings (its PASS needs no second
+  confirmation). With the spec on, full plan-review rounds also cross-check
   SPEC/PLAN/TASKS (coverage, naming, ambiguity, duplicates, conflicts).
-  Plan Review FAIL returns to Planning.
+  Plan Review FAIL returns to Planning. External tools a task needs (docker,
+  supabase, psql, ...) must exist in the sandbox, else a blocking finding unless
+  the task is `[manual]`; `[manual]` tasks are skipped and listed in REPORT.md and
+  the WATCH-REPORT. Setup/config offer type-check and lint scripts as gate commands.
 - **Implementation, per phase.** One implementer session per task. At a turn or
-  token cap the implementer writes a hand-off note (`handoff/<task>.md`) and a
-  fresh session continues it, up to `caps.implementer.extra_sessions`.
+  token cap the same session is resumed for one short turn that only writes the
+  hand-off note (`handoff/<task>.md`; skipped if the note is fresh, and Autopilot
+  writes a fallback note if that turn fails), then a fresh session continues it, up to `caps.implementer.extra_sessions`.
 - **Code review, per phase.** Read-only. Code Review FAIL returns to
   Implementation for the tasks the findings name; the re-review covers its own
   findings plus the fix. A finding in a file that an earlier phase's task wrote
-  gets one targeted repair of that task instead of re-running the current
-  phase's tasks; manual-check notes (browser, network) are kept as notes, not
+  gets one targeted repair of that task (also when several earlier tasks wrote
+  it) instead of re-running the current phase's tasks; reviewers list every
+  location of a defect pattern and the implementer fixes it everywhere;
+  manual-check notes (browser, network) are kept as notes, not
   findings. A large diff goes to a file the reviewer reads, not into the brief;
   a role whose first turn alone exceeds its cap stops with a clear message
   instead of restarting sessions.
 - **Gate.** Autopilot runs `tests.gate_commands` itself. Failing tests are re-run
   on the phase's starting code; failures that existed before are not blamed on
-  the phase, new ones go back to the implementer.
+  the phase, new ones go back to the implementer. With `tests.app_server`
+  configured (setup/config suggest a command from `package.json`), the gate first
+  starts that server on a free port, waits for `ready_url`, requests the
+  `warmup_urls`, runs the commands with `APP_BASE_URL`/`PORT` set and always stops
+  the server afterwards; `env_file` values reach the server only. The server and
+  the gate commands share one closed network namespace (loopback only); a passing
+  gate leaves the server up for the phase's verifier run (brief: `APP_BASE_URL`
+  plus "already running"), stopped when the verifier ends. `allow_hosts` runs the
+  server on the host network, gate commands and browser still closed in the namespace
+  (with an allowlisting HTTP CONNECT proxy on port 443 opening only `allow_hosts` to the verifier's browser).
 - **Verification.** Read-only. The verifier checks each task's acceptance line
   with the gate evidence and ticks the task in `TASKS.md`. Verification never
   runs before Code Review has passed; a FAIL returns to Implementation, then Code
   Review and Verification repeat. A multi-finding status enumerates each finding
-  against its own evidence, never a group summary.
+  against its own evidence, never a group summary. When the phase's app server is
+  running and Playwright + Chromium are installed (`ap setup` / `ap config` check
+  both; no download during missions), the verifier checks changed pages at
+  `APP_BASE_URL` through the approved `ap-browser-check <script.mjs>` command
+  (headless Chromium with `--no-sandbox` inside the read-only envelope and the
+  server's network namespace; credential variable names from `env_file` in the
+  brief, values only in the wrapper's env; retry a failing browser assertion
+  once). `ap-browser-check` saves the script, screenshots (`.png`), trace
+  (`trace.zip`), video (`.webm`), exit code and output in `<runDir>/browser-check/`
+  (watch afterwards via `npx playwright show-trace <trace.zip>`, video or
+  screenshots). Proof rule: a browser PASS is accepted only when `ap-browser-check`
+  ran (exit 0 + output, script + screenshot present); without evidence it counts
+  as a manual check (`MANUAL-CHECKS.md`). Screenshots are always kept; videos and
+  traces are kept for the last verifier run of each phase and for failed runs,
+  and deleted automatically after 3 days.
 - **Final review.** The code reviewer reads the whole mission change and, when a
   spec exists (`SPEC.md` / SpecKit `spec.md`), checks every FR against the code; up to
   `retries.final_review_fix_rounds` fix rounds. A final-review session that hits
@@ -126,13 +158,15 @@ and `ap watch` do not exist; the WATCH-REPORT is the status view.
   e.g. `Resume: ap reset --scope <key> then ap run`.
 - **Smarter retries.** Planner/implementer may have an `escalation_model`, used
   for one fix round after a reviewer reports the same finding not fixed
-  `retries.escalate_after_not_fixed` times (default 2). Continuation sessions
+  `retries.escalate_after_not_fixed` times (default 3). Continuation sessions
   that change no file stop after `retries.no_progress_sessions` (default 2),
   after one session on the implementer's `escalation_model` (once per fix
   round), if set. When a phase's implementation or verification budget
   (`retries.implementation` / `retries.verification`, default 5) has 2 attempts
   left, the implementer switches to its `escalation_model` and stays on it until
-  the phase passes or the budget runs out (no counter reset). Network tests the task itself env-gates are reviewed
+  the phase passes or the budget runs out (no counter reset). If the escalation
+  model fails on infrastructure/adapter errors, the mission does not stop; that
+  fix round runs on the role's normal model/fallbacks instead (`escalation model unavailable → back to <model>`). Network tests the task itself env-gates are reviewed
   statically and listed in MANUAL-CHECKS.md, not failed for needing the network;
   verifier network/browser checks it could not run go there too. A
   session silent for `time_limits.silent_run_minutes` (default 10) is stopped as
@@ -189,8 +223,8 @@ files sit in a nested `NN-<role>-<id8>/` folder named in the summary.
 
 ## Mission control
 
-Five operator-only commands act on the active mission — `ap stop`, `ap cancel`,
-`ap reset`, `ap rebase` and `ap finding`. All five record what they did in
+Six operator-only commands act on the active mission — `ap stop`, `ap cancel`,
+`ap reset`, `ap rebase`, `ap note` and `ap finding`. All six record what they did in
 `state.json` and the mission's WATCH-REPORT.
 
 ### `ap stop`
@@ -218,8 +252,8 @@ are kept; failure counters are cleared when the next mission starts.
 - `--scope` clears one key: a failure budget (e.g.
   `infrastructureRetryBudget:mission`); a task continuation (full key
   `continuationAllowance:task:standalone:phase-1:<taskId>`, the scope, or the
-  bare task id — the hand-off note is kept); `standalone-plan-revision`; or
-  `fallback:<role>` (drop the sticky fallback, return to the primary model).
+  bare task id — the hand-off note is kept); `standalone-plan-revision`; `speckit-stage:<stage>` (one SpecKit gate's
+  revision counter); or `fallback:<role>` (drop the sticky fallback, return to the primary model).
 - Stopped mission: applies at once. Running mission: queued in
   `.autopilot/reset-request.json` and applied at the next failure or
   continuation decision, so the mission continues instead of escalating. It buys
@@ -235,6 +269,20 @@ and new digests). It always also re-bases the current phase baseline onto
 the next implementer/reviewer briefs (`Operator note: … (from ap rebase)`).
 Keeps the phase/step/task cursor; refuses while a run is live; prints `nothing
 to rebase` when the baseline is already at `HEAD`.
+
+### `ap note "<decision>" [--yes]` / `ap note --clear`
+
+Records a binding operator decision for the whole mission, planning included
+(`ap rebase --note` only reaches implementer/reviewer briefs of one phase).
+Every later planner, plan/spec/tasks reviewer, implementer, code reviewer and
+verifier brief carries `Operator decisions (binding — reviewers judge the work
+against them, never against alternatives they rule out):` with one
+`- <text> (<date>)` line per decision, so a review loop over an alternative you
+already ruled out ends. Decisions are appended (state key `operatorDecisions`),
+listed in the WATCH-REPORT, and dropped by `--clear`, `ap cancel` or a new
+mission. Works while a run is live: the decision is queued in
+`.autopilot/operator-decisions-queue.json` and the run applies it at its next
+brief. Asks `y/N` unless `--yes`.
 
 ### `ap finding list` / `ap finding drop <n>`
 
@@ -273,7 +321,8 @@ here.` and exits 0, without starting the setup wizard.
   (see `scripts/relay-guards.mjs`, `scripts/shell-guard.mjs`); harmless blocked
   Git calls only warn.
 - Gate commands run without network (`unshare --net`) on Linux unless
-  `tests.gate_network` is true.
+  `tests.gate_network` is true (also while a configured `tests.app_server` is
+  up: the gate commands join the server's own closed namespace, so isolation stays on).
 - Keep reviewers independent: never the same model for `code_reviewer` as
   `implementer`, or for `plan_reviewer` as `planner`, as primary or fallback.
 
@@ -336,7 +385,10 @@ Every setting with its default is in [docs/configuration.md](docs/configuration.
   `.autopilot/missions/<NNN>-<slug>/`. All features, including `--stage`, work here.
 - **SpecKit**: `.specify/workflows/speckit/workflow.yml` is authoritative; command
   steps map to the planner, gate steps to the plan reviewer, and implementation is
-  owned by Autopilot (same review, gate and verification).
+  owned by Autopilot (same review, gate and verification). A spec/plan gate whose
+  budget runs out with at most 2 open, decreasing findings carries them to the
+  next stage (its reviewer fails while they remain); the tasks gate never carries;
+  otherwise it escalates with `ap reset --scope speckit-stage:<stage>`.
 - **Existing plans:** `ap run` classifies planning as missing, partial, complete or
   ambiguous, resumes from the right step, validates complete plans read-only
   before coding, and stops on ambiguous state instead of guessing.

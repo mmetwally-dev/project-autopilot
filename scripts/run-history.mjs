@@ -7,7 +7,7 @@ import { peekSummary } from "./watch-summary.mjs";
 import { defaultIsPidAlive } from "./run-recovery.mjs";
 import { growingTerm } from "./per-task-budget.mjs";
 import { readOwnerPid, ownerPidAlive } from "./owner-pid.mjs";
-import { buildReportModel, renderReport, formatStamp, readBriefExtras, parseVitestGateLog, sameMission } from "./watch-report.mjs";
+import { buildReportModel, renderReport, formatStamp, readBriefExtras, parseVitestGateLog, parseGateCountsFromLog, sameMission } from "./watch-report.mjs";
 export { sameMission };
 import { detectUiProject } from "./e2e-detect.mjs";
 import { formatNotRunInMissions } from "./command-probe.mjs";
@@ -795,6 +795,51 @@ export function renderWatchReport(repo, mission, { tail = 40, isOwnerAlive, isAl
   if (state?.gitGuardWarning) {
     eventList.push({ type: "warn", at: null, text: "a git command was blocked and changed nothing; mission continued (warning, not a policy violation)." });
   }
+  // Backlog #10: finished gates without counts get them parsed from their log
+  // file on disk (if it still exists), so rows never show "-/-".
+  try {
+    const gatesDir = path.join(repo, ".autopilot", "missions", String(mission), "gates");
+    let logFiles = [];
+    try { logFiles = fs.readdirSync(gatesDir).filter((n) => n.endsWith(".log")); } catch { logFiles = []; }
+    const withMtime = logFiles.map((n) => {
+      try { return { name: n, mtime: fs.statSync(path.join(gatesDir, n)).mtimeMs }; }
+      catch { return { name: n, mtime: 0 }; }
+    });
+    for (const e of eventList) {
+      if (!e || e.type !== "gate_result") continue;
+      // already has counts?
+      const hasCounts = e.counts || e.gateCounts || (e.files && (e.tests || e.files.passed != null)) ||
+        (e.progress && (e.progress.files || e.progress.tests || e.progress.counts));
+      if (hasCounts) continue;
+      const phase = e.phase;
+      let candidates = withMtime;
+      if (phase != null) {
+        const prefix = `phase-${Number(phase)}-`;
+        const phaseFiles = candidates.filter((f) => f.name.startsWith(prefix));
+        if (phaseFiles.length) candidates = phaseFiles;
+      }
+      // prefer logs written at or before the result event
+      const resultTime = e.at ? Date.parse(e.at) : 0;
+      let ordered = [...candidates].sort((a, b) => a.mtime - b.mtime);
+      if (resultTime) {
+        const before = ordered.filter((f) => f.mtime <= resultTime + 60000);
+        if (before.length) ordered = before;
+      }
+      // try newest first
+      ordered = ordered.sort((a, b) => b.mtime - a.mtime);
+      for (const f of ordered) {
+        try {
+          const text = fs.readFileSync(path.join(gatesDir, f.name), "utf8");
+          const c = parseGateCountsFromLog(text);
+          if (c) {
+            e.counts = c;
+            e.logFile = path.join(gatesDir, f.name);
+            break;
+          }
+        } catch {}
+      }
+    }
+  } catch {}
   let ownerAlive = explicitOwnerAlive;
   if (ownerAlive === undefined) {
     const withFlag = Array.isArray(runs) ? runs.find((r) => typeof r?.ownerAlive === "boolean") : null;

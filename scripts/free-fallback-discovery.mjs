@@ -8,13 +8,43 @@
 // - tried models live in `s.triedFreeModels[role]` (array of "adapter/model"),
 //   mission-scoped like s.activeRoleModels.
 import {isFreeModel} from "./free-model.mjs";
-import {resolveEffectiveRoleModel, isExhausted, RATE_LIMITED_FAILURE_CLASS, IDLE_HANG_FAILURE_CLASS, PROVIDER_ERROR_FAILURE_CLASS} from "./role-fallback.mjs";
+import {resolveEffectiveRoleModel, isExhausted, canonicalModelId, RATE_LIMITED_FAILURE_CLASS, IDLE_HANG_FAILURE_CLASS, PROVIDER_ERROR_FAILURE_CLASS} from "./role-fallback.mjs";
 
 const isRecord = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
 const key = (e) => `${e?.adapter}/${e?.model}`;
 const OPENCODE_FREE = {free_model_pattern: "-free$"};
 // Backward-compatible: opencode default pattern. Prefer isFreeModel(adapterMeta, id).
 export const isFreeModelId = (id) => isFreeModel(OPENCODE_FREE, id);
+
+function globToRegExp(pattern) {
+  const escaped = String(pattern).replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`);
+}
+
+// Backlog #5: match a candidate free model entry ("adapter/model" or
+// {adapter, model}) against roles.free_models.exclude glob patterns.
+export function matchesFreeModelExclude(entry, exclude = []) {
+  if (!Array.isArray(exclude) || exclude.length === 0) return false;
+  const candidates = [];
+  if (typeof entry === "string") {
+    if (entry) candidates.push(entry);
+  } else if (isRecord(entry)) {
+    const canon = canonicalModelId(entry);
+    if (canon) candidates.push(canon);
+    const raw = key(entry);
+    if (raw && !candidates.includes(raw)) candidates.push(raw);
+    if (typeof entry.model === "string" && entry.model && !candidates.includes(entry.model)) candidates.push(entry.model);
+  }
+  if (candidates.length === 0) return false;
+  for (const rawPattern of exclude) {
+    if (typeof rawPattern !== "string") continue;
+    const pat = rawPattern.trim();
+    if (!pat) continue;
+    const re = globToRegExp(pat);
+    if (candidates.some((c) => re.test(c))) return true;
+  }
+  return false;
+}
 
 export function resetTriedFreeModels() {
   return {};
@@ -28,7 +58,7 @@ function isConfigured(roleConfig, entry) {
 // `decision` is the already-computed decideRoleFallback result (unchanged
 // signature/behavior for that function); returned as-is unless it is an
 // exhausted escalate (or exhausted silent-hang "none") on a free model.
-export async function extendFallbackWithFree({decision, role, roleConfig, activeModel = null, failureClass, noOutput = false, tried = [], discover = null, enabled = true, adapters = null, exhausted = null, policy = null, nowMs = Date.now()} = {}) {
+export async function extendFallbackWithFree({decision, role, roleConfig, activeModel = null, failureClass, noOutput = false, tried = [], discover = null, enabled = true, adapters = null, exhausted = null, policy = null, exclude = [], nowMs = Date.now()} = {}) {
   const silentHang = failureClass === IDLE_HANG_FAILURE_CLASS && noOutput === true;
   const eligible = failureClass === RATE_LIMITED_FAILURE_CLASS || failureClass === PROVIDER_ERROR_FAILURE_CLASS || silentHang;
   const effective = resolveEffectiveRoleModel(roleConfig, activeModel);
@@ -55,6 +85,8 @@ export async function extendFallbackWithFree({decision, role, roleConfig, active
       const id = typeof item === "string" ? item : item?.id;
       if (!isFreeModel(meta, id) || skip.has(`${effective.adapter}/${id}`)) continue;
       const next = {adapter: effective.adapter, model: id};
+      // Backlog #5: skip free models excluded by roles.free_models.exclude.
+      if (matchesFreeModelExclude(next, exclude)) continue;
       // Backlog #18: another role already found this free model exhausted.
       if (isExhausted(exhausted, next, policy, nowMs)) continue;
       return {

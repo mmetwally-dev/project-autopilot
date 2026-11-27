@@ -98,8 +98,8 @@ try {
   const state = readState(repo);
   const events = readObservedEvents(repo);
   const results = walkResults(repo);
-  const plannerRuns = events.filter((e) => e.role === "planner").length;
-  const reviewerRuns = events.filter((e) => e.role === "plan_reviewer").length;
+  const plannerRuns = events.filter((e) => e.role === "planner" && !e.wrapUp).length;
+  const reviewerRuns = events.filter((e) => e.role === "plan_reviewer" && !e.wrapUp).length;
   const plannerCaps = results.filter((r) => r.role === "planner" && r.capped).length;
   const reviewerCaps = results.filter((r) => r.role === "plan_reviewer" && r.capped).length;
 
@@ -107,6 +107,9 @@ try {
     run.status === 0 && state.phase === "tasks_ready", {status: run.status, phase: state.phase, tail: output.slice(-900)});
   check("reset: the Planner ran one capped + one completed generation per stage/revision (four runs)",
     plannerRuns === 4, plannerRuns);
+  const wrapUpRuns = events.filter((e) => e.wrapUp).length;
+  check("reset: every capped generation got exactly one wrap-up run (the extra runs are wrap-ups, not generations)",
+    wrapUpRuns === plannerCaps + reviewerCaps, {wrapUpRuns, plannerCaps, reviewerCaps});
   check("reset: the Planner capped twice (initial and revision), both were continued",
     plannerCaps === 2, plannerCaps);
   check("reset: the reviewer ran a capped + completed generation in all three rounds (six runs)",

@@ -155,8 +155,10 @@ check("rereview fake: no stamps + empty chunks yields no section",
       const verifierIdx = autoSrc.indexOf('if(stage==="verifier"){', rereviewIdx);
       if (rereviewIdx === -1 || verifierIdx === -1) return false;
       const handoffSlice = autoSrc.slice(rereviewIdx, verifierIdx);
-      const gatesAfter = autoSrc.indexOf("g=await gates(c,s)", verifierIdx);
-      return !handoffSlice.includes("gates(c,s)") && gatesAfter !== -1
+      // Backlog #4 keeps the app server up for the verifier: the call gained
+      // a keepForVerifier option, so match the call, not the old exact text.
+      const gatesAfter = /g=await gates\(c,s(?:,\s*\{[^}]*\})?\)/.test(autoSrc.slice(verifierIdx));
+      return !handoffSlice.includes("gates(c,s)") && gatesAfter
         && autoSrc.includes("// Only after Code Review PASS: run configured gates and the Verifier.");
     })(), null);
   check("pin: standalone pass imports the answer renderer",

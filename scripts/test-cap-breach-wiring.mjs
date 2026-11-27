@@ -71,31 +71,27 @@ check("implementer: GSD loop relayAsync passes capEnabled:true",
 check("implementer: Standalone + SpecKit loops and the final-review fix helper relay pass capEnabled:true (3 sites)",
   count(/relay\("implementer",[^\n]*capEnabled:true/g) === 3);
 
-// ── Wrap-up path: breach triggers the orchestrator fallback, no resume ──
-// Mission 045 (Backlog #46) phase 1: the capped session is NEVER resumed
-// for a wrap-up turn. The capped branch itself computes this session's own
-// changed paths and writes the orchestrator fallback note, then returns.
-// The runWrapUp closure IS the whole wrap-up path — nothing inside it may
-// spawn a relay turn, so slice it out and pin the absence structurally
-// (the rollover scenarios in test-cap-breach-rollover.mjs prove the
-// behavioural half: zero wrap-up runs).
+// ── Wrap-up path (Backlog #8): resume the same session for a note-writing
+// turn; the orchestrator fallback note is the failure/no-resume path ──
 const wrapUpStart = src.indexOf("const runWrapUp=async()=>{");
 const wrapUpEnd = src.indexOf("result.wrapUp=await runWrapUp();");
 const wrapUpClosure = (wrapUpStart !== -1 && wrapUpEnd > wrapUpStart) ? src.slice(wrapUpStart, wrapUpEnd) : "";
-check("wrapup: breach writes the orchestrator fallback note (no wrap-up resume call)",
+check("wrapup: stale note -> resumed wrap-up turn first, orchestrator fallback note after it",
   /buildOrchestratorFallbackNote\(taskRef,events,role\.adapter,repo,diffStat,capBreach,sessionPaths\)/.test(src)
   && /fs\.writeFileSync\(path\.join\(repo,noteRel\),fallbackNote\)/.test(src)
-  && !/runNote:"wrap-up"/.test(src)
-  && !/isWrapUp:true/.test(src));
-check("wrapup: runWrapUp spawns no relay turn (no resume, no wrap-up prompt builder)",
+  && wrapUpClosure.indexOf("runModelWrapUpTurn(") !== -1
+  && wrapUpClosure.indexOf("runModelWrapUpTurn(") < wrapUpClosure.indexOf("buildOrchestratorFallbackNote("));
+check("wrapup: runWrapUp spawns ONE nested relay with resume + isWrapUp + wrap-up prompt, exempt from wrap-up recursion",
   wrapUpClosure.length > 0
-  && !/relay\(/.test(wrapUpClosure)
-  && !/resume:true/.test(wrapUpClosure)
-  && !/isWrapUp:true/.test(wrapUpClosure)
-  && !/buildWrapUpPrompt\(noteRel,noteMaxChars\)/.test(wrapUpClosure)
-  && !/buildReviewWrapUpPrompt/.test(wrapUpClosure));
-check("wrapup: the wrap-up prompt builders are gone from autopilot.mjs entirely",
-  !/buildWrapUpPrompt|buildReviewWrapUpPrompt/.test(src));
+  && (wrapUpClosure.match(/runRelay\(/g) ?? []).length === 1
+  && /resume:true/.test(wrapUpClosure) && /isWrapUp:true/.test(wrapUpClosure)
+  && /runNote:"wrap-up"/.test(wrapUpClosure)
+  && /buildWrapUpPrompt\(promptNotePath,/.test(wrapUpClosure)
+  && /timeoutMs:WRAPUP_TIMEOUT_MS/.test(wrapUpClosure)
+  && /resumable=Boolean\(result\.sessionId\) && Boolean\(a\.resume_session\?\.length\)/.test(wrapUpClosure));
+check("wrapup: read-only roles point the prompt at the scratch note path their brief uses",
+  /scratchHandoffNotePath\(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR,taskRef\)/.test(wrapUpClosure)
+  && /wrapUpScratchCopyTo:parentScratchNote/.test(wrapUpClosure));
 
 // ── Non-implementer roles do NOT pass capEnabled:true ──
 // Planner and plan_reviewer are pinned by the planning-cap blocks below;
@@ -186,9 +182,9 @@ check("wrapup: fallback outcomes recorded, never retried, never block the missio
   && /status:"skipped",reason:"note_fresh"/.test(src)
   && /status:"skipped",reason:"note_scope_unknown"/.test(src)
   && /status:"orchestrator_fallback",reason:"note_missing_or_stale"/.test(src));
-check("wrapup: build/write failures degrade to failed reasons, never to a resumed session",
+check("wrapup: build/write failures degrade to failed reasons; a failed wrap-up turn falls back, never fails the run",
   /fallback_note_build_failed/.test(src) && /fallback_note_write_failed/.test(src)
-  && !/runNote:"wrap-up"/.test(src));
+  && /wrap_up_turn_error:/.test(src) && /status:"model_wrote"/.test(src));
 check("wrapup: implementer session store ensured + forwarded (data dir only, never HOME)",
   /ensureSessionStoreDir\(mission,taskRef\)/.test(src)
   && /sessionStoreSandboxSubpath\(role\.adapter\)/.test(src)
@@ -270,8 +266,16 @@ check("reset: queued continuation reset applies at all four continuation decisio
   count(/maybeApplyPendingContinuationReset\(s,contScope\);/g) === 20);
 check("reset: escalation records the continuation for bare `ap reset` (all four sites)",
   count(/recordLastContinuation\(s,\{contScope,taskId,missionName:(mission|missionIdentity),taskRef:taskDisplayRef\(phaseTasks\[taskIndex\],taskIndex\)\}\)/g) === 4);
-check("reset: every not-converging message ends with the exact resume command",
-  count(/Resume: ap reset --scope /g) === 27); // 4 not-converging sites + standalone code_reviewer capped (031 P4.1) + standalone verifier capped (031 P4.2) + 2 voluntary P4.3 + speckit code_reviewer capped (031 P5.1) + speckit verifier capped (031 P5.2) + 2 speckit voluntary P5.3 + standalone planner capped (031 P6.2) + standalone planner voluntary (031 P6b.1) + 2 standalone plan_reviewer capped (031 P7.1) + standalone plan_reviewer voluntary (031 P7b.1) + the shared no-progress stop (#32) + planner no-progress stop (031 P6b.2) + 5 standalone spec-stage sites (spec planner capped + incomplete, spec reviewer capped x2 + incomplete) (#7) + final review (#13)
+{
+  const escSrc = fs.readFileSync(new URL("./escalation-model.mjs", import.meta.url), "utf8");
+  const fmtStart = escSrc.indexOf("export function formatNoProgressStopMessage(");
+  const fmtBody = fmtStart >= 0 ? escSrc.slice(fmtStart, escSrc.indexOf("\n}", fmtStart) + 2) : "";
+  const fmtResumeBranches = [...fmtBody.matchAll(/Resume: ap reset --scope \$\{contScope\} then ap run`/g)].length;
+  check("reset: every not-converging message ends with the exact resume command",
+    count(/Resume: ap reset --scope /g) === 28
+    && /die\(formatNoProgressStopMessage\(/.test(src)
+    && fmtResumeBranches === 2); // 28 inline in autopilot.mjs + the shared no-progress stop (#32/#4) moved into formatNoProgressStopMessage (2 branches, both ending with Resume: ap reset --scope ${contScope} then ap run)
+}
 
 // ── Backlog #32: no-progress stop + note-cited code in the brief ──
 check("no-progress: checked at all four continuation decisions, after the allowance check (both loops)",
@@ -394,9 +398,9 @@ check("031 P4.1: standalone code_reviewer capped branch exists (1 site standalon
 {
   const standalonePart = src.split("async function runImplementation(c){")[0];
   const speckitPart = src.split("async function runImplementation(c){")[1] ?? "";
-  check("031 P5.2: speckit verifier relayAsync passes capEnabled:true (1 site, speckit only)",
-    (speckitPart.match(/relayAsync\("verifier",[\s\S]{0,4000}?capEnabled:true/g) ?? []).length === 1
-    && (standalonePart.match(/relayAsync\("verifier",[\s\S]{0,4000}?capEnabled:true/g) ?? []).length === 1);
+  check("031 P5.2: speckit verifier relay passes capEnabled:true (1 site, speckit only)",
+    (speckitPart.match(/relayVerifierWithApp\([\s\S]{0,4000}?capEnabled:true/g) ?? []).length === 1
+    && (standalonePart.match(/relayVerifierWithApp\([\s\S]{0,4000}?capEnabled:true/g) ?? []).length === 1);
   check("031 P5.2: verifier continuation scope is per-phase (speckit:phase verifier)",
     src.includes("task:speckit:phase-${s.phaseIndex}:verifier"));
   check("031 P5.2: speckit verifier capped branch consumes explicit continuationAllowance",
@@ -467,7 +471,7 @@ check("031 P4.1: standalone code_reviewer capped branch exists (1 site standalon
   check("031 P5.5: speckit code_reviewer passes capEnabled so capBreach.wrapUp reaches the orchestrator fallback",
     (speckitPart.match(/reviewBudget\.timeoutMs,true[,)]/g) ?? []).length === 1);
   check("031 P5.5: speckit verifier passes capEnabled:true so capBreach.wrapUp reaches the orchestrator fallback",
-    (speckitPart.match(/relayAsync\("verifier",[\s\S]{0,4000}?capEnabled:true/g) ?? []).length === 1);
+    (speckitPart.match(/relayVerifierWithApp\([\s\S]{0,4000}?capEnabled:true/g) ?? []).length === 1);
   check("031 P5.5: wrap-up gate uses capEnabled (reachable for speckit review roles), not roleName===implementer",
     /if\(capEnabled && !isWrapUp && capBreach\?\.wrapUp && result\.capped\)\{/.test(src)
     && !/if\(roleName==="implementer" && !isWrapUp && capBreach\?\.wrapUp && result\.capped\)/.test(src));
@@ -476,8 +480,7 @@ check("031 P4.1: standalone code_reviewer capped branch exists (1 site standalon
   check("031 P5.5: non-implementer breach takes the orchestrator fallback (review roles included)",
     /buildOrchestratorFallbackNote\(taskRef,events,role\.adapter,repo,diffStat,capBreach,sessionPaths\)/.test(src)
     && /status:"orchestrator_fallback",reason:"note_missing_or_stale",trigger:capBreach\.trigger\|\|null,note:noteRel,fallbackNote:true/.test(src)
-    && !/buildWrapUpPrompt\(noteRel,noteMaxChars\)/.test(src)
-    && !/runNote:"wrap-up"/.test(src));
+    && /runModelWrapUpTurn\(/.test(src));
 }
 {
   const { buildReviewWrapUpPrompt } = await import("./standalone-handoff.mjs");
@@ -494,10 +497,10 @@ check("031 P4.1: standalone code_reviewer capped branch exists (1 site standalon
   // the SpecKit loop's function boundary.
   const standalonePart = src.split("async function runImplementation(c){")[0];
   const speckitPart = src.split("async function runImplementation(c){")[1] ?? "";
-  check("031 P4.2: verifier relayAsync passes capEnabled:true (2 sites: standalone + speckit P5.2)",
-    count(/relayAsync\("verifier",[\s\S]{0,4000}?capEnabled:true/g) === 2
-    && /relayAsync\("verifier",[\s\S]{0,4000}?capEnabled:true/.test(standalonePart)
-    && /relayAsync\("verifier",[\s\S]{0,4000}?capEnabled:true/.test(speckitPart));
+  check("031 P4.2: verifier relay passes capEnabled:true (2 sites: standalone + speckit P5.2)",
+    count(/relayVerifierWithApp\([\s\S]{0,4000}?capEnabled:true/g) === 2
+    && /relayVerifierWithApp\([\s\S]{0,4000}?capEnabled:true/.test(standalonePart)
+    && /relayVerifierWithApp\([\s\S]{0,4000}?capEnabled:true/.test(speckitPart));
 }
 check("031 P4.2: verifier capped branch consumes explicit continuationAllowance (4 sites: capped + voluntary P4.3 + speckit P5.2 + speckit voluntary P5.3)",
   count(/consumeContinuation\(s,c\.policy,contScope,resolvePerRoleLimits\('verifier',c\.policy\)\.continuationAllowance\)/g) === 4);
@@ -697,7 +700,7 @@ check("031 P4.5: wrap-up note path stays the shared mission handoff path",
     (standalonePlanningPart.match(/skipPlannerFirst=true;\s*\n\s*continue;/g) ?? []).length === 3);
   check("031 P7.1: review prompt quotes the plan_reviewer wrap-up handoff note (reviewer resumes where it stopped)",
     /readHandoffNote\(mission,'standalone-planning-plan_reviewer'\)/.test(standalonePlanningPart)
-    && /Prior reviewer handoff note/.test(standalonePlanningPart));
+    && /(?:Prior reviewer handoff note|readOnlyContinuationNote\(reviewerHandoffNote,)/.test(standalonePlanningPart));
   check("031 P7.1: non-capped reviewer outcome clears the plan_reviewer handoff note (no stale continue-from-where-it-stopped)",
     /clearHandoffNote\(mission,'standalone-planning-plan_reviewer'\)/.test(standalonePlanningPart));
 }
@@ -708,9 +711,9 @@ check("031 P4.5: wrap-up note path stays the shared mission handoff path",
   check("backlog#1: SpecKit gate reviewer helper passes capEnabled + plan_reviewer taskRef",
     /const runCappedReview=async\(prompt,opts=\{\}\)=>\{[\s\S]*?relay\("plan_reviewer"[\s\S]*?capEnabled:true,taskRef:planReviewerTaskRef/.test(speckitPart));
   check("backlog#1: SpecKit initial, confirmation, and re-review all route through runCappedReview",
-    speckitPart.includes("rr=await runCappedReview(initialReviewPrompt)")
+    speckitPart.includes("rr=await runCappedReview(initialReviewPrompt,{...fullRoundRelayOpts(),firstRound:isFirstGateRound})")
     && speckitPart.includes("cr=await runCappedReview(activeConfirmationPrompt,confirmationRelayOpts)")
-    && speckitPart.includes("retry=deterministicRetry||await runCappedReview(reReviewPrompt)"));
+    && speckitPart.includes("retry=deterministicRetry||await runCappedReview(reReviewPrompt,fullRoundRelayOpts())"));
   check("backlog#1: SpecKit gate reviewer handles capped + incomplete continuations",
     /if\(result\.capped\)\{[\s\S]{0,300}?handleCappedPlanningResult\(\{c,s,framework:"speckit",role:"plan_reviewer"/.test(speckitPart)
     && /parseIncompleteSignal\(result\.review \?\? result\)[\s\S]{0,300}?handleIncompletePlanningResult\(\{c,s,framework:"speckit",role:"plan_reviewer"/.test(speckitPart));
@@ -734,7 +737,7 @@ check("031 P4.5: wrap-up note path stays the shared mission handoff path",
     && gsdPart.includes('planningBudgetReminderFor(s,c,"planner")')
     && gsdPart.includes("handoffNoteRelPath(s.mission, taskRef)"));
   check("backlog#1: GSD plan_reviewer relayAsync passes capEnabled + gsd-planning-plan_reviewer",
-    /relayAsync\("plan_reviewer",prompt,c,s,\{readOnly:true,review:true,capEnabled:true,taskRef\}\)/.test(gsdPart)
+    /relayAsync\("plan_reviewer",`\$\{prompt\}\$\{verdictOnlyText\?`\\n\\n\$\{verdictOnlyText\}`:""\}`,withPlanReviewVerdictOnlyCap\(c,Boolean\(verdictOnlyText\)\),s,\{readOnly:true,review:true,capEnabled:true,taskRef\}\)/.test(gsdPart)
     && gsdPart.includes('planningScopeParts("gsd","plan_reviewer")'));
   check("backlog#1: GSD reviewer handles capped + incomplete continuations",
     /if\(rr\.capped\)\{[\s\S]{0,300}?handleCappedPlanningResult\(\{c,s,framework:"gsd",role:"plan_reviewer"/.test(gsdPart)
@@ -861,7 +864,7 @@ check("031 P10.3: plan_reviewer capped x2 (pre/post-retry) + incomplete x1 plann
     && !/readHandoffNote\(mission, 'standalone-.*verifier'\)/.test(standalonePart)
     && /verifyDeadEndsText/.test(standalonePart)
     && /verifyHandoffNoteText/.test(standalonePart)
-     && /relayAsync\("verifier",`[^`]*\$\{verifyHandoff\.text\}[^`]*\$\{verifyDeadEndsText\}[^`]*\$\{verifyHandoffNoteText\}[^`]*\$\{verifyBudget\.note\}/.test(standalonePart));
+     && /relayVerifierWithApp\(`[^`]*\$\{verifyHandoff\.text\}[^`]*\$\{verifyDeadEndsText\}[^`]*\$\{verifyHandoffNoteText\}[^`]*\$\{verifyBudget\.note\}/.test(standalonePart));
 }
 
 // ── Mission 039 task 1.2: speckit review roles inject dead-ends + handoff note ──
@@ -880,7 +883,7 @@ check("031 P10.3: plan_reviewer capped x2 (pre/post-retry) + incomplete x1 plann
     && !/readHandoffNote\(missionIdentity, '[^']*'\)/.test(speckitPart)
     && /verifyDeadEndsText/.test(speckitPart)
     && /verifyHandoffNoteText/.test(speckitPart)
-    && /relayAsync\("verifier",[\s\S]*\$\{verifyDeadEndsText\}[\s\S]*\$\{verifyHandoffNoteText\}[\s\S]*\$\{verifyBudget\.note\}/.test(speckitPart));
+    && /relayVerifierWithApp\([\s\S]*\$\{verifyDeadEndsText\}[\s\S]*\$\{verifyHandoffNoteText\}[\s\S]*\$\{verifyBudget\.note\}/.test(speckitPart));
 }
 
 // ── Mission 039 task 1.3: standalone planner injects dead-ends + handoff note ──
@@ -916,14 +919,14 @@ check("031 P10.3: plan_reviewer capped x2 (pre/post-retry) + incomplete x1 plann
   check("backlog #62: standalone code_reviewer review() appends the reminder under reviewRef",
     // #37 inserts the unexpected-new-files note ahead of the dead-ends text,
     // which moves this call past the default anchor window; keep the bound tight.
-    reminderCall(/const reviewRef=reviewTaskRef\(s,phaseKey,/g, 0, /review\("code_reviewer"/, "mission", "reviewRef", 1200));
-  check("backlog #62: standalone verifier relayAsync() appends the reminder under verifyRef",
-    reminderCall(/const verifyRef=allPhaseTaskRef\(phaseTasks\);/g, 0, /relayAsync\("verifier"/, "mission", "verifyRef"));
+    reminderCall(/const reviewRef=roleHandoffRef\(reviewTaskRef\(s,phaseKey,/g, 0, /review\("code_reviewer"/, "mission", "reviewRef", 1400));
+  check("backlog #62: standalone verifier relay appends the reminder under verifyRef",
+    reminderCall(/const verifyRef=roleHandoffRef\(allPhaseTaskRef\(phaseTasks\),/g, 0, /relayVerifierWithApp\(/, "mission", "verifyRef"));
   check("backlog #62: speckit code_reviewer review() appends the reminder under reviewRef",
     // phaseCodeReviewPassNotesText moves this call past the default anchor window; keep the bound tight.
-    reminderCall(/const reviewRef=reviewTaskRef\(s,speckitPhaseFeedbackKey/g, 0, /review\("code_reviewer"/, "missionIdentity", "reviewRef", 1200));
-  check("backlog #62: speckit verifier relayAsync() appends the reminder under verifyRef",
-    reminderCall(/const verifyRef=allPhaseTaskRef\(phaseTasks\);/g, 1, /relayAsync\("verifier"/, "missionIdentity", "verifyRef"));
+    reminderCall(/const reviewRef=roleHandoffRef\(reviewTaskRef\(s,speckitPhaseFeedbackKey/g, 0, /review\("code_reviewer"/, "missionIdentity", "reviewRef", 1200));
+  check("backlog #62: speckit verifier relay appends the reminder under verifyRef",
+    reminderCall(/const verifyRef=roleHandoffRef\(allPhaseTaskRef\(phaseTasks\),/g, 1, /relayVerifierWithApp\(/, "missionIdentity", "verifyRef"));
   const finalCalls = [...src.matchAll(/runFinalReviewSessions\(c,s,/g)];
   check("backlog #13: mission-final review calls carry the per-task reminder via runFinalReviewSessions",
     finalCalls.length >= 2

@@ -4,6 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { plannerEarlierRoundsText } from "./plan-review-rounds.mjs";
 import { implementerEarlierRoundsText } from "./code-review-rounds.mjs";
+import { DEFECT_PATTERN_REVIEW_INSTRUCTION } from "./review-feedback.mjs";
+import { REVIEWER_NO_AP_SKILLS_LINE } from "./autopilot.mjs";
 
 let ok = 0;
 let failed = 0;
@@ -138,7 +140,7 @@ if (!rawRelayMatch) {
 }
 
 const evaluateBrief = new Function(
-  "roleName", "promptRepository", "mission", "role", "readOnly", "promptScratch", "disposableWorkspace", "relayTask", "review", "planRevision = null",
+  "roleName", "promptRepository", "mission", "role", "readOnly", "promptScratch", "disposableWorkspace", "relayTask", "review", "planRevision = null", "previousScratchSeeded = false", "DEFECT_PATTERN_REVIEW_INSTRUCTION", "REVIEWER_NO_AP_SKILLS_LINE",
   `return (${rawRelayMatch[1]}).filter(Boolean).join("\\n");`
 );
 
@@ -153,8 +155,9 @@ function buildBrief({
   relayTask = "task details",
   review = false,
   planRevision = null,
+  previousScratchSeeded = false,
 } = {}) {
-  return evaluateBrief(roleName, promptRepository, mission, role, readOnly, promptScratch, disposableWorkspace, relayTask, review, planRevision);
+  return evaluateBrief(roleName, promptRepository, mission, role, readOnly, promptScratch, disposableWorkspace, relayTask, review, planRevision, previousScratchSeeded, DEFECT_PATTERN_REVIEW_INSTRUCTION, REVIEWER_NO_AP_SKILLS_LINE);
 }
 
 // 4a. Planner revision brief with "REJECTED the previous attempt"
@@ -211,6 +214,11 @@ const reviewerBrief = buildBrief({
   relayTask: "The plan reviewer REJECTED the previous attempt at this stage.",
 });
 check("reviewer brief does NOT contain revision finish line", !reviewerBrief.includes(REVISION_LINE), reviewerBrief);
+check("readOnly reviewer brief contains REVIEWER_NO_AP_SKILLS_LINE and writable planner/implementer briefs do not",
+  reviewerBrief.includes(REVIEWER_NO_AP_SKILLS_LINE)
+  && !plannerRevisionBrief.includes(REVIEWER_NO_AP_SKILLS_LINE)
+  && !implementerRevisionBrief.includes(REVIEWER_NO_AP_SKILLS_LINE),
+  { reviewerHas: reviewerBrief.includes(REVIEWER_NO_AP_SKILLS_LINE), plannerHas: plannerRevisionBrief.includes(REVIEWER_NO_AP_SKILLS_LINE), implementerHas: implementerRevisionBrief.includes(REVIEWER_NO_AP_SKILLS_LINE) });
 
 if (failed > 0) {
   console.error(`FAILED: ${failed} check(s) failed`);

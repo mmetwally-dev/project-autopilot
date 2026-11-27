@@ -26,6 +26,7 @@
 // in the whole-phase pass, which alone receives the complete delta.
 import {validateRoleProgress} from "./phase-stage-checkpoint.mjs";
 import {HANDOFF_MAX_CHARS_DEFAULT, HANDOFF_NOTE_MAX_CHARS_DEFAULT, handoffNoteRelPath, handoffBudgetReminder, SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, scratchHandoffNotePath} from "./per-task-budget.mjs";
+import {agyPathInstruction} from "./agy-events.mjs";
 import {taskLabel, FINDING_TASKS_STATE_KEY} from "./finding-task-locality.mjs";
 
 export const ROLE_LABEL = Object.freeze({
@@ -156,18 +157,43 @@ function refsAdjacent(a, b) {
   return !!pa && !!pb && pa.kind === pb.kind && pa.major === pb.major && pb.minor === pa.minor + 1;
 }
 
+function refKind(ref) {
+  if (/^T\d+\.\d+(?:[a-z])?$/i.test(ref)) return "plan";
+  if (/^T0\d+(?:[a-z])?$/i.test(ref)) return "owned";
+  if (/^T[1-9]\d*(?:[a-z])?$/i.test(ref)) return "pos";
+  return null;
+}
+
 // A run's task scope as one string. Maximal consecutive runs compress to
 // first > last ("T1.1 > T1.3"); gaps stay listed ("T1.1, T1.3";
 // "T1.1 > T1.2, T1.4") so a range never implies skipped tasks are included.
 // A single ref stands alone. Null when the scope is unknown — callers record
-// null, never a guess. Input must be in phase order.
-export function taskRefRange(refs) {
+// null, never a guess. Input must be in phase order. When planOrder is provided,
+// adjacency means consecutive in plan order of the same ref kind (letter suffixes included).
+export function taskRefRange(refs, planOrder = null) {
   const list = [...new Set((Array.isArray(refs) ? refs : []).filter(Boolean))];
   if (!list.length) return null;
+  const orderList = Array.isArray(planOrder)
+    ? planOrder.map((r, i) => (typeof r === "string" ? r : taskDisplayRef(r, i))).filter(Boolean)
+    : null;
+  const isAdjacent = (a, b) => {
+    if (orderList) {
+      const ka = refKind(a);
+      const kb = refKind(b);
+      if (ka && kb && ka === kb) {
+        const ia = orderList.indexOf(a);
+        const ib = orderList.indexOf(b);
+        if (ia !== -1 && ib !== -1) return ib === ia + 1;
+      } else if (ka !== kb) {
+        return false;
+      }
+    }
+    return refsAdjacent(a, b);
+  };
   const parts = [];
   let runStart = 0;
   for (let i = 1; i <= list.length; i++) {
-    if (i < list.length && refsAdjacent(list[i - 1], list[i])) continue;
+    if (i < list.length && isAdjacent(list[i - 1], list[i])) continue;
     const run = list.slice(runStart, i);
     parts.push(run.length === 1 ? run[0] : `${run[0]} > ${run[run.length - 1]}`);
     runStart = i;
@@ -211,16 +237,18 @@ export function reviewTaskRef(s, key, phaseTasks, phaseTaskIds, revision, isRere
       if (first >= 0) finalIds = ids.slice(first);
     }
   }
+  const allRefs = tasks.map((t, i) => taskDisplayRef(t, i));
   return taskRefRange(finalIds.map((id) => {
     const i = ids.indexOf(id);
     return taskDisplayRef(tasks[i], i);
-  }));
+  }), allRefs);
 }
 // Whole-phase scope ("T1.1 > T1.3", or the single ref, or null). The
 // verifier always covers the full phase, even after a fix.
 export function allPhaseTaskRef(phaseTasks) {
   const tasks = Array.isArray(phaseTasks) ? phaseTasks : [];
-  return taskRefRange(tasks.map((t, i) => taskDisplayRef(t, i)));
+  const allRefs = tasks.map((t, i) => taskDisplayRef(t, i));
+  return taskRefRange(allRefs, allRefs);
 }
 
 // First non-empty line of a task's text, whitespace-collapsed and bounded. Used
@@ -314,8 +342,10 @@ function renderFacts(role, progress, completedTaskIds) {
 export function readOnlyHandoffNoteReminder({mission, ref, noteLimit}) {
   const scratchPath = scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, ref);
   const repoPath = handoffNoteRelPath(mission, ref);
-  return `\n## ${SECTION.milestoneNote}\nAt each milestone — after every important finding and after the task verify — OVERWRITE your hand-off note at ${scratchPath} (never append), max ${noteLimit} characters (Done/Found/Next/Dead ends). The repo note at ${repoPath} is read-only for this role: do not write it. If your session is stopped, the next session starts from the scratch note.`;
+  return `\n## ${SECTION.milestoneNote}\nAt each milestone — after every important finding and after the task verify — OVERWRITE your hand-off note at ${scratchPath} (never append), max ${noteLimit} characters:\n1. Checked and clear — file:line ranges + topics reviewed and found OK.\n2. Findings (final) — each BLOCKING/minor finding with file:line evidence.\n3. Remaining — concrete files/sections still to review.\n4. Dead ends — what you tried that did not work, and why.\nThe repo note at ${repoPath} is read-only for this role: do not write it. If your session is stopped, the next session starts from the scratch note.`;
 }
+
+export const IMPLEMENTER_NO_FULL_SUITE_LINE = "Never run the full test suite or the configured gate commands (the orchestrator runs them after code review); run only this task's verify and file-scoped tests.";
 
 export function buildTaskPrompt(opts = {}) {
   for (const key of FORBIDDEN_INPUT_KEYS) {
@@ -395,7 +425,7 @@ export function buildTaskPrompt(opts = {}) {
     const fileLine = task?.file ? `\nFile: ${normalizeRelPath(task.file)}${task.line ? `:${task.line}` : ""}` : "";
     const accept = task?.accept ? `\nAcceptance: ${String(task.accept)}` : "";
     const verify = task?.verify ? `\nVerify: ${String(task.verify)}` : "";
-    parts.push(`\n## ${SECTION.currentTask}\nTask ID: ${currentTaskId}${fileLine}\nTitle: ${taskTitle(task)}\n\n${String(task?.text ?? "").trim()}${accept}${verify}`);
+    parts.push(`\n## ${SECTION.currentTask}\nTask ID: ${currentTaskId}${fileLine}\nTitle: ${taskTitle(task)}\n\n${String(task?.text ?? "").trim()}${accept}${verify}${role === "implementer" ? `\n\n${IMPLEMENTER_NO_FULL_SUITE_LINE}` : ""}`);
   } else {
     parts.push(`\n## ${SECTION.currentTask}\nWhole-phase pass over: ${taskIds.join(", ")}`);
   }
@@ -414,12 +444,17 @@ export function buildTaskPrompt(opts = {}) {
   // find a note named after the single task. Callers may pass handoffNoteRef
   // (the same range ref the relay runs under) to name both paths from it;
   // absent, the single-task milestoneRef is used as before.
+  const resolveNotePath = (rel) => {
+    if (!rel) return null;
+    const base = typeof opts.repoRoot === "string" && opts.repoRoot.trim() ? opts.repoRoot.trim().replace(/\/+$/, "") : null;
+    return base ? `${base}/${rel}` : rel;
+  };
   if (!wholePhasePass) {
     const derivedRef = taskDisplayRef(tasks[currentIndex], currentIndex);
     const explicitRef = typeof opts.handoffNoteRef === "string" && opts.handoffNoteRef.trim()
       ? opts.handoffNoteRef.trim() : null;
     const milestoneRef = explicitRef ?? derivedRef;
-    const milestoneRepoPath = milestoneRef ? handoffNoteRelPath(mission, milestoneRef) : null;
+    const milestoneRepoPath = milestoneRef ? resolveNotePath(handoffNoteRelPath(mission, milestoneRef)) : null;
     const milestoneScratchPath = milestoneRef
       ? scratchHandoffNotePath(SCRATCH_HANDOFF_NOTE_DEFAULT_DIR, milestoneRef)
       : null;
@@ -487,9 +522,10 @@ export function buildTaskPrompt(opts = {}) {
   // brief can never name a path the orchestrator does not look at.
   if (role === "implementer" && !wholePhasePass) {
     const noteRef = taskDisplayRef(tasks[currentIndex], currentIndex);
-    const notePath = noteRef ? handoffNoteRelPath(mission, noteRef) : null;
+    const notePath = noteRef ? resolveNotePath(handoffNoteRelPath(mission, noteRef)) : null;
     if (notePath) {
-      parts.push(`\n## ${SECTION.handoffNote}\nKeep a hand-off note at ${notePath}. OVERWRITE it (never append) at each milestone — after every important finding, before every edit, and after the task verify — max ${handoffNoteLimit} characters:\n1. Done — files changed (names only; details are in the worktree).\n2. Found — facts the next session needs: exact file:line, function names, how the code works there.\n3. Next — the exact next edit: file, line, what to change.\n4. Dead ends — what you tried that did not work, and why.\nIf your session is stopped, the next session starts from this note.`);
+      const agyLine = opts.adapter === "antigravity" && opts.repoRoot ? `\n${agyPathInstruction(opts.repoRoot)}` : "";
+      parts.push(`\n## ${SECTION.handoffNote}\nKeep a hand-off note at ${notePath}. OVERWRITE it (never append) at each milestone — after every important finding, before every edit, and after the task verify — max ${handoffNoteLimit} characters:\n1. Done — files changed (names only; details are in the worktree).\n2. Found — facts the next session needs: exact file:line, function names, how the code works there.\n3. Next — the exact next edit: file, line, what to change.\n4. Dead ends — what you tried that did not work, and why.\nIf your session is stopped, the next session starts from this note.${agyLine}`);
     }
   }
   // First-session edit-early rule (first generation only): the implementer's

@@ -18,6 +18,7 @@
 import {decidePlanningReview, PLANNING_REVIEW_PASSTHROUGH_CLASSES} from "./planning-review-decision.mjs";
 import {decideEscalationName} from "./escalation-naming.mjs";
 import {failure, selectAttemptFailure, recordFailureBudget} from "./failure-contract.mjs";
+import {waitForNetworkRecovery, applyNetworkWaitExhaustedEvidence} from "./network-wait.mjs";
 
 // Re-derived from the already-imported task 1 decision set — never a
 // duplicated list, so the pre-record skip below cannot drift from it.
@@ -164,7 +165,7 @@ export function deniedCommandOf(failure){
 export function escalateIfRateLimited(config,state,taskScope,result,{fatal,saveState,escalatePrefix,writeRole=false}={}){
   const failureClass=result?.failure?.class;
   const denied=writeRole&&failureClass==="PERMISSION_DENIED"&&result.failure.domain==="adapter";
-  if(failureClass!=="RATE_LIMITED"&&failureClass!=="AUTH_REQUIRED"&&!denied) return false;
+  if(failureClass!=="RATE_LIMITED"&&failureClass!=="AUTH_REQUIRED"&&failureClass!=="NETWORK_UNAVAILABLE"&&!denied) return false;
   const deniedCommand=denied?deniedCommandOf(result.failure):null;
   const failureRecord={...result.failure,class:failureClass,retryable:false};
   const scope=failureBudgetScope(failureRecord,taskScope,result);
@@ -217,7 +218,33 @@ export async function resolvePlanningReviewAttempt(config,state,taskScope,review
     now:typeof opts.now==="function"?opts.now:()=>new Date().toISOString()
   };
   let current=reviewResult;
+  let networkWaitState=null;
   for(;;){
+    if(current?.failure?.class==="NETWORK_UNAVAILABLE"&&!current.networkWaitExhausted){
+      const nw=await waitForNetworkRecovery({
+        result:current,
+        config,
+        state,
+        roleName:current.role||"plan_reviewer",
+        adapter:current.adapter||null,
+        model:current.model||null,
+        waitState:networkWaitState,
+        persistState:true,
+        saveState:io.saveState,
+        refreshWatchReport:typeof opts.refreshWatchReport==="function"?opts.refreshWatchReport:()=>{},
+        appendWatchEvent:typeof opts.appendWatchEvent==="function"?opts.appendWatchEvent:()=>{},
+        missionDir:opts.missionDir||null,
+      });
+      networkWaitState=nw.waitState;
+      if(nw.action==="retry"){
+        current=await rerunReviewer();
+        continue;
+      }
+      if(nw.action==="interrupted"){
+        return {...current,status:"interrupted",interrupted:true};
+      }
+      current=applyNetworkWaitExhaustedEvidence(current,nw.maxWaitMin,nw.evidence);
+    }
     // RATE_LIMITED short-circuits before every other check (policy, PASS,
     // passthrough set) and before any recording: it escalates at once with
     // zero failure-budget writes. A non-throwing fatal falls through to the

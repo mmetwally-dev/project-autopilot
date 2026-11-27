@@ -1,18 +1,19 @@
 import {normalizeFindings, renderFinding} from "./review-feedback.mjs";
 import {PROVIDER_BALANCE_REASON} from "./idle-hang-watchdog.mjs";
+import {parseTaskResultContract} from "./task-result-contract.mjs";
 
 export const FAILURE_SCHEMA = "autopilot-failure.v1";
 
 export const FAILURE_DOMAINS = Object.freeze([
-  "planning", "implementation", "verification", "adapter", "infrastructure", "policy", "orchestrator"
+  "planning", "implementation", "verification", "adapter", "infrastructure", "policy", "orchestrator", "model"
 ]);
 
 export const FAILURE_CLASSES = Object.freeze([
   "CLI_UNAVAILABLE", "PROCESS_START_FAILED", "PROCESS_EXIT_NONZERO", "TIMEOUT",
-  "PERMISSION_DENIED", "PATH_UNSUPPORTED", "INVOCATION_MISMATCH",
+  "PERMISSION_DENIED", "PATH_OUTSIDE_WORKSPACE", "PATH_UNSUPPORTED", "INVOCATION_MISMATCH",
   "STRUCTURED_OUTPUT_MISSING", "STRUCTURED_OUTPUT_INVALID",
   "READ_ONLY_VIOLATION", "GIT_MUTATION_BLOCKED", "GIT_COMMIT_DETECTED",
-  "COMMAND_FAILED", "SERVER_UNAVAILABLE", "RATE_LIMITED", "AUTH_REQUIRED", "PROVIDER_ERROR", "IDLE_HANG", "IMPLEMENTATION_REJECTED",
+  "COMMAND_FAILED", "SERVER_UNAVAILABLE", "NETWORK_UNAVAILABLE", "RATE_LIMITED", "AUTH_REQUIRED", "PROVIDER_ERROR", "IDLE_HANG", "IMPLEMENTATION_REJECTED",
   "VERIFICATION_REJECTED", "PLANNING_REJECTED", "READ_ONLY_CONTAINMENT_UNAVAILABLE",
   "INTERNAL_CONTRACT_ERROR"
 ]);
@@ -20,6 +21,62 @@ export const FAILURE_CLASSES = Object.freeze([
 const permissionPattern = /permission(?:\s+was)?\s+(?:denied|rejected)|auto-?denied|not permitted|read-only file system/i;
 const pathPattern = /UNC paths are not supported|no such file or directory|cannot find the path|invalid cwd/i;
 const serverPattern = /ERR_CONNECTION_REFUSED|ECONNREFUSED|server unavailable/i;
+const LOCAL_ADDRESS_PATTERN = /\b127\.0\.0\.1\b|\blocalhost\b|::1|\b0\.0\.0\.0\b/i;
+
+export const PROVIDER_NETWORK_PATTERNS = Object.freeze([
+  { name: "cant_reach_api_server", pattern: /Can't reach the API server/i },
+  { name: "check_internet_or_dns", pattern: /check your internet or DNS/i },
+  { name: "workspace_routing_discovery_failed", pattern: /workspace routing discovery failed/i },
+  { name: "stream_disconnected_before_completion", pattern: /stream disconnected before completion/i },
+]);
+
+export const ERRNO_NETWORK_PATTERNS = Object.freeze([
+  { name: "EAI_AGAIN", pattern: /\bEAI_AGAIN\b/i },
+  { name: "ENOTFOUND", pattern: /\bENOTFOUND\b/i },
+  { name: "ECONNREFUSED", pattern: /\bECONNREFUSED\b/i },
+  { name: "ECONNRESET", pattern: /\bECONNRESET\b/i },
+  { name: "ETIMEDOUT_CONNECT", pattern: /\bconnect\s+ETIMEDOUT\b|\bETIMEDOUT\b[^\n]{0,40}\bconnect\b/i },
+  { name: "error_sending_request", pattern: /error sending request/i },
+  { name: "network_is_unreachable", pattern: /network is unreachable/i },
+]);
+
+export const NETWORK_UNAVAILABLE_PATTERNS = Object.freeze([
+  ...PROVIDER_NETWORK_PATTERNS,
+  ...ERRNO_NETWORK_PATTERNS,
+]);
+
+function extractMatchLine(raw, index, fallback) {
+  const lineStart = raw.lastIndexOf("\n", index) + 1;
+  const lineEndIdx = raw.indexOf("\n", index);
+  const line = (lineEndIdx === -1 ? raw.slice(lineStart) : raw.slice(lineStart, lineEndIdx)).trim();
+  const snippet = line.length > 240 ? `${line.slice(0, 240).trimEnd()}…` : (line || fallback);
+  return { line, snippet };
+}
+
+function matchPatternList(texts, patterns, { ignoreLocalLines = false } = {}) {
+  for (const raw of texts) {
+    if (typeof raw !== "string" || !raw) continue;
+    for (const entry of patterns) {
+      const m = raw.match(entry.pattern);
+      if (!m) continue;
+      const { line, snippet } = extractMatchLine(raw, m.index ?? 0, m[0]);
+      if (ignoreLocalLines && LOCAL_ADDRESS_PATTERN.test(line)) continue;
+      return { name: entry.name, match: m[0], snippet };
+    }
+  }
+  return null;
+}
+
+export function matchNetworkUnavailable(input) {
+  if (Array.isArray(input)) {
+    return matchPatternList(input, PROVIDER_NETWORK_PATTERNS)
+      || matchPatternList(input, ERRNO_NETWORK_PATTERNS, { ignoreLocalLines: true });
+  }
+  const providerTexts = [input?.stderr, input?.finalMessage, input?.output, input?.stdout];
+  const errnoTexts = [input?.stderr, input?.finalMessage];
+  return matchPatternList(providerTexts, PROVIDER_NETWORK_PATTERNS)
+    || matchPatternList(errnoTexts, ERRNO_NETWORK_PATTERNS, { ignoreLocalLines: true });
+}
 // Backlog #6(b): the CLI's own model-not-found diagnostic (1.x
 // ProviderModelNotFoundError, 2.x ModelUnavailableError / provider.no-route).
 // A provider/model-side failure, so it takes the existing PROVIDER_ERROR
@@ -33,6 +90,7 @@ const modelNotFoundPattern = /ProviderModelNotFoundError|ModelUnavailableError|M
 // "Authentication Fails, Your api key ****xxxx is invalid", "Invalid API key",
 // `invalid_api_key`, and an explicit "401 Unauthorized".
 const providerAuthPattern = /Authentication Fails|api[\s_-]?key[^\n]{0,120}?(?:is\s+)?invalid|invalid[\s_-]api[\s_-]?key|\b401\b[^\n]{0,60}?Unauthorized|Unauthorized[^\n]{0,60}?\b401\b/i;
+const agyAuthStderrPattern = /authentication required[^\n]{0,80}?Run 'agy' to log in|authentication failed or timed out/i;
 
 // Mission 022 phase 2 (task 2.2): the Phase 2.1 non-terminal out-of-sandbox
 // auto-reject warning observation. It is informational only — never a
@@ -63,7 +121,7 @@ export function unavailableVerdict() {
 // - exactly one valid record must sit on the final non-empty line.
 const SENTINEL_LINE = /^\s*AUTOPILOT_REVIEW\s*[:=]/;
 
-import { normalizePreviousStatuses } from "./code-review-rounds.mjs";
+import { normalizePreviousStatuses, extractPreviousFromFallbackJson } from "./code-review-rounds.mjs";
 
 export function parseReviewContract(output) {
   const text = typeof output === "string" ? output : `${output ?? ""}`;
@@ -71,14 +129,44 @@ export function parseReviewContract(output) {
   if (records.length === 0) return invalidContract("STRUCTURED_OUTPUT_MISSING", "Review sentinel was not observed.");
   const valid = records.filter(record => record.complete);
   if (valid.length === 0) return invalidContract("STRUCTURED_OUTPUT_INVALID", "Review sentinel was not a well-formed JSON object.");
-  if (valid.length > 1) return invalidContract("STRUCTURED_OUTPUT_INVALID", "Multiple review sentinels were observed.");
+  // Several valid sentinels: when every complete sentinel parses to a valid
+  // review object and all share the same "decision", the last valid one wins
+  // (same as identical sentinels); conflicting decisions still fail.
+  if (valid.length > 1) {
+    const decisions = new Set();
+    for (const candidate of valid) {
+      let parsed;
+      try {
+        parsed = JSON.parse(candidate.json);
+      } catch {
+        return invalidContract("STRUCTURED_OUTPUT_INVALID", "Review sentinel was not valid JSON.");
+      }
+      if (!["PASS", "FAIL", "INCOMPLETE"].includes(parsed?.decision) || !Array.isArray(parsed?.findings)) {
+        return invalidContract("STRUCTURED_OUTPUT_INVALID", "Review sentinel did not match the required schema.");
+      }
+      decisions.add(parsed.decision);
+    }
+    if (decisions.size > 1) {
+      return invalidContract("STRUCTURED_OUTPUT_INVALID", "Multiple review sentinels were observed.");
+    }
+  }
   const lines = text.split(/\r?\n/);
   let lastNonEmpty = -1;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     if (lines[index].trim() !== "") { lastNonEmpty = index; break; }
   }
-  const record = valid[0];
-  if (record.index !== lastNonEmpty) return invalidContract("STRUCTURED_OUTPUT_INVALID", "Review sentinel must appear on the final non-empty response line.");
+  const record = valid[valid.length - 1];
+  // Backlog #9: prose after the one valid sentinel is kept as notes. Anything
+  // that looks like another sentinel or JSON verdict still fails.
+  let trailingNotes = null;
+  if (record.index !== lastNonEmpty) {
+    const after = lines.slice(record.index + 1).filter(line => line.trim() !== "");
+    if (records.some(other => other.index > record.index)
+        || after.some(line => SENTINEL_LINE.test(line) || /^\s*[{\[]/.test(line) || /"decision"\s*:/.test(line))) {
+      return invalidContract("STRUCTURED_OUTPUT_INVALID", "Review sentinel must appear on the final non-empty response line.");
+    }
+    trailingNotes = after.join("\n").trim();
+  }
   try {
     const review = JSON.parse(record.json);
     if (!["PASS", "FAIL", "INCOMPLETE"].includes(review.decision) || !Array.isArray(review.findings)) {
@@ -106,7 +194,7 @@ export function parseReviewContract(output) {
     // whole job is to reject malformed reviewer output. Callers that want
     // the unusable entries gone get that from normalizeFindings().
     return {
-      contract: {status: "valid", error: null},
+      contract: trailingNotes ? {status: "valid", error: null, trailingNotes} : {status: "valid", error: null},
       verdict: {
         status: "available",
         decision: review.decision,
@@ -119,9 +207,15 @@ export function parseReviewContract(output) {
         // exist only here. Anything that needs those fields must read this
         // array, never `findings`.
         rawFindings: review.findings,
-        // Backlog #118: optional per-previous-finding fixed/not_fixed record
-        // (code-review rounds 2+). Tolerant: absent/malformed -> [].
-        previous: normalizePreviousStatuses(review.previous),
+        // Backlog #118 + s15 #4: optional per-previous-finding fixed/not_fixed
+        // record (code-review rounds 2+). When the sentinel omits "previous",
+        // accept a "previous" array from the last fenced/standalone JSON object
+        // in the same final message before the sentinel line.
+        previous: (() => {
+          const fromSentinel = normalizePreviousStatuses(review.previous);
+          if (fromSentinel.length > 0) return fromSentinel;
+          return extractPreviousFromFallbackJson(lines.slice(0, record.index).join("\n"));
+        })(),
         // Backlog #8: optional minor notes from a plan review. They never
         // fail the review; strings only, bounded like findings.
         notes: normalizeFindings(Array.isArray(review.notes) ? review.notes.filter(note => typeof note === "string") : []),
@@ -217,9 +311,52 @@ export function failure(failureClass, domain, retryable, evidence = []) {
 // the model's own output channel — assistant prose, file contents, and
 // genuinely successful tool results all live there indistinguishably from
 // failure text.
+function hasValidSentinelInText(text) {
+  if (typeof text !== "string" || !text) return false;
+  if (text.includes("AUTOPILOT_REVIEW") && parseReviewContract(text).contract.status === "valid") return true;
+  if (text.includes("AUTOPILOT_TASK_RESULT") && parseTaskResultContract(text).ok) return true;
+  return false;
+}
+
+function extractTextCandidatesFromStream(stdout) {
+  if (typeof stdout !== "string" || !stdout) return [];
+  if (!stdout.includes("AUTOPILOT_REVIEW") && !stdout.includes("AUTOPILOT_TASK_RESULT")) return [];
+  const texts = [stdout];
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    try {
+      const ev = JSON.parse(trimmed);
+      if (!ev || typeof ev !== "object") continue;
+      if (ev.type === "agent_message" && typeof ev.text === "string") texts.push(ev.text);
+      if (ev.item?.type === "agent_message" && typeof ev.item.text === "string") texts.push(ev.item.text);
+      if (ev.type === "text" && typeof ev.part?.text === "string") texts.push(ev.part.text);
+      if (ev.type === "result" && typeof ev.result === "string") texts.push(ev.result);
+      if (typeof ev.result?.response === "string") texts.push(ev.result.response);
+      if (typeof ev.response === "string") texts.push(ev.response);
+      if (ev.type === "assistant" && Array.isArray(ev.message?.content)) {
+        for (const block of ev.message.content) {
+          if (block?.type === "text" && typeof block.text === "string") texts.push(block.text);
+        }
+      }
+    } catch {}
+  }
+  return texts;
+}
+
+function observationHasValidSentinel(observation) {
+  if (observation?.hasValidSentinel === true) return true;
+  if (hasValidSentinelInText(observation?.output)) return true;
+  for (const text of extractTextCandidatesFromStream(observation?.stdout)) {
+    if (hasValidSentinelInText(text)) return true;
+  }
+  return false;
+}
+
 export function classifyObservedFailure(observation) {
   const evidence = observation?.evidence || [];
   const eventTypes = new Set(evidence.map(item => item?.type));
+  const validSentinel = observationHasValidSentinel(observation);
   // 1. Policy violation — always first; independent of process outcome.
   if (observation?.policyViolation) return policyFailure(observation.policyViolation, evidence);
   // 2. Process start failure.
@@ -251,7 +388,11 @@ export function classifyObservedFailure(observation) {
   // it comes from the adapter's own canonicalized tool-call outcome
   // (permissionDenied() in adapter-drivers.mjs only fires on a genuinely
   // failed/denied item, never on a successful one), not from scanning text.
-  if (eventTypes.has("permission_denied")) return failure("PERMISSION_DENIED", "adapter", false, evidence);
+  // Backlog #5: if the stream already produced a valid review or task-result
+  // sentinel anywhere, a permission_denied observation must never turn the
+  // run into a PERMISSION_DENIED failure — the verdict/result stands.
+  if (eventTypes.has("path_outside_workspace") && !eventTypes.has("permission_denied") && !validSentinel) return failure("PATH_OUTSIDE_WORKSPACE", "model", true, evidence);
+  if (eventTypes.has("permission_denied") && !validSentinel) return failure("PERMISSION_DENIED", "adapter", false, evidence);
   if (eventTypes.has("path_unsupported")) return failure("PATH_UNSUPPORTED", "infrastructure", false, evidence);
   if (eventTypes.has("server_unavailable")) return failure("SERVER_UNAVAILABLE", "infrastructure", true, evidence);
   // Text fallback: only a NONZERO exit's own stderr — never stdout, for any
@@ -264,6 +405,7 @@ export function classifyObservedFailure(observation) {
   // server errors from registered adapters (bad cwd, refused connection)
   // degrade to generic PROCESS_EXIT_NONZERO, since no adapter currently
   // emits path_unsupported/server_unavailable structured events.
+  const isFailedRun = observation?.status !== "completed" && ((observation?.exitCode !== undefined && observation?.exitCode !== 0) || observation?.status === "failed");
   if (observation?.exitCode !== 0) {
     const stderrText = String(observation?.stderr || "");
     // Phase 2.1 warning guard: an auto-rejected out-of-sandbox request is
@@ -273,8 +415,18 @@ export function classifyObservedFailure(observation) {
     const isAutoRejectStderr = autoRejectStderrPattern.test(stderrText);
     const invalidModelPattern = /invalid model selection/i;
     if (invalidModelPattern.test(stderrText)) return textFallbackFailure("INVOCATION_MISMATCH", "adapter", false, evidence, "invalid_model", stderrText);
-    if (!isAutoRejectStderr && permissionPattern.test(stderrText)) return textFallbackFailure("PERMISSION_DENIED", "adapter", false, evidence, "permission", stderrText);
+    if (!isAutoRejectStderr && !validSentinel && permissionPattern.test(stderrText)) return textFallbackFailure("PERMISSION_DENIED", "adapter", false, evidence, "permission", stderrText);
     if (pathPattern.test(stderrText)) return textFallbackFailure("PATH_UNSUPPORTED", "infrastructure", false, evidence, "path", stderrText);
+    if (isFailedRun) {
+      const netMatch = matchNetworkUnavailable(observation);
+      if (netMatch) {
+        return textFallbackFailure("NETWORK_UNAVAILABLE", "infrastructure", false, evidence, netMatch.name, netMatch.snippet, {
+          type: "network_unavailable",
+          reason: netMatch.name,
+          match: netMatch.match,
+        });
+      }
+    }
     if (serverPattern.test(stderrText)) return textFallbackFailure("SERVER_UNAVAILABLE", "infrastructure", true, evidence, "server", stderrText);
     // Backlog #12(b): rate-limit text keeps precedence over auth text — a
     // free-quota rejection must never be mistaken for a bad key. This is also
@@ -291,6 +443,14 @@ export function classifyObservedFailure(observation) {
     // Backlog #12(b): the CLI's own provider-credential rejection. Terminal
     // for that CLI (no same-adapter retry can fix a bad key), with the adapter
     // on the evidence so the escalation can name the right fix command.
+    const agyAuthMatch = stderrText.match(agyAuthStderrPattern);
+    if (agyAuthMatch) {
+      return textFallbackFailure("AUTH_REQUIRED", "adapter", false, evidence, "auth", stderrText, {
+        type: "auth_required",
+        adapter: observation?.adapter || "antigravity",
+        reason: agyAuthMatch[0],
+      });
+    }
     if (providerAuthPattern.test(stderrText)) {
       return textFallbackFailure("AUTH_REQUIRED", "adapter", false, evidence, "auth", stderrText, {
         type: "auth_required",
@@ -301,6 +461,16 @@ export function classifyObservedFailure(observation) {
     // Checked after the path/server patterns so their more specific causes
     // keep precedence; a model-not-found line is a provider error either way.
     if (modelNotFoundPattern.test(stderrText)) return textFallbackFailure("PROVIDER_ERROR", "infrastructure", true, evidence, "model_not_found", stderrText);
+  }
+  if (isFailedRun) {
+    const netMatch = matchNetworkUnavailable(observation);
+    if (netMatch) {
+      return textFallbackFailure("NETWORK_UNAVAILABLE", "infrastructure", false, evidence, netMatch.name, netMatch.snippet, {
+        type: "network_unavailable",
+        reason: netMatch.name,
+        match: netMatch.match,
+      });
+    }
   }
   // 6. Clean exit, nothing above matched => no observed process failure.
   // (A genuine content-level failure — a reviewer FAIL verdict, a missing
@@ -697,7 +867,7 @@ export function recordFailureBudget(state, policy, observedFailure, scope) {
   // in again is an operator action, not a retry — so it must not burn the
   // adapter budget either. INVOCATION_MISMATCH (invalid model/effort pair or
   // unknown agent) is non-retryable and must not consume the retry budget.
-  if (observedFailure?.class === "RATE_LIMITED" || observedFailure?.class === "AUTH_REQUIRED" || observedFailure?.class === "INVOCATION_MISMATCH") return {allowed: false, budget: name, used: 0, limit, scope};
+  if (observedFailure?.class === "RATE_LIMITED" || observedFailure?.class === "NETWORK_UNAVAILABLE" || observedFailure?.class === "AUTH_REQUIRED" || observedFailure?.class === "INVOCATION_MISMATCH") return {allowed: false, budget: name, used: 0, limit, scope};
   const key = `${name}:${scope}`;
   state.failureBudgets = state.failureBudgets || {};
   state.failureBudgets[key] = (state.failureBudgets[key] || 0) + 1;
@@ -708,6 +878,23 @@ export function clearStaleStandaloneBudgets(state) {
   if (!state?.failureBudgets || typeof state.failureBudgets !== "object") return;
   for (const k of Object.keys(state.failureBudgets)) {
     if (k.includes(":task:standalone:")) delete state.failureBudgets[k];
+  }
+}
+
+// Backlog #8: a successful run of the same adapter+role resets that adapter's
+// budget counter, so the budget counts consecutive failures, not mission-wide ones.
+export function resetAdapterRetryBudget(state, adapterOrResult, maybeRole) {
+  if (!state?.failureBudgets || typeof state.failureBudgets !== "object") return;
+  let adapter = adapterOrResult;
+  let role = maybeRole;
+  if (adapterOrResult && typeof adapterOrResult === "object") {
+    adapter = adapterOrResult.adapter;
+    role = adapterOrResult.role;
+  }
+  if (!adapter && !role) return;
+  const key = `adapterRetryBudget:adapter:${adapter || "unknown"}:${role || "unknown"}`;
+  if (key in state.failureBudgets) {
+    delete state.failureBudgets[key];
   }
 }
 

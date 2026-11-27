@@ -127,7 +127,7 @@ t("source: failed escalated run skips the normal fallback chain and re-runs on t
   assert.match(src, /let escalated=false;/);
   assert.match(src, /if\(escalated\)\{[\s\S]{0,900}result\.escalationFailed=true;[\s\S]{0,200}\}else\s*\n?\s*try\{\s*const from=/);
   assert.match(src, /escalation model \$\{role\.model\|\|"\?"\} failed/);
-  assert.match(src, /if\(result\?\.escalationFailed && Number\(__fallbackDepth\|\|0\)<8\)/);
+  assert.match(src, /if\((?:!isWrapUp && )?result\?\.escalationFailed && Number\(__fallbackDepth\|\|0\)<8\)/);
   const setup = fs.readFileSync(path.join(here, "setup.mjs"), "utf8");
   assert.match(setup, /if \(prior\) \{\s*console\.log\("  No model picked; keeping the current escalation model\."\)/);
 });

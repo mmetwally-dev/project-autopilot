@@ -1,5 +1,7 @@
 # Configuration reference
 
+For browser-checked phases (`tests.app_server` running + Playwright and Chromium installed), the verifier uses the approved `ap-browser-check <script.mjs>` wrapper, which saves the script, screenshots (`.png`), a Playwright trace (`trace.zip`, viewable afterwards with `npx playwright show-trace <trace.zip>`) and a video (`.webm`) into `<runDir>/browser-check/`. When `tests.app_server.allow_hosts` is configured, it also opens those host names (port 443 only) to the verifier's browser inside the closed namespace through an allowlisting HTTP CONNECT proxy on the host (`--proxy-server`, with `--proxy-bypass-list=127.0.0.1;localhost` so `APP_BASE_URL` stays direct); with no `allow_hosts`, no proxy is started and the browser stays fully closed. Screenshots are always kept; videos and traces are kept for the last verifier run of each phase and for failed runs, and deleted automatically 3 days after recording.
+
 <!-- config-reference:start -->
 ## Configuration reference
 
@@ -91,6 +93,7 @@ The agent CLI, model and session settings for each role.
 | `roles.verifier.fallbacks[].variant` | — | — | Model variant for this fallback entry; empty uses the role's value. |
 | `roles.free_models.auto_fallback` | `true` | — | When the effective model is free and the configured fallbacks are used up, try another free model from the same CLI (true) or not (false). |
 | `roles.free_models.max_turns` | `45` | >= 0 | Most turns a role running a free model may use; 0 turns this extra cap off, and at the limit the run is cut and may continue in a new session. |
+| `roles.free_models.exclude` | `[]` | — | Free models the automatic fallback must never use, as "adapter/model" strings with "*" wildcards (for example "opencode/beam-free"); empty means none excluded. |
 
 ### caps
 
@@ -104,24 +107,26 @@ Per-role turn, token and session caps plus the mission token backstop.
 | `caps.planner.max_turns` | `30` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.planner.max_tokens` | `200000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.planner.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
-| `caps.planner.wrap_up_at_tokens` | `180000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
+| `caps.planner.wrap_up_at_tokens` | `180000` | >= 1 | Token count at which this role must wrap up: at the limit the session is stopped and resumed for one short turn that writes the hand-off note (skipped when the note is fresh; Autopilot writes a fallback note if the session cannot be resumed or the turn fails). |
 | `caps.plan_reviewer.max_turns` | `30` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.plan_reviewer.max_tokens` | `250000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.plan_reviewer.extra_sessions` | `4` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
-| `caps.plan_reviewer.wrap_up_at_tokens` | `225000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
+| `caps.plan_reviewer.wrap_up_at_tokens` | `225000` | >= 1 | Token count at which this role must wrap up: at the limit the session is stopped and resumed for one short turn that writes the hand-off note (skipped when the note is fresh; Autopilot writes a fallback note if the session cannot be resumed or the turn fails). |
+| `caps.plan_reviewer.first_round_reasoning` | `null` | — | Optional reasoning/effort level for the plan_reviewer on the first full review round of a gate (e.g. "high"); null or unset uses the role's normal reasoning. |
 | `caps.implementer.max_turns` | `40` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.implementer.max_tokens` | `200000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.implementer.extra_sessions` | `5` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
-| `caps.implementer.wrap_up_at_tokens` | `180000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
+| `caps.implementer.wrap_up_at_tokens` | `180000` | >= 1 | Token count at which this role must wrap up: at the limit the session is stopped and resumed for one short turn that writes the hand-off note (skipped when the note is fresh; Autopilot writes a fallback note if the session cannot be resumed or the turn fails). |
 | `caps.code_reviewer.max_turns` | `22` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.code_reviewer.max_tokens` | `250000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.code_reviewer.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
-| `caps.code_reviewer.wrap_up_at_tokens` | `225000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
+| `caps.code_reviewer.wrap_up_at_tokens` | `225000` | >= 1 | Token count at which this role must wrap up: at the limit the session is stopped and resumed for one short turn that writes the hand-off note (skipped when the note is fresh; Autopilot writes a fallback note if the session cannot be resumed or the turn fails). |
 | `caps.verifier.max_turns` | `30` | >= 1 | Most model turns this role may use in one session; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.verifier.max_tokens` | `200000` | >= 1 | Largest single-turn context (input plus cached input) this role may use; at the limit the role stops and hands off, then extra_sessions decides whether a new session may continue. |
 | `caps.verifier.extra_sessions` | `2` | >= 0 | Extra sessions this role may start after hitting its turn or token cap; at the limit no further session starts and the mission stops or reports the cap. |
-| `caps.verifier.wrap_up_at_tokens` | `180000` | >= 1 | Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops. |
+| `caps.verifier.wrap_up_at_tokens` | `180000` | >= 1 | Token count at which this role must wrap up: at the limit the session is stopped and resumed for one short turn that writes the hand-off note (skipped when the note is fresh; Autopilot writes a fallback note if the session cannot be resumed or the turn fails). |
 | `caps.mission_token_backstop` | `6000000` | >= 1 | Cumulative raw tokens (input, cached input and output) allowed across one task; when exceeded the role wraps up and continues in a new backstop session, and two firings in a row stop the task with BACKSTOP_CONSECUTIVE_FIRINGS. |
+| `caps.final_review_max_turns` | `null` | >= 1 | Most model turns the final (whole-mission) code review may use in one session; null (default) uses 2x caps.code_reviewer.max_turns. |
 
 ### retries
 
@@ -133,12 +138,12 @@ How many times each stage may retry or revise before it stops and asks you.
 | `retries.spec_revisions` | `3` | >= 0 | Standalone with workflow.standalone_spec set to true: the most spec-stage planner revisions after a SPEC.md review FAIL. When they run out, the open findings are handed to the plan stage instead of stopping the mission. 0 = review once, never revise. |
 | `retries.implementation` | `5` | >= 0 | Implementer fix rounds per phase before the phase stops; 0 stops the phase on the first fix-requiring review with no fix round, at the limit the mission stops and asks you, and an absent value uses the built-in default of 5. |
 | `retries.verification` | `5` | >= 0 | Verifier FAIL rounds per phase before the phase stops; 0 stops the phase on the first verifier FAIL with no retry, at the limit the mission stops and asks you, and an absent value uses the built-in default of 5. |
-| `retries.final_review_fix_rounds` | `2` | >= 1 | Final-review fix rounds per mission before it stops; 1 allows one round, and at the limit the mission stops. |
+| `retries.final_review_fix_rounds` | `3` | >= 1 | Final-review fix rounds per mission before it stops; 1 allows one round, and at the limit the mission stops. |
 | `retries.cli_errors` | `3` | >= 0 | Same-model retries after a CLI error before the run gives up; 0 skips same-model retries and fails over or stops on the first CLI error, at the limit the run fails over or stops, and an absent value uses the built-in default of 3. |
 | `retries.infrastructure` | `3` | >= 0 | Retries after an infrastructure error such as a snapshot, sandbox or gate failure; 0 stops on the first infrastructure error, at the limit the mission stops, and an absent value uses the built-in default of 3. |
 | `retries.no_progress_sessions` | `2` | >= 1 | Sessions in a row that change no file before the task stops; 1 stops on the first session that changes nothing. |
 | `retries.extra_sessions_per_task` | `5` | >= 0 | Extra sessions the implementer may start per task after a cap; 0 starts no extra session and an absent value uses the built-in default of 5. The caps.implementer.extra_sessions value wins when both are set. |
-| `retries.escalate_after_not_fixed` | `2` | >= 1 | Reviews in a row that must report the same finding not fixed before the stronger escalation model is used; 1 escalates on the first not-fixed report. |
+| `retries.escalate_after_not_fixed` | `3` | >= 1 | Reviews in a row that must report the same finding not fixed before the stronger escalation model is used; 1 escalates on the first not-fixed report. |
 
 ### time_limits
 
@@ -148,8 +153,8 @@ Wall-clock limits and waits, with the unit in each name.
 | --- | --- | --- | --- |
 | `time_limits.role_timeout_minutes.default` | `60` | >= 0 | Time limit in minutes for one implementer task; past the limit the implementer call is stopped. |
 | `time_limits.role_timeout_minutes.verifier` | `180` | >= 0 | Session time limit for the verifier role, in minutes; past the limit the verifier call is stopped. |
-| `time_limits.call_backstop_minutes` | `200` | >= 0 | Hard wall-clock backstop for one role call, in minutes (not a mission limit); a call that runs past it is stopped. The old name mission_timeout_minutes is still read and migrated. |
-| `time_limits.role_timeout_floor_minutes` | `null` | >= 0 | Lowest session limit that measured run times may produce, in minutes; null or 0 uses the built-in 10-minute floor. |
+| `time_limits.call_backstop_minutes` | `200` | >= 0 | Hard wall-clock backstop for one role call, in minutes (not a mission limit); a call that runs past it is stopped. The final (whole-mission) review always gets this limit; it is not measured from per-phase reviews. The old name mission_timeout_minutes is still read and migrated. |
+| `time_limits.role_timeout_floor_minutes` | `null` | >= 0 | Lowest session limit that measured run times may produce for per-phase reviews and verifiers, in minutes; null or 0 uses the built-in 10-minute floor. |
 | `time_limits.silent_run_minutes` | `10` | >= 0 | Minutes without any output before an active run is treated as hung and stopped; 0 turns this watchdog off. |
 | `time_limits.no_first_output_minutes` | `3` | >= 0 | Minutes a new session may run without producing any output before it is stopped; 0 turns this check off. |
 | `time_limits.read_only_max_silence_minutes` | `15` | >= 0 | Maximum minutes a read-only role may stay silent even while a tool runs before it is stopped; 0 turns this cap off. |
@@ -162,7 +167,7 @@ Which review and approval stages run, and how work is committed.
 | Setting | Default | Allowed values | Description |
 | --- | --- | --- | --- |
 | `workflow.plan_review` | `true` | — | Run the GSD plan-review stage before implementation (true) or skip it (false); only GSD reads this setting. (GSD is not yet reviewed in this version). |
-| `workflow.plan_review_rounds_converge` | `true` | — | Make the first plan-review round review the whole plan and later rounds check only the requested fixes (true), or re-review the whole plan every round (false); default true. Applies to standalone and SpecKit planning; GSD uses its own plan-review settings. The legacy name plan_review_convergence is still read and migrated. |
+| `workflow.plan_review_rounds_converge` | `true` | — | Make the first plan-review round review the whole plan and later rounds check only the requested fixes (true), or re-review the whole plan every round (false); default true. When true, a PASS from a fix-only round gets one fresh full confirmation review; if that fails, later rounds run as full reviews that also re-check previous findings, so their PASS is accepted without another confirmation. Applies to standalone and SpecKit planning; GSD uses its own plan-review settings. The legacy name plan_review_convergence is still read and migrated. |
 | `workflow.standalone_spec` | `false` | — | Standalone only, off by default: set true to add a spec stage for big features — the planner first reads the related code and writes SPEC.md (user stories, numbered FR-### requirements, success criteria) and CODEMAP.md (code map), reviewed until they pass; then PLAN.md and TASKS.md, where every task cites the FRs it covers and the plan fails review while any FR has no task; the mission-final code review checks every FR. Costs more planning tokens; set false for small requests to keep the cheaper plan-only path. Default false. |
 | `workflow.gsd_planning_review` | `false` | — | Use the GSD planning-review stages (true) or skip them (false). (GSD is not yet reviewed in this version). |
 | `workflow.spec_review` | `true` | — | Intended to run a spec review stage before planning. Controlled by your SpecKit workflow.yml — add or remove the step there; this setting has no effect. |
@@ -189,6 +194,16 @@ Gate commands, reviewer requirement and verification policy.
 | `tests.not_run_in_missions[].reason` | — | — | Plain reason the files were excluded, for example server not reachable on 127.0.0.1:3000 or missing environment variable DATABASE_URL. |
 | `tests.not_run_in_missions[].command` | — | — | Exact command that runs these files by hand after the mission. |
 | `tests.not_run_in_missions_original_command` | `""` | — | The full test command setup ran before excluding not_run_in_missions files; empty when no files were excluded. |
+| `tests.app_server.start_command` | `""` | — | Command that starts the server, run through sh in its own process group; {port} is replaced by the chosen port, for example npx next dev --webpack -p {port} -H 127.0.0.1. Empty = no server. |
+| `tests.app_server.cwd` | `""` | — | Repository-relative folder the start command runs in; empty = the repository root. |
+| `tests.app_server.port` | `"auto"` | >= 1 | auto picks a free port for every gate run; or a fixed port number. |
+| `tests.app_server.ready_url` | `"/"` | — | Path requested until the server answers with an HTTP status below 500, for example /login. |
+| `tests.app_server.warmup_urls` | `[]` | — | Paths requested once after the server is ready (dev servers compile each page on first request, which can take a minute). |
+| `tests.app_server.ready_timeout_ms` | `180000` | >= 1000 | How long to wait for the server to become ready, in milliseconds; on timeout the gate fails with the server output. |
+| `tests.app_server.env_file` | `""` | — | Repository-relative env file (for example apps/web/.env.local) whose values go to the server process and the verifier's ap-browser-check wrapper only (the verifier brief lists only variable names); its values never reach briefs, logs, state or reports. |
+| `tests.app_server.env` | `{}` | — | Extra fixed environment variables for the server process only (name: value); use test values, never production secrets. |
+| `tests.app_server.allow_hosts` | `[]` | — | Host names the server and the verifier's browser need on the outside network (for example the project's Supabase and PowerSync domains). Empty = no outside network at all. When set, the server runs on the host network (per-host filtering is not possible without root) while gate commands and the verifier's browser stay in the closed namespace: they reach the server through a unix-socket bridge, and the browser reaches only allow_hosts on port 443 through an allowlisting HTTP CONNECT proxy on the host (every other host or port is refused with 403 and logged). |
+| `tests.app_server.credential_vars` | `[]` | — | Environment variable names from env_file/env exposed to the verifier's ap-browser-check script and listed in the verifier brief. Empty = names starting with E2E_ or TEST_ and ending with EMAIL, USER, USERNAME or PASSWORD. Only these credential values are injected into the browser script env; other secrets remain server-only and are never exposed (all secrets are still masked in output). |
 | `tests.require_reviewer` | `true` | — | Intended to require a reviewer verdict before a phase passes. Fixed in this version; changing it has no effect. |
 | `tests.browser` | `"native"` | `"native"`, `"playwright"`, `"both"` | Browser capability used for verification: native (the agent's own browser), playwright or both. |
 | `tests.require_browser` | `"when-task-requires"` | `"always"`, `"when-task-requires"`, `"never"` | How browser capabilities are required for the verifier: always adds them to every call; when-task-requires and never add them only when the task itself needs a browser. |
@@ -205,6 +220,7 @@ What roles may do and which safety checks are enforced.
 | `safety.allow_git_commit` | `false` | — | Setting this true is rejected; Autopilot never commits, so keep it false. |
 | `safety.allow_git_push` | `false` | — | Setting this true is rejected; Autopilot never pushes, so keep it false. |
 | `safety.allow_destructive_operations` | `false` | — | Setting this true is rejected; destructive operations stay blocked, so keep it false. |
+| `safety.allow_docker` | `false` | — | Opt-in: mount /var/run/docker.sock and the docker/supabase CLI binaries into the agent sandbox. WARNING: access to the Docker socket is root-equivalent access to this machine; enable only for projects that need a local database stack. |
 | `safety.stop_on_sandbox_violation` | `true` | — | Setting this false is rejected; a sandbox or relay violation always stops the mission, so keep it true. |
 | `safety.block_git_in_roles` | `true` | — | Blocks git commit and push inside role sessions. Always on — cannot be turned off; changing it has no effect. |
 | `safety.check_read_only_roles` | `true` | — | Checks that read-only roles changed no file by comparing before and after snapshots. Always on — cannot be turned off; changing it has no effect. |
@@ -258,9 +274,13 @@ Paths, hand-off limits and capability defaults.
 | `advanced.handoff_note_max_chars` | `4000` | >= 1000 | Maximum characters in a hand-off note; longer text is cut, and values below 1000 are rejected. |
 | `advanced.handoff_wrapup_tokens` | `180000` | >= 1 | Token count at which a role is told to wrap up its hand-off; it must be below the implementer token cap. |
 | `advanced.fallback_retry_primary_minutes` | `60` | >= 0 | Minutes to wait before retrying the primary model after a fallback took over; 0 uses the built-in 60-minute wait. |
+| `advanced.rate_limit_wait_max_minutes` | `60` | >= 0 | Maximum minutes to wait for a provider rate-limit reset before escalating; 0 disables waiting and escalates immediately; defaults to 60. |
+| `advanced.network_wait_minutes` | `60` | >= 0 | Maximum minutes to wait with backoff when the network is unavailable before escalating; 0 disables waiting and escalates immediately; defaults to 60. |
+| `advanced.daily_reset_time` | `"03:00"` | — | Local time of day (HH:MM) when providers reset daily free quota limits; defaults to '03:00'. |
 | `advanced.checkpoint_after_task` | `true` | — | Intended to write a checkpoint after each task. Fixed in this version; changing it has no effect. |
 | `advanced.checkpoint_after_phase` | `true` | — | Intended to write a checkpoint after each phase. Fixed in this version; changing it has no effect. |
 | `advanced.capabilities.project_defaults` | `[]` | — | Capabilities assumed present for every role in this project; empty adds none. |
+| `advanced.capabilities.role_requirements` | `{}` | — | Extra capabilities required per role, keyed by role name; empty adds none. |
 | `advanced.capabilities.safety_denied` | `[]` | — | Intended to deny capabilities for safety. Fixed in this version; changing it has no effect. |
 | `advanced.capabilities.legacy_text_inference` | `false` | — | Infer browser capabilities from task text for the verifier (legacy); false keeps inference off. |
 <!-- config-reference:end -->

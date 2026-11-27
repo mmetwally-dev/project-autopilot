@@ -34,8 +34,8 @@ check("SpecKit fix pass goes through the capped helper with its framework",
 check("every runFinalReviewFixRounds caller is covered (two helpers' call sites only)",
   [...src.matchAll(/await runFinalReviewFixRounds\(/g)].length === 2);
 const bareImplementerRelays = [...src.matchAll(/relay(?:Async)?\("implementer",/g)].length;
-check("no implementer relay remains without capEnabled (task x2, GSD, fix helper)",
-  bareImplementerRelays === 4
+check("no implementer relay remains without capEnabled (task x2, combined re-verify x2, GSD, fix helper)",
+  bareImplementerRelays === 6
   && [...callArgs(src, 'relay("implementer",'), ...callArgs(src, 'relayAsync("implementer",')].every((call) => callOptions(call).includes("capEnabled:true")));
 
 // ── Behaviour ──

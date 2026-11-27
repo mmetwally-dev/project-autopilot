@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
 import { modelBriefLines } from "./model-briefs.mjs";
+import { DEFECT_PATTERN_REVIEW_INSTRUCTION } from "./review-feedback.mjs";
+import { REVIEWER_NO_AP_SKILLS_LINE } from "./autopilot.mjs";
 
 globalThis.modelBriefLines = modelBriefLines;
 
@@ -40,7 +42,7 @@ const IMPLEMENTER_11 = "11. If the work is bigger than your turns: hand-off note
 
 // Build brief evaluator from autopilot.mjs source
 const evaluateBrief = new Function(
-  "roleName", "promptRepository", "mission", "role", "readOnly", "promptScratch", "disposableWorkspace", "relayTask", "review", "planRevision = null",
+  "roleName", "promptRepository", "mission", "role", "readOnly", "promptScratch", "disposableWorkspace", "relayTask", "review", "planRevision = null", "previousScratchSeeded = false", "DEFECT_PATTERN_REVIEW_INSTRUCTION", "REVIEWER_NO_AP_SKILLS_LINE",
   `return (${rawRelayMatch[1]}).filter(Boolean).join("\\n");`
 );
 
@@ -54,9 +56,10 @@ function buildBrief({
   disposableWorkspace = false,
   relayTask = "task details",
   review = false,
-  planRevision = null
+  planRevision = null,
+  previousScratchSeeded = false
 } = {}) {
-  return evaluateBrief(roleName, promptRepository, mission, role, readOnly, promptScratch, disposableWorkspace, relayTask, review, planRevision);
+  return evaluateBrief(roleName, promptRepository, mission, role, readOnly, promptScratch, disposableWorkspace, relayTask, review, planRevision, previousScratchSeeded, DEFECT_PATTERN_REVIEW_INSTRUCTION, REVIEWER_NO_AP_SKILLS_LINE);
 }
 
 // Common brief assertions: verify baseline delegated worker & foreground instructions
@@ -261,6 +264,14 @@ for (const roleName of ["plan_reviewer", "code_reviewer", "verifier"]) {
     `posMission=${posMission}, posGemini=${posGemini}`
   );
 }
+
+const readOnlyBriefForSkillsCheck = buildBrief({roleName: "plan_reviewer", role: {adapter: "antigravity", model: "gemini-2.5-pro"}, readOnly: true, review: true});
+check("readOnly brief contains REVIEWER_NO_AP_SKILLS_LINE and writable planner/implementer briefs do not",
+  readOnlyBriefForSkillsCheck.includes(REVIEWER_NO_AP_SKILLS_LINE)
+  && !agyPlannerBrief.includes(REVIEWER_NO_AP_SKILLS_LINE)
+  && !agyImplementerBrief.includes(REVIEWER_NO_AP_SKILLS_LINE),
+  {readOnlyHas: readOnlyBriefForSkillsCheck.includes(REVIEWER_NO_AP_SKILLS_LINE), plannerHas: agyPlannerBrief.includes(REVIEWER_NO_AP_SKILLS_LINE), implementerHas: agyImplementerBrief.includes(REVIEWER_NO_AP_SKILLS_LINE)}
+);
 
 if (failed > 0) {
   console.error(`FAILED: ${failed} check(s) failed`);

@@ -96,7 +96,8 @@
         },
         "free_models": {
           "auto_fallback": true,
-          "max_turns": 45
+          "max_turns": 45,
+          "exclude": []
         }
       },
       "properties": {
@@ -744,7 +745,8 @@
           "description": "The free-model fallback pool.",
           "default": {
             "auto_fallback": true,
-            "max_turns": 45
+            "max_turns": 45,
+            "exclude": []
           },
           "properties": {
             "auto_fallback": {
@@ -757,6 +759,14 @@
               "description": "Most turns a role running a free model may use; 0 turns this extra cap off, and at the limit the run is cut and may continue in a new session.",
               "default": 45,
               "minimum": 0
+            },
+            "exclude": {
+              "type": "array",
+              "description": "Free models the automatic fallback must never use, as \"adapter/model\" strings with \"*\" wildcards (for example \"opencode/beam-free\"); empty means none excluded.",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
             }
           },
           "additionalProperties": false,
@@ -807,7 +817,8 @@
           "extra_sessions": 2,
           "wrap_up_at_tokens": 180000
         },
-        "mission_token_backstop": 6000000
+        "mission_token_backstop": 6000000,
+        "final_review_max_turns": null
       },
       "properties": {
         "task_size_target_turns": {
@@ -858,7 +869,7 @@
             },
             "wrap_up_at_tokens": {
               "type": "number",
-              "description": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
+              "description": "Token count at which this role must wrap up: at the limit the session is stopped and resumed for one short turn that writes the hand-off note (skipped when the note is fresh; Autopilot writes a fallback note if the session cannot be resumed or the turn fails).",
               "default": 180000,
               "minimum": 1
             }
@@ -898,9 +909,17 @@
             },
             "wrap_up_at_tokens": {
               "type": "number",
-              "description": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
+              "description": "Token count at which this role must wrap up: at the limit the session is stopped and resumed for one short turn that writes the hand-off note (skipped when the note is fresh; Autopilot writes a fallback note if the session cannot be resumed or the turn fails).",
               "default": 225000,
               "minimum": 1
+            },
+            "first_round_reasoning": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Optional reasoning/effort level for the plan_reviewer on the first full review round of a gate (e.g. \"high\"); null or unset uses the role's normal reasoning.",
+              "default": null
             }
           },
           "additionalProperties": false,
@@ -938,7 +957,7 @@
             },
             "wrap_up_at_tokens": {
               "type": "number",
-              "description": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
+              "description": "Token count at which this role must wrap up: at the limit the session is stopped and resumed for one short turn that writes the hand-off note (skipped when the note is fresh; Autopilot writes a fallback note if the session cannot be resumed or the turn fails).",
               "default": 180000,
               "minimum": 1
             }
@@ -978,7 +997,7 @@
             },
             "wrap_up_at_tokens": {
               "type": "number",
-              "description": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
+              "description": "Token count at which this role must wrap up: at the limit the session is stopped and resumed for one short turn that writes the hand-off note (skipped when the note is fresh; Autopilot writes a fallback note if the session cannot be resumed or the turn fails).",
               "default": 225000,
               "minimum": 1
             }
@@ -1018,7 +1037,7 @@
             },
             "wrap_up_at_tokens": {
               "type": "number",
-              "description": "Token count at which this role is told to wrap up and hand off before max_tokens; at the limit the role writes its hand-off and stops.",
+              "description": "Token count at which this role must wrap up: at the limit the session is stopped and resumed for one short turn that writes the hand-off note (skipped when the note is fresh; Autopilot writes a fallback note if the session cannot be resumed or the turn fails).",
               "default": 180000,
               "minimum": 1
             }
@@ -1032,6 +1051,15 @@
           "type": "number",
           "description": "Cumulative raw tokens (input, cached input and output) allowed across one task; when exceeded the role wraps up and continues in a new backstop session, and two firings in a row stop the task with BACKSTOP_CONSECUTIVE_FIRINGS.",
           "default": 6000000,
+          "minimum": 1
+        },
+        "final_review_max_turns": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Most model turns the final (whole-mission) code review may use in one session; null (default) uses 2x caps.code_reviewer.max_turns.",
+          "default": null,
           "minimum": 1
         }
       },
@@ -1048,12 +1076,12 @@
         "spec_revisions": 3,
         "implementation": 5,
         "verification": 5,
-        "final_review_fix_rounds": 2,
+        "final_review_fix_rounds": 3,
         "cli_errors": 3,
         "infrastructure": 3,
         "no_progress_sessions": 2,
         "extra_sessions_per_task": 5,
-        "escalate_after_not_fixed": 2
+        "escalate_after_not_fixed": 3
       },
       "properties": {
         "plan_revisions": {
@@ -1083,7 +1111,7 @@
         "final_review_fix_rounds": {
           "type": "number",
           "description": "Final-review fix rounds per mission before it stops; 1 allows one round, and at the limit the mission stops.",
-          "default": 2,
+          "default": 3,
           "minimum": 1
         },
         "cli_errors": {
@@ -1113,7 +1141,7 @@
         "escalate_after_not_fixed": {
           "type": "number",
           "description": "Reviews in a row that must report the same finding not fixed before the stronger escalation model is used; 1 escalates on the first not-fixed report.",
-          "default": 2,
+          "default": 3,
           "minimum": 1
         }
       },
@@ -1180,7 +1208,7 @@
             "number",
             "null"
           ],
-          "description": "Hard wall-clock backstop for one role call, in minutes (not a mission limit); a call that runs past it is stopped. The old name mission_timeout_minutes is still read and migrated.",
+          "description": "Hard wall-clock backstop for one role call, in minutes (not a mission limit); a call that runs past it is stopped. The final (whole-mission) review always gets this limit; it is not measured from per-phase reviews. The old name mission_timeout_minutes is still read and migrated.",
           "default": 200,
           "minimum": 0
         },
@@ -1189,7 +1217,7 @@
             "number",
             "null"
           ],
-          "description": "Lowest session limit that measured run times may produce, in minutes; null or 0 uses the built-in 10-minute floor.",
+          "description": "Lowest session limit that measured run times may produce for per-phase reviews and verifiers, in minutes; null or 0 uses the built-in 10-minute floor.",
           "default": null,
           "minimum": 0
         },
@@ -1261,7 +1289,7 @@
         },
         "plan_review_rounds_converge": {
           "type": "boolean",
-          "description": "Make the first plan-review round review the whole plan and later rounds check only the requested fixes (true), or re-review the whole plan every round (false); default true. Applies to standalone and SpecKit planning; GSD uses its own plan-review settings. The legacy name plan_review_convergence is still read and migrated.",
+          "description": "Make the first plan-review round review the whole plan and later rounds check only the requested fixes (true), or re-review the whole plan every round (false); default true. When true, a PASS from a fix-only round gets one fresh full confirmation review; if that fails, later rounds run as full reviews that also re-check previous findings, so their PASS is accepted without another confirmation. Applies to standalone and SpecKit planning; GSD uses its own plan-review settings. The legacy name plan_review_convergence is still read and migrated.",
           "default": true
         },
         "standalone_spec": {
@@ -1335,6 +1363,18 @@
         "offline_test_tools": "",
         "not_run_in_missions": [],
         "not_run_in_missions_original_command": "",
+        "app_server": {
+          "start_command": "",
+          "cwd": "",
+          "port": "auto",
+          "ready_url": "/",
+          "warmup_urls": [],
+          "ready_timeout_ms": 180000,
+          "env_file": "",
+          "env": {},
+          "allow_hosts": [],
+          "credential_vars": []
+        },
         "require_reviewer": true,
         "browser": "native",
         "require_browser": "when-task-requires",
@@ -1406,6 +1446,100 @@
           "description": "The full test command setup ran before excluding not_run_in_missions files; empty when no files were excluded.",
           "default": ""
         },
+        "app_server": {
+          "type": "object",
+          "description": "Optional app/dev server the gate starts before the gate commands and always stops afterwards; off while start_command is empty. Gate commands then see APP_BASE_URL (and PORT). The server, the gate commands and the verifier's browser command share one isolated network namespace (loopback only); the server is kept for the verifier run of the same phase and stopped afterwards.",
+          "default": {
+            "start_command": "",
+            "cwd": "",
+            "port": "auto",
+            "ready_url": "/",
+            "warmup_urls": [],
+            "ready_timeout_ms": 180000,
+            "env_file": "",
+            "env": {},
+            "allow_hosts": [],
+            "credential_vars": []
+          },
+          "properties": {
+            "start_command": {
+              "type": "string",
+              "description": "Command that starts the server, run through sh in its own process group; {port} is replaced by the chosen port, for example npx next dev --webpack -p {port} -H 127.0.0.1. Empty = no server.",
+              "default": ""
+            },
+            "cwd": {
+              "type": "string",
+              "description": "Repository-relative folder the start command runs in; empty = the repository root.",
+              "default": ""
+            },
+            "port": {
+              "type": [
+                "string",
+                "integer"
+              ],
+              "description": "auto picks a free port for every gate run; or a fixed port number.",
+              "default": "auto",
+              "minimum": 1
+            },
+            "ready_url": {
+              "type": "string",
+              "description": "Path requested until the server answers with an HTTP status below 500, for example /login.",
+              "default": "/"
+            },
+            "warmup_urls": {
+              "type": "array",
+              "description": "Paths requested once after the server is ready (dev servers compile each page on first request, which can take a minute).",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "ready_timeout_ms": {
+              "type": "number",
+              "description": "How long to wait for the server to become ready, in milliseconds; on timeout the gate fails with the server output.",
+              "default": 180000,
+              "minimum": 1000
+            },
+            "env_file": {
+              "type": "string",
+              "description": "Repository-relative env file (for example apps/web/.env.local) whose values go to the server process and the verifier's ap-browser-check wrapper only (the verifier brief lists only variable names); its values never reach briefs, logs, state or reports.",
+              "default": ""
+            },
+            "env": {
+              "type": "object",
+              "description": "Extra fixed environment variables for the server process only (name: value); use test values, never production secrets.",
+              "default": {},
+              "properties": {},
+              "additionalProperties": false,
+              "patternProperties": {
+                "^_": {},
+                "^[A-Za-z_][A-Za-z0-9_]*$": {
+                  "type": "string"
+                }
+              }
+            },
+            "allow_hosts": {
+              "type": "array",
+              "description": "Host names the server and the verifier's browser need on the outside network (for example the project's Supabase and PowerSync domains). Empty = no outside network at all. When set, the server runs on the host network (per-host filtering is not possible without root) while gate commands and the verifier's browser stay in the closed namespace: they reach the server through a unix-socket bridge, and the browser reaches only allow_hosts on port 443 through an allowlisting HTTP CONNECT proxy on the host (every other host or port is refused with 403 and logged).",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "credential_vars": {
+              "type": "array",
+              "description": "Environment variable names from env_file/env exposed to the verifier's ap-browser-check script and listed in the verifier brief. Empty = names starting with E2E_ or TEST_ and ending with EMAIL, USER, USERNAME or PASSWORD. Only these credential values are injected into the browser script env; other secrets remain server-only and are never exposed (all secrets are still masked in output).",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^_": {}
+          }
+        },
         "require_reviewer": {
           "type": "boolean",
           "description": "Intended to require a reviewer verdict before a phase passes. Fixed in this version; changing it has no effect.",
@@ -1471,6 +1605,7 @@
         "allow_git_commit": false,
         "allow_git_push": false,
         "allow_destructive_operations": false,
+        "allow_docker": false,
         "stop_on_sandbox_violation": true,
         "block_git_in_roles": true,
         "check_read_only_roles": true,
@@ -1491,6 +1626,11 @@
         "allow_destructive_operations": {
           "type": "boolean",
           "description": "Setting this true is rejected; destructive operations stay blocked, so keep it false.",
+          "default": false
+        },
+        "allow_docker": {
+          "type": "boolean",
+          "description": "Opt-in: mount /var/run/docker.sock and the docker/supabase CLI binaries into the agent sandbox. WARNING: access to the Docker socket is root-equivalent access to this machine; enable only for projects that need a local database stack.",
           "default": false
         },
         "stop_on_sandbox_violation": {
@@ -1823,6 +1963,9 @@
         "handoff_note_max_chars": 4000,
         "handoff_wrapup_tokens": 180000,
         "fallback_retry_primary_minutes": 60,
+        "rate_limit_wait_max_minutes": 60,
+        "network_wait_minutes": 60,
+        "daily_reset_time": "03:00",
         "checkpoint_after_task": true,
         "checkpoint_after_phase": true,
         "capabilities": {
@@ -1866,6 +2009,23 @@
           "description": "Minutes to wait before retrying the primary model after a fallback took over; 0 uses the built-in 60-minute wait.",
           "default": 60,
           "minimum": 0
+        },
+        "rate_limit_wait_max_minutes": {
+          "type": "number",
+          "description": "Maximum minutes to wait for a provider rate-limit reset before escalating; 0 disables waiting and escalates immediately; defaults to 60.",
+          "default": 60,
+          "minimum": 0
+        },
+        "network_wait_minutes": {
+          "type": "number",
+          "description": "Maximum minutes to wait with backoff when the network is unavailable before escalating; 0 disables waiting and escalates immediately; defaults to 60.",
+          "default": 60,
+          "minimum": 0
+        },
+        "daily_reset_time": {
+          "type": "string",
+          "description": "Local time of day (HH:MM) when providers reset daily free quota limits; defaults to '03:00'.",
+          "default": "03:00"
         },
         "checkpoint_after_task": {
           "type": "boolean",

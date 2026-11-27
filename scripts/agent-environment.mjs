@@ -274,6 +274,8 @@ export function assembleAgentEnvironment({
     : {...guardedEnv, ...nativeAgentLocationEnvironment(hostEnv)};
   spawnEnv.GIT_PAGER = "cat";
   spawnEnv.PAGER = "cat";
+  spawnEnv.PLAYWRIGHT_HTML_OPEN = "never";
+  spawnEnv.BROWSER = "none";
   // bridgeEnv: spawnEnv plus the bwrap --setenv overlay.
   const setenvOverlay = envelope?.available ? parseSetenvOverlay(envelope.args) : {};
   const bridgeEnv = applyOverlay(spawnEnv, setenvOverlay);

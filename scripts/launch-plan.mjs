@@ -42,7 +42,8 @@ export function assembleAdapterLaunchPlan({
   sharedCacheCompanionMount = null,
   extraEnv = {},
   sessionStoreMounts = [],
-  credentialDataMounts = []
+  credentialDataMounts = [],
+  browserBrokerSocket = null
 }) {
   const transport = resolveAdapterTransport({driver, profile: adapterProviderProfile, request: launchRequest});
   if (!transport?.available) {
@@ -69,7 +70,8 @@ export function assembleAdapterLaunchPlan({
     sharedCacheCompanionMount,
     extraEnv,
     sessionStoreMounts,
-    credentialDataMounts
+    credentialDataMounts,
+    browserBrokerSocket
   });
   if (!envelope.available) {
     return {available: false, schema: ADAPTER_LAUNCH_PLAN_SCHEMA, stage: "envelope", reason: envelope.reason, transport, envelope};

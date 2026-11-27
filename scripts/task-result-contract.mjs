@@ -9,12 +9,13 @@
 // so the parser is unit-testable without importing the orchestrator.
 //
 // Sentinel recognition mirrors `failure-contract.mjs`'s `AUTOPILOT_REVIEW`
-// parser exactly, because the same three failure modes matter:
+// parser, because similar failure modes matter:
 // - a MISSING sentinel is an invalid result;
 // - a MALFORMED sentinel (not a well-formed JSON object, or off the final
 //   non-empty line) is an invalid result;
-// - MORE THAN ONE sentinel is an invalid result — a duplicate is rejected, not
-//   silently resolved to one of them.
+// - when MULTIPLE valid sentinels are observed (e.g. concatenated multi-turn
+//   replies), the LAST sentinel is used (the model's final word). Still fail
+//   when the last sentinel is invalid, or when none is valid.
 export const TASK_RESULT_CODE_MISSING = "STRUCTURED_OUTPUT_MISSING";
 export const TASK_RESULT_CODE_INVALID = "STRUCTURED_OUTPUT_INVALID";
 
@@ -105,15 +106,14 @@ function validateTaskLocalCheck(check) {
 
 // Parse the final-line sentinel. Returns `{ok:true, summary, taskLocalCheck}`
 // or a fail-closed `{ok:false, code, reason}`.
+// When several valid sentinels are present, the last one wins.
 export function parseTaskResultContract(output) {
   const text = typeof output === "string" ? output : `${output ?? ""}`;
   const records = sentinelRecords(text);
   if (records.length === 0) return invalid(TASK_RESULT_CODE_MISSING, "Task-result sentinel was not observed.");
-  const valid = records.filter((record) => record.complete);
-  if (valid.length === 0) return invalid(TASK_RESULT_CODE_INVALID, "Task-result sentinel was not a well-formed JSON object.");
-  if (valid.length > 1) return invalid(TASK_RESULT_CODE_INVALID, "Multiple task-result sentinels were observed.");
+  const record = records[records.length - 1];
+  if (!record.complete) return invalid(TASK_RESULT_CODE_INVALID, "Task-result sentinel was not a well-formed JSON object.");
   const lines = text.split(/\r?\n/);
-  const record = valid[0];
   let sawStrayAfter = false;
   let lastNonEmpty = -1;
   for (let index = lines.length - 1; index >= 0; index -= 1) {

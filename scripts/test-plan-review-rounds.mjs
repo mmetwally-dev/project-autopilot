@@ -2,8 +2,12 @@
 import fs from "node:fs";
 import {
   PLAN_REVIEW_EXHAUSTIVE_LINE, PLAN_REVIEW_VERIFY_LINE, PLAN_REVIEW_FULL_LINE,
-  planReviewerRoundLines, plannerEarlierRoundsText, recordPlanReviewRound,
-  seedPlanReviewHistory, clearPlanReviewHistory, planReviewRoundCount,
+  PLAN_REVIEW_CONFIRMATION_LINE,
+  planReviewerRoundLines, plannerEarlierRoundsText,
+  recordPlanReviewRound, seedPlanReviewHistory, clearPlanReviewHistory, planReviewRoundCount,
+  planReviewPassNeedsConfirmation, planReviewConfirmationPending, planReviewConfirmationFailed,
+  markPlanReviewConfirmationPending, markPlanReviewConfirmationFailed, clearPlanReviewConfirmation,
+  isFullPlanReviewRound,
 } from "./plan-review-rounds.mjs";
 
 let failed = 0;
@@ -52,6 +56,74 @@ const s2 = {};
 seedPlanReviewHistory(s2, K, ["legacy finding"]);
 seedPlanReviewHistory(s2, K, ["other"]);
 check("seed records once", planReviewRoundCount(s2, K) === 1);
+
+// Backlog #8: every full round must list all blocking problems at once.
+check("round-1 brief asks for the whole plan in one round",
+  /go through the WHOLE plan/.test(PLAN_REVIEW_EXHAUSTIVE_LINE)
+  && /not one batch at a time/.test(PLAN_REVIEW_EXHAUSTIVE_LINE));
+check("full brief demands every blocking problem in one round",
+  /go through the WHOLE plan/.test(PLAN_REVIEW_FULL_LINE)
+  && /EVERY blocking problem in this one round/.test(PLAN_REVIEW_FULL_LINE)
+  && /not one batch at a time/.test(PLAN_REVIEW_FULL_LINE));
+check("confirmation brief demands every blocking problem in one round",
+  /go through the WHOLE plan/.test(PLAN_REVIEW_CONFIRMATION_LINE)
+  && /EVERY blocking problem in this one round/.test(PLAN_REVIEW_CONFIRMATION_LINE)
+  && /not one batch at a time/.test(PLAN_REVIEW_CONFIRMATION_LINE));
+check("full and confirmation say a later full round raising unchanged text means this round missed it",
+  [PLAN_REVIEW_FULL_LINE, PLAN_REVIEW_CONFIRMATION_LINE].every(t => /later full round/.test(t) && /unchanged since this round means this round missed it/.test(t)));
+check("full and confirmation keep findings BLOCKING-only and send minor points to notes",
+  [PLAN_REVIEW_FULL_LINE, PLAN_REVIEW_CONFIRMATION_LINE].every(t => /only BLOCKING problems in "findings"/.test(t) && /do not pad them with small issues/.test(t) && /minor points in "notes"/.test(t)));
+check("verify brief checks the fix text itself, not just old-finding status",
+  /re-read the section\(s\) the revision changed to fix it/.test(PLAN_REVIEW_VERIFY_LINE)
+  && /check the new text is itself correct and complete/.test(PLAN_REVIEW_VERIFY_LINE)
+  && /A defect in the fix text is a NEW finding introduced by this revision/.test(PLAN_REVIEW_VERIFY_LINE));
+check("verify brief still does not re-review unchanged parts",
+  /do not re-review the unchanged parts of the plan/.test(PLAN_REVIEW_VERIFY_LINE)
+  && /"previous"/.test(PLAN_REVIEW_VERIFY_LINE));
+
+// Backlog #8: after a confirmation FAIL every later round is a FULL review
+// that also lists the previous findings; its PASS needs no confirmation.
+{
+  const cf = {};
+  const CFK = "standalone-plan-cf";
+  recordPlanReviewRound(cf, CFK, ["PLAN.md Scope 2: confirmation finding alpha"]);
+  markPlanReviewConfirmationPending(cf, CFK);
+  check("confirmation-pending marker is set", planReviewConfirmationPending(cf, CFK) === true);
+  markPlanReviewConfirmationFailed(cf, CFK);
+  check("a failed confirmation clears the pending marker and sets the failed marker",
+    planReviewConfirmationPending(cf, CFK) === false && planReviewConfirmationFailed(cf, CFK) === true);
+  const reloaded = JSON.parse(JSON.stringify(cf));
+  check("the confirmation-failed marker survives a state save/load", planReviewConfirmationFailed(reloaded, CFK) === true);
+  const full = planReviewerRoundLines(reloaded, CFK);
+  check("after a confirmation FAIL the next brief is the full line plus previous findings",
+    full[0] === PLAN_REVIEW_FULL_LINE && isFullPlanReviewRound(full)
+    && full.join("\n").includes("Previous findings from all earlier review rounds")
+    && full.join("\n").includes("confirmation finding alpha"));
+  check("after a confirmation FAIL the full brief also asks to verify each previous finding",
+    full.join("\n").includes('"previous"') && full.join("\n").includes("Also verify each previous finding"));
+  check("a PASS after a confirmation FAIL is accepted without another confirmation",
+    planReviewPassNeedsConfirmation(reloaded, CFK) === false);
+  clearPlanReviewConfirmation(reloaded, CFK);
+  check("clearPlanReviewConfirmation clears only the pending marker", planReviewConfirmationFailed(reloaded, CFK) === true);
+  clearPlanReviewHistory(reloaded, CFK);
+  check("clearing the key clears both confirmation markers",
+    planReviewConfirmationFailed(reloaded, CFK) === false && planReviewConfirmationPending(reloaded, CFK) === false);
+  check("a cleared key asks for the exhaustive first review again",
+    planReviewerRoundLines(reloaded, CFK)[0] === PLAN_REVIEW_EXHAUSTIVE_LINE);
+}
+
+// Convergence off: the confirmation failure marker changes nothing (never set
+// there, and a full round is already the brief).
+{
+  const sOffCf = {};
+  recordPlanReviewRound(sOffCf, K, ["off finding"]);
+  markPlanReviewConfirmationFailed(sOffCf, K);
+  check("convergence off ignores the confirmation-failed marker",
+    planReviewerRoundLines(sOffCf, K, false)[0] === PLAN_REVIEW_FULL_LINE
+    && !planReviewerRoundLines(sOffCf, K, false).includes("Previous findings"));
+  check("convergence off never needs a confirmation",
+    planReviewPassNeedsConfirmation(sOffCf, K, false) === false);
+}
 
 // PASS clears the key; unrelated keys survive.
 recordPlanReviewRound(s, "speckit-stage:plan", ["x"]);
